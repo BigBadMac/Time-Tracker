@@ -1,0 +1,10 @@
+# scratch files from the build/test pipeline - never commit
+_bundle.js
+_check.js
+dbg.js
+
+# OS noise
+.DS_Store
+
+# if node tooling ever gets added
+node_modules/

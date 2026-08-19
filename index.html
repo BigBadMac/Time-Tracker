@@ -6,6 +6,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <title>Time Tracker</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="theme-color" content="#0C1C1C">
 <style>
   html,body{margin:0;padding:0;background:#080810;-webkit-text-size-adjust:100%;}
   #boot{color:#8888AA;font:14px/1.6 system-ui,sans-serif;padding:2rem;text-align:center;}
@@ -15,10 +18,15 @@
 </head>
 <body>
 <pre id="err"></pre>
-<div id="root"><div id="boot">Time Tracker build 22:15<br>
+<div id="root"><div id="boot">Time Tracker build 08-18 notify<br>
 HTML loaded &#10003; &mdash; starting scripts&hellip;<br>
 <span style="font-size:11px;opacity:.7">If this message never goes away, the scripts below it failed to run.<br>
 If you cannot see this message at all, the file itself is not being displayed.</span></div></div>
+<script>
+if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
+  window.addEventListener('load', function(){ navigator.serviceWorker.register('sw.js').catch(function(){}); });
+}
+</script>
 <script>
 window.onerror = function(msg, src, line, col, e){
   var box = document.getElementById('err');
@@ -17242,9 +17250,19 @@ var DEFAULT_DIST_PRESETS = ["Phone Call","Walk-in Visitor","Crew Question","Mach
 function pad(n){ return String(n).padStart(2,"0"); }
 function uid(){ return Math.random().toString(36).slice(2,9); }
 function fmtDur(ms, short){
-  var s=Math.floor(Math.abs(ms)/1000), h=Math.floor(s/3600), m=Math.floor((s%3600)/60), sec=s%60;
-  if(short){ if(h>0) return h+"h "+pad(m)+"m"; if(m>0) return m+"m "+pad(sec)+"s"; return sec+"s"; }
-  return pad(h)+":"+pad(m)+":"+pad(sec);
+  if(TIME_INC==="tenths"){
+    // decimal hours to the hundredth, never days: 1h 30m -> "1.50h"
+    return (Math.abs(ms)/3600000).toFixed(2)+"h";
+  }
+  var s=Math.floor(Math.abs(ms)/1000), d=Math.floor(s/86400),
+      h=Math.floor((s%86400)/3600), m=Math.floor((s%3600)/60), sec=s%60;
+  if(short){
+    if(d>0) return d+"d "+h+"h "+pad(m)+"m";
+    if(h>0) return h+"h "+pad(m)+"m";
+    if(m>0) return m+"m "+pad(sec)+"s";
+    return sec+"s";
+  }
+  return (d>0 ? d+"d " : "")+pad(h)+":"+pad(m)+":"+pad(sec);
 }
 function fmtTime(ts){ if(!ts) return "--"; var d=new Date(ts); return pad(d.getHours())+":"+pad(d.getMinutes()); }
 function fmtDate(ts){ if(!ts) return "--"; var d=new Date(ts); return (d.getMonth()+1)+"/"+d.getDate()+"/"+d.getFullYear(); }
@@ -17300,6 +17318,9 @@ var TEST_PROJECTS = [
 // long-holds are blocked and clicks are swallowed.
 var SCROLL_STATE = { scrolling:false, timer:null };
 var UI = { left:false, bottom:false, bottomClear:0, topClear:0 };
+// "standard" shows d/h/m/s; "tenths" shows decimal hours to hundredths.
+// Set from settings in applyTokens, so a flip reformats everything on the fly.
+var TIME_INC = "standard";
 // Keeps a freshly opened menu clear of the viewport edges and the floating
 // header. Scrolls when there is runway; when the page cannot scroll far
 // enough (e.g. the last lane), flips the menu to open upward instead.
@@ -17960,6 +17981,7 @@ function laneColors(){ return S.lanes || LANE_COLORS; }
 
 function applyTokens(settings){
   if(!LANE_INDEX.__built){ buildLaneIndex(); LANE_INDEX.__built=true; }
+  TIME_INC = settings.timeInc==="tenths" ? "tenths" : "standard";
   var sch = SCHEMES[schemeKeyOf(settings)] || SCHEMES["bright-pastels"];
   var mode = settings.mode==="light" ? "light" : "dark";
   var c = sch[mode];
@@ -18568,6 +18590,1054 @@ function Toggle(props){
 }
 
 // ---- SETTINGS MODAL ---------------------------------------------------------
+// ---------------- Work schedule ----------------
+// The base of all time cataloguing: which days are worked, and the hours on
+// each. Day/week/month/quarter/year rollups will all measure against this.
+var DAY_KEYS = ["mon","tue","wed","thu","fri","sat","sun"];
+var DAY_LABELS = { mon:"Monday", tue:"Tuesday", wed:"Wednesday", thu:"Thursday", fri:"Friday", sat:"Saturday", sun:"Sunday" };
+function DEFAULT_SCHEDULE(){
+  // normalizeSchedule(null) is the canonical default shape (declaration is
+  // hoisted, so the forward reference is safe)
+  return normalizeSchedule(null);
+}
+function schMinutes(day){
+  // minutes worked on a day entry; 0 when off or when the times are invalid
+  if(!day || !day.on) return 0;
+  var a=day.start.split(":"), b=day.end.split(":");
+  var m = (+b[0]*60 + +b[1]) - (+a[0]*60 + +a[1]);
+  return m>0 ? m : 0;
+}
+function fmtHours(mins){
+  if(TIME_INC==="tenths") return (mins/60).toFixed(2)+"h";
+  var h=Math.floor(mins/60), m=mins%60;
+  return m ? h+"h "+String(m).padStart(2,"0")+"m" : h+"h";
+}
+function fmtMoney(n){ return "$"+(Math.round(n*100)/100).toFixed(2); }
+// Mixes a #rrggbb color toward white; non-hex inputs pass through unchanged,
+// which just makes the pulse invisible instead of breaking the border.
+function hexBrighten(hex, amt){
+  var m=/^#([0-9a-fA-F]{6})$/.exec(String(hex||""));
+  if(!m) return hex;
+  var n=parseInt(m[1],16), r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+  function ch(c){ return Math.round(c+(255-c)*amt); }
+  return "#"+((1<<24)+(ch(r)<<16)+(ch(g)<<8)+ch(b)).toString(16).slice(1);
+}
+// The vars a pulsing border needs: base color, brightened peak, and glow
+// colors that go transparent when the theme has glow turned off.
+function pulseVars(col){
+  return { "--pulse-a":col, "--pulse-b":hexBrighten(col,0.55),
+           "--pulse-s1": S.glow ? col+"33" : "transparent",
+           "--pulse-s2": S.glow ? hexBrighten(col,0.55)+"66" : "transparent" };
+}
+
+// ---------------- Unpaid breaks ----------------
+// Breaks live on the schedule as { enabled, weekly:[...], custom:{mon:[...]} }.
+// Weekly breaks apply to every scheduled day; custom ones stack per day on
+// top. Each break is { id, name, note, start:"HH:MM", mins }. Every consumer
+// of scheduled time nets these out - that is what makes them unpaid.
+function toMin(t){
+  var a=String(t||"").split(":");
+  if(a.length<2) return null;
+  var m=(+a[0])*60+(+a[1]);
+  return isNaN(m) ? null : m;
+}
+function isoDate(d){
+  var y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,"0"), day=String(d.getDate()).padStart(2,"0");
+  return y+"-"+m+"-"+day;
+}
+// Deep-copies and back-fills any schedule shape - a fresh default, a pre-break
+// saved schedule, or a complete one - so consumers can rely on the full shape.
+function normalizeSchedule(src){
+  var sch={};
+  DAY_KEYS.forEach(function(k){
+    var d=(src&&src[k])||{};
+    sch[k]={ on: d.on!==undefined ? !!d.on : (k!=="sat"&&k!=="sun"),
+             start:d.start||"08:00", end:d.end||"16:30" };
+  });
+  var ub=(src&&src.unpaidBreaks)||{};
+  var custom={};
+  DAY_KEYS.forEach(function(k){
+    custom[k]=((ub.custom&&ub.custom[k])||[]).map(function(b){ return Object.assign({},b); });
+  });
+  sch.unpaidBreaks={ enabled:!!ub.enabled,
+    weekly:(ub.weekly||[]).map(function(b){ return Object.assign({},b); }),
+    custom:custom };
+  // Payroll: which day the work week starts on, which days count as
+  // overtime, how overtime pays, and the pay cycle. Unknown values fall back
+  // to safe defaults so a stale or hand-edited save can't wedge the app.
+  var pr=(src&&src.payroll)||{};
+  var otSrc=Array.isArray(pr.otDays)?pr.otDays:[];
+  var otKind=(pr.ot&&(pr.ot.kind==="2x"||pr.ot.kind==="flat"))?pr.ot.kind:"1.5x";
+  var flatExtra=(pr.ot&&+pr.ot.flatExtra>0)?+pr.ot.flatExtra:6.25;
+  var excludeHrs=(pr.ot&&+pr.ot.excludeHrs>0)?+pr.ot.excludeHrs:0;
+  var excludeUnit=(pr.ot&&pr.ot.excludeUnit==="week")?"week":"cycle";
+  var period=["daily","weekly","biweekly","monthly"].indexOf(pr.cycle&&pr.cycle.period)>=0?pr.cycle.period:"weekly";
+  sch.payroll={
+    weekStart: DAY_KEYS.indexOf(pr.weekStart)>=0 ? pr.weekStart : "mon",
+    otDays: DAY_KEYS.filter(function(k){ return otSrc.indexOf(k)>=0; }),
+    ot: { kind:otKind, flatExtra:flatExtra, excludeHrs:excludeHrs, excludeUnit:excludeUnit },
+    pay: { basis:(pr.pay&&pr.pay.basis==="salary")?"salary":"hourly",
+           rate:(pr.pay&&+pr.pay.rate>0)?+pr.pay.rate:0,
+           salary:(pr.pay&&+pr.pay.salary>0)?+pr.pay.salary:0 },
+    cycle: { period:period, start:(pr.cycle&&pr.cycle.start)||isoDate(new Date()) }
+  };
+  return sch;
+}
+function dayBreaks(sch,k){
+  var ub=sch&&sch.unpaidBreaks;
+  if(!ub||!ub.enabled) return [];
+  return (ub.weekly||[]).concat((ub.custom&&ub.custom[k])||[]);
+}
+// Minutes of one break that land inside the day's shift; clipped to the
+// window, so a break outside working hours deducts nothing and one straddling
+// the end deducts only the part that fits. uptoMin limits the count to time
+// already gone by (for pace).
+function breakOverlapMins(day, br, uptoMin){
+  if(!day||!day.on) return 0;
+  var s=toMin(day.start), e=toMin(day.end);
+  if(s==null||e==null||e<=s) return 0;
+  var bs=toMin(br.start), d=Math.max(0, +br.mins||0);
+  if(bs==null||d<=0) return 0;
+  var hi=Math.min(e, uptoMin==null ? e : Math.max(s, uptoMin));
+  var lo=Math.max(s,bs), top=Math.min(hi, bs+d);
+  return Math.max(0, top-lo);
+}
+function schDayBreakMins(sch,k,uptoMin){
+  var day=sch&&sch[k];
+  return dayBreaks(sch,k).reduce(function(a,b){ return a+breakOverlapMins(day,b,uptoMin); },0);
+}
+// Net scheduled minutes for a day: shift length minus unpaid breaks, floor 0.
+function schNetMinutes(sch,k){
+  var g=schMinutes(sch&&sch[k]);
+  if(!g) return 0;
+  return Math.max(0, g - schDayBreakMins(sch,k));
+}
+// The iOS-safe time field, shared by the schedule and breaks modals. The
+// appearance reset must ride inline (the stylesheet rule alone did not defeat
+// the native bubble) and the value color is pinned with text-fill-color.
+function TIME_FIELD_STYLE(col, bdrCol){
+  return { WebkitAppearance:"none", appearance:"none", colorScheme:S.mode,
+           background:S.inputBg, color:col, WebkitTextFillColor:col,
+           border:"1.5px solid "+bdrCol, borderRadius:"10px",
+           padding:"0.42rem 0.25rem", minHeight:"2.1rem", fontFamily:S.fontMono,
+           fontSize:"0.88rem", boxSizing:"border-box" };
+}
+
+// ---------------- Period math ----------------
+// Every rollup is a half-open range [start,end) anchored to local midnight, so
+// a log lands in exactly one period and a DST shift cannot double-count an
+// hour at the seam. Month/quarter/year arithmetic always sets the date to the
+// 1st before moving the month, so the 31st never spills into the next month.
+var PERIODS = ["day","week","month","quarter","year"];
+var PERIOD_LABELS = { day:"Day", week:"Week", month:"Month", quarter:"Qtr", year:"Year", pay:"Pay" };
+var PERIOD_LONG   = { day:"day", week:"week", month:"month", quarter:"quarter", year:"year", pay:"pay period" };
+
+function startOfDay(d){ var x=new Date(d); x.setHours(0,0,0,0); return x; }
+function addDays(d,n){ var x=new Date(d); x.setDate(x.getDate()+n); x.setHours(0,0,0,0); return x; }
+// Weeks default to Monday-first (matching the Work Schedule row order) but the
+// boundary follows payroll.weekStart when one is passed - a Friday-to-Thursday
+// work week reports as exactly that.
+function dayKeyOf(d){ return DAY_KEYS[(d.getDay()+6)%7]; }
+function weekStartJsDay(ws){ var i=DAY_KEYS.indexOf(ws); return i<0 ? 1 : (i+1)%7; }
+function startOfWeek(d, ws){
+  var x=startOfDay(d);
+  var wsJs=weekStartJsDay(ws===undefined?"mon":ws);
+  return addDays(x, -((x.getDay()-wsJs+7)%7));
+}
+function startOfMonth(d){ var x=startOfDay(d); x.setDate(1); return x; }
+function startOfQuarter(d){ var x=startOfMonth(d); x.setMonth(Math.floor(x.getMonth()/3)*3,1); return x; }
+function startOfYear(d){ var x=startOfDay(d); x.setMonth(0,1); return x; }
+
+// offset walks backwards through history: 0 is the current period, -1 the one
+// before it. Forward past 0 is never offered. weekStart only affects weeks.
+function periodRange(kind, offset, ref, weekStart){
+  var now = ref ? new Date(ref) : new Date();
+  var s, e;
+  if(kind==="day"){ s=addDays(now, offset); e=addDays(s,1); }
+  else if(kind==="week"){ s=addDays(startOfWeek(now, weekStart), offset*7); e=addDays(s,7); }
+  else if(kind==="month"){ s=startOfMonth(now); s.setMonth(s.getMonth()+offset,1); e=new Date(s); e.setMonth(e.getMonth()+1,1); }
+  else if(kind==="quarter"){ s=startOfQuarter(now); s.setMonth(s.getMonth()+offset*3,1); e=new Date(s); e.setMonth(e.getMonth()+3,1); }
+  else { s=startOfYear(now); s.setFullYear(s.getFullYear()+offset,0,1); e=new Date(s); e.setFullYear(e.getFullYear()+1,0,1); }
+  return { kind:kind, offset:offset, start:s.getTime(), end:e.getTime(), startDate:s, endDate:e };
+}
+function periodLabel(r){
+  var s=r.startDate, last=new Date(r.end-1);
+  if(r.kind==="pay"){
+    if(r.period==="daily") return s.toLocaleDateString([], {weekday:"long",month:"long",day:"numeric"});
+    return s.toLocaleDateString([], {month:"short",day:"numeric"})+" - "+
+           last.toLocaleDateString([], {month:"short",day:"numeric",year:"numeric"});
+  }
+  if(r.kind==="day"){
+    var sameYear = s.getFullYear()===new Date().getFullYear();
+    return s.toLocaleDateString([], sameYear ? {weekday:"long",month:"long",day:"numeric"}
+                                             : {weekday:"short",month:"short",day:"numeric",year:"numeric"});
+  }
+  if(r.kind==="week") return s.toLocaleDateString([], {month:"short",day:"numeric"})+" - "+
+                             last.toLocaleDateString([], {month:"short",day:"numeric",year:"numeric"});
+  if(r.kind==="month") return s.toLocaleDateString([], {month:"long",year:"numeric"});
+  if(r.kind==="quarter") return "Q"+(Math.floor(s.getMonth()/3)+1)+" "+s.getFullYear();
+  return String(s.getFullYear());
+}
+function periodRel(kind, offset){
+  if(offset===0) return kind==="day" ? "Today" : "This "+PERIOD_LONG[kind];
+  if(offset===-1) return kind==="day" ? "Yesterday" : "Last "+PERIOD_LONG[kind];
+  return null;
+}
+
+// ---------------- Pay cycles ----------------
+// Half-open [start,end) ranges like periodRange, but anchored to the payroll
+// cycle start date. offset 0 is the cycle containing ref, negatives walk back.
+function dayDiff(a,b){ return Math.round((a-b)/86400000); }
+function clampMonthDay(y,m,day){
+  // pin the cycle day into the month: a cycle anchored on the 31st runs from
+  // the last day of shorter months instead of spilling over
+  var last=new Date(y,m+1,0).getDate();
+  var d=new Date(y,m,Math.min(day,last));
+  d.setHours(0,0,0,0);
+  return d;
+}
+function payCycleRange(payroll, offset, ref){
+  var now=ref?new Date(ref):new Date();
+  var c=(payroll&&payroll.cycle)||{};
+  var period=["daily","weekly","biweekly","monthly"].indexOf(c.period)>=0?c.period:"weekly";
+  var anchor=c.start?new Date(String(c.start)+"T00:00:00"):startOfDay(now);
+  if(isNaN(anchor.getTime())) anchor=startOfDay(now);
+  anchor.setHours(0,0,0,0);
+  var s,e;
+  if(period==="daily"){ s=addDays(now,offset); e=addDays(s,1); }
+  else if(period==="monthly"){
+    var day=anchor.getDate();
+    var y=now.getFullYear(), m=now.getMonth();
+    var cand=clampMonthDay(y,m,day);
+    if(startOfDay(now).getTime()<cand.getTime()) m-=1;
+    s=clampMonthDay(y, m+offset, day);
+    e=clampMonthDay(y, m+offset+1, day);
+  } else {
+    var len = period==="weekly" ? 7 : 14;
+    // floor keeps this correct on both sides of the anchor, so a start date
+    // set in the future still resolves the cycle containing today
+    var idx=Math.floor(dayDiff(startOfDay(now), anchor)/len);
+    s=addDays(anchor,(idx+offset)*len);
+    e=addDays(s,len);
+  }
+  return { kind:"pay", period:period, offset:offset, start:s.getTime(), end:e.getTime(), startDate:s, endDate:e };
+}
+// Overtime inside a range grouped by week (weekStart-aligned), for per-week
+// exclusion allowances. Same rules as the rollup: start-time assigns the day,
+// clocked-in time never counts.
+function overtimeByWeek(logs, range, otDays, weekStart){
+  var otSet={};
+  (otDays||[]).forEach(function(k){ otSet[k]=1; });
+  var map={}, keys=[];
+  (logs||[]).forEach(function(l){
+    if(!l || l.type==="atwork") return;
+    var dur=l.duration||0;
+    if(dur<=0) return;
+    if(!(l.startTime>=range.start && l.startTime<range.end)) return;
+    var d=new Date(l.startTime);
+    if(!otSet[dayKeyOf(d)]) return;
+    var wk=startOfWeek(d, weekStart).getTime();
+    if(map[wk]===undefined){ map[wk]=0; keys.push(wk); }
+    map[wk]+=dur;
+  });
+  keys.sort();
+  return keys.map(function(k){ return { week:k, otMs:map[k] }; });
+}
+
+// ---------------- Tracking notifications ----------------
+// Three scopes: today's workday, the current pay cycle, and one chosen report
+// period. Each fires when tracked time meets the scheduled amount, plus up to
+// two lead warnings pegged to the scope's end time (workday: the shift's end
+// clock; cycle/period: the range boundary), each up to 48h ahead.
+var NOTIF_SCOPES=["day","cycle","period"];
+function normalizeNotifs(src){
+  function leads(a){
+    var arr=Array.isArray(a)?a:[];
+    var out=[];
+    for(var i=0;i<2;i++){
+      var l=arr[i]||{};
+      var hrs=+l.hrs;
+      if(!(hrs>0)) hrs=(i===0?1:24);
+      out.push({ on:!!l.on, hrs:Math.min(48,hrs) });
+    }
+    return out;
+  }
+  var s=src||{};
+  var kind=["week","month","quarter","year"].indexOf(s.period&&s.period.kind)>=0?s.period.kind:"week";
+  return {
+    day:    { on:!!(s.day&&s.day.on),    leads:leads(s.day&&s.day.leads) },
+    cycle:  { on:!!(s.cycle&&s.cycle.on), leads:leads(s.cycle&&s.cycle.leads) },
+    period: { on:!!(s.period&&s.period.on), kind:kind, leads:leads(s.period&&s.period.leads) }
+  };
+}
+function trackedMsBetween(logs, startMs, endMs){
+  var t=0;
+  (logs||[]).forEach(function(l){
+    if(!l || l.type==="atwork") return;
+    if(l.startTime>=startMs && l.startTime<endMs) t+=(l.duration||0);
+  });
+  return t;
+}
+function notifScopeRange(scopeKey, cfg, schedule, nowMs){
+  if(scopeKey==="day"){
+    var d=startOfDay(new Date(nowMs));
+    var dk=dayKeyOf(d), day=schedule&&schedule[dk];
+    var leadEnd=null;
+    if(day && day.on){
+      var e=toMin(day.end);
+      if(e!=null) leadEnd=d.getTime()+e*60000;
+    }
+    return { start:d.getTime(), end:addDays(d,1).getTime(), leadEnd:leadEnd,
+             schedMs:schNetMinutes(schedule,dk)*60000, label:"Workday" };
+  }
+  if(scopeKey==="cycle"){
+    var r=payCycleRange(schedule&&schedule.payroll, 0, new Date(nowMs));
+    return { start:r.start, end:r.end, leadEnd:r.end,
+             schedMs:scheduledMinutes(schedule,r.start,r.end)*60000, label:"Pay cycle" };
+  }
+  var kind=(cfg&&cfg.kind)||"week";
+  var ws=(schedule&&schedule.payroll&&schedule.payroll.weekStart)||"mon";
+  var r2=periodRange(kind, 0, new Date(nowMs), ws);
+  var labels={week:"Week",month:"Month",quarter:"Quarter",year:"Year"};
+  return { start:r2.start, end:r2.end, leadEnd:r2.end,
+           schedMs:scheduledMinutes(schedule,r2.start,r2.end)*60000, label:labels[kind] };
+}
+// Returns the notifications due right now that haven't fired for this period
+// instance yet. Pure: the caller records keys into `fired` and persists them.
+function evalNotifications(cfgAll, schedule, logs, nowMs, fired){
+  var out=[];
+  if(!cfgAll) return out;
+  fired=fired||{};
+  NOTIF_SCOPES.forEach(function(sk){
+    var cfg=cfgAll[sk];
+    if(!cfg || !cfg.on) return;
+    var info=notifScopeRange(sk, cfg, schedule, nowMs);
+    var tracked=trackedMsBetween(logs, info.start, info.end);
+    if(info.schedMs>0 && tracked>=info.schedMs){
+      var mk=sk+"|met|"+info.start;
+      if(!fired[mk]) out.push({ key:mk, title:info.label+" target met",
+        body:"Tracked "+fmtDur(tracked,true)+" of "+fmtDur(info.schedMs,true)+" scheduled." });
+    }
+    (cfg.leads||[]).forEach(function(ld,i){
+      if(!ld || !ld.on) return;
+      var hrs=Math.min(48, Math.max(0, +ld.hrs||0));
+      if(hrs<=0 || info.leadEnd==null) return;
+      var at=info.leadEnd - hrs*3600000;
+      if(nowMs>=at && nowMs<info.leadEnd){
+        var k=sk+"|lead"+i+"|"+info.start;
+        if(!fired[k]){
+          var rem=Math.max(0, info.schedMs-tracked);
+          out.push({ key:k,
+            title:info.label+" ends in "+(hrs%1 ? hrs.toFixed(1) : hrs)+"h",
+            body: rem>0 ? fmtDur(rem,true)+" of scheduled time not yet tracked."
+                        : "Scheduled time already met." });
+        }
+      }
+    });
+  });
+  return out;
+}
+
+// ---------------- Schedule measurement ----------------
+// Sum of the work schedule across every calendar day the range touches, net
+// of unpaid breaks. This is the denominator every rollup measures against.
+function scheduledMinutes(schedule, startMs, endMs){
+  if(!schedule || !(endMs>startMs)) return 0;
+  var total=0, d=startOfDay(new Date(startMs)), guard=0;
+  while(d.getTime()<endMs && guard++<800){ total+=schNetMinutes(schedule, dayKeyOf(d)); d=addDays(d,1); }
+  return total;
+}
+// How much of the period's schedule has already gone by. Today is pro-rated
+// against its own window, so the pace figure moves through the day instead of
+// jumping a full shift at midnight.
+function scheduledToDate(schedule, startMs, endMs, nowMs){
+  if(!schedule) return 0;
+  if(nowMs>=endMs) return scheduledMinutes(schedule, startMs, endMs);
+  if(nowMs<=startMs) return 0;
+  var midnight=startOfDay(new Date(nowMs));
+  var mins=scheduledMinutes(schedule, startMs, midnight.getTime());
+  var dk=dayKeyOf(midnight), day=schedule[dk];
+  if(day && day.on){
+    var s0=toMin(day.start), e0=toMin(day.end);
+    if(s0!=null && e0!=null && e0>s0){
+      var t=new Date(nowMs), cur=t.getHours()*60+t.getMinutes();
+      // gross shift time gone by, minus the part of each break already behind
+      // us - sitting inside the lunch window, pace holds still
+      var gross=Math.max(0, Math.min(cur,e0)-s0);
+      if(gross>0) mins += Math.max(0, gross - schDayBreakMins(schedule, dk, cur));
+    }
+  }
+  return mins;
+}
+
+// ---------------- Rollup aggregation ----------------
+function findProj(projects, id){
+  for(var i=0;i<projects.length;i++){ if(projects[i].id===id) return projects[i]; }
+  return null;
+}
+// Walk to the top of the parent chain. Guarded against both a missing link
+// (deleted parent) and a cycle, either of which would otherwise spin forever.
+function rootOf(projects, id){
+  var cur=id, seen={}, guard=0;
+  while(guard++<40){
+    var p=findProj(projects,cur);
+    if(!p || p.parentId==null) return cur;
+    if(seen[cur]) return cur;
+    seen[cur]=1; cur=p.parentId;
+  }
+  return cur;
+}
+function byMsDesc(a,b){ return b.ms-a.ms; }
+
+// Aggregates one period into lane > project > sub-task totals. Sub-task time is
+// folded into its root project as well as listed beneath it, so a parent row
+// always covers its children and a lane total is never double-counted.
+// Logs are matched on startTime: a session belongs to the period it began in.
+function buildRollup(o){
+  var logs=o.logs||[], projects=o.projects||[], range=o.range;
+  function inRange(t){ return t>=range.start && t<range.end; }
+  // A log is overtime when it starts on a designated overtime day - the same
+  // start-time rule that assigns a session to a period assigns it a day.
+  var otSet={};
+  (o.otDays||[]).forEach(function(k){ otSet[k]=1; });
+  var trackedMs=0, clockedMs=0, otMs=0, days={};
+  var buckets={}, keys=[];
+  function bucket(k){
+    var key = k==null ? "__none" : k;
+    if(!buckets[key]){ buckets[key]={ key:key, ms:0, map:{}, ids:[] }; keys.push(key); }
+    return buckets[key];
+  }
+  logs.forEach(function(l){
+    if(!l || !inRange(l.startTime)) return;
+    var dur=l.duration||0;
+    if(l.type==="atwork"){ clockedMs+=dur; return; }
+    if(dur<=0) return;
+    trackedMs+=dur;
+    if(otSet[dayKeyOf(new Date(l.startTime))]) otMs+=dur;
+    days[new Date(l.startTime).toDateString()]=1;
+    var rid=rootOf(projects, l.projectId);
+    var rp=findProj(projects, rid);
+    var b=bucket((rp&&rp.lane) || l.lane || null);
+    b.ms+=dur;
+    if(!b.map[rid]){
+      // With the project deleted, the only name left is whatever the log kept.
+      // parentName describes the root only when the root really is the parent;
+      // for a top-level log it would mislabel the row.
+      var fallback = rid===l.projectId ? l.projectName : (l.parentName || l.projectName);
+      b.map[rid]={ id:rid, name:(rp&&rp.name) || fallback || "(deleted)",
+                   ms:0, kids:{}, kidIds:[], gone:!rp };
+      b.ids.push(rid);
+    }
+    var pe=b.map[rid];
+    pe.ms+=dur;
+    // A log whose own project is not the root is a sub-task of it.
+    if(l.projectId!==rid){
+      if(!pe.kids[l.projectId]){
+        pe.kids[l.projectId]={ id:l.projectId, name:l.projectName||"(deleted)", ms:0 };
+        pe.kidIds.push(l.projectId);
+      }
+      pe.kids[l.projectId].ms+=dur;
+    }
+  });
+  // Lanes follow the user's lane order; anything left over (a lane deleted
+  // since the time was logged) sorts to the end by size.
+  var order=o.laneOrder||[];
+  keys.sort(function(a,b){
+    var ia=order.indexOf(a), ib=order.indexOf(b);
+    if(ia<0) ia=999;
+    if(ib<0) ib=999;
+    if(ia!==ib) return ia-ib;
+    return buckets[b].ms-buckets[a].ms;
+  });
+  var lanes=keys.map(function(k){
+    var b=buckets[k];
+    var m = k==="__none" ? { label:"Unassigned", accent:S.textMuted } : getMeta(o.laneMeta, k);
+    var projs=b.ids.map(function(id){ return b.map[id]; }).sort(byMsDesc);
+    projs.forEach(function(p){
+      p.children=p.kidIds.map(function(cid){ return p.kids[cid]; }).sort(byMsDesc);
+    });
+    return { key:k, label:m.label, accent:m.accent, ms:b.ms, projects:projs };
+  });
+  var dist=(o.disruptions||[]).filter(function(d){ return d.endTime && inRange(d.startTime); });
+  var brks=(o.breaks||[]).filter(function(b){ return b.endTime && inRange(b.startTime); });
+  return {
+    trackedMs:trackedMs, clockedMs:clockedMs, otMs:otMs, regMs:trackedMs-otMs, lanes:lanes,
+    distMs:dist.reduce(function(a,d){ return a+(d.duration||0); },0), distCount:dist.length,
+    breakMs:brks.reduce(function(a,b){ return a+(b.duration||0); },0), breakCount:brks.length,
+    activeDays:Object.keys(days).length
+  };
+}
+
+// ---- PAY & WORK WEEK MODAL --------------------------------------------------
+// Week boundary, overtime days and rate, and the pay cycle. Edits a draft of
+// schedule.payroll; Done hands it back to the schedule draft, so nothing
+// commits until Save Schedule.
+var DAY_CHIP={ mon:"Mo", tue:"Tu", wed:"We", thu:"Th", fri:"Fr", sat:"Sa", sun:"Su" };
+function PayWorkWeekModal(props){
+  var prS=useState(function(){
+    var src=props.value||{};
+    return { weekStart:src.weekStart||"mon",
+             otDays:(src.otDays||[]).slice(),
+             ot:Object.assign({kind:"1.5x",flatExtra:6.25,excludeHrs:0,excludeUnit:"cycle"}, src.ot||{}),
+             pay:Object.assign({basis:"hourly",rate:0,salary:0}, src.pay||{}),
+             cycle:Object.assign({period:"weekly",start:isoDate(new Date())}, src.cycle||{}) };
+  });
+  var setPr=prS[1]; var pr=prS[0];
+  function mutate(fn){
+    setPr(function(prev){
+      var next={ weekStart:prev.weekStart, otDays:prev.otDays.slice(),
+                 ot:Object.assign({},prev.ot), pay:Object.assign({},prev.pay),
+                 cycle:Object.assign({},prev.cycle) };
+      fn(next);
+      return next;
+    });
+  }
+  var sectionHead={fontSize:"0.72rem",textTransform:"uppercase",letterSpacing:"0.08em",
+                   color:S.textDim,fontWeight:700,fontFamily:S.fontBody,marginBottom:"0.15rem"};
+  var sectionNote={fontSize:"0.76rem",color:S.textMuted,fontFamily:S.fontBody,marginBottom:"0.55rem"};
+  var sectionWrap={marginBottom:"1.1rem"};
+
+  function chipRow(kindLabel, isOn, onPick){
+    return React.createElement("div", { style:{display:"flex",gap:"0.3rem"} },
+      DAY_KEYS.map(function(k){
+        var on=isOn(k);
+        return React.createElement("button", { key:k, "data-flat":true, "data-chip":kindLabel+":"+k,
+          "aria-pressed":on?"true":"false",
+          onClick:function(){ haptic(8); onPick(k); },
+          style:{flex:1,minWidth:0,background:on?S.infoBg:S.bg1,
+                 border:"1.5px solid "+(on?S.actionBdr:S.border),borderRadius:S.radius3,
+                 padding:"0.5rem 0",color:on?S.infoText:S.textDim,fontWeight:on?700:600,
+                 fontSize:"0.74rem",fontFamily:S.fontBody,cursor:"pointer"} },
+          DAY_CHIP[k]);
+      }));
+  }
+  function segRow(kindLabel, opts, value, onPick){
+    return React.createElement("div", { style:{display:"flex",gap:"0.3rem"} },
+      opts.map(function(o){
+        var on=o.k===value;
+        return React.createElement("button", { key:o.k, "data-flat":true, "data-seg":kindLabel+":"+o.k,
+          onClick:function(){ haptic(8); onPick(o.k); },
+          style:{flex:1,minWidth:0,background:on?S.infoBg:S.bg1,
+                 border:"1.5px solid "+(on?S.actionBdr:S.border),borderRadius:S.radius3,
+                 padding:"0.5rem 0.1rem",color:on?S.infoText:S.textDim,fontWeight:on?700:600,
+                 fontSize:"0.74rem",fontFamily:S.fontBody,cursor:"pointer",whiteSpace:"nowrap"} },
+          o.label);
+      }));
+  }
+
+  var flatBad = pr.ot.kind==="flat" && !(+pr.ot.flatExtra>0);
+  var otHint = pr.ot.kind==="flat"
+    ? "Overtime hours pay the regular rate plus this amount."
+    : "Overtime hours pay "+(pr.ot.kind==="2x"?"double":"1.5 times")+" the regular rate.";
+  var cycleHints={ daily:"Each day is its own pay period, so no start date is needed.",
+                   weekly:"The pay week runs 7 days from the start date's weekday.",
+                   biweekly:"Two-week periods, counted from the start date.",
+                   monthly:"Runs monthly from the start date's day of the month; shorter months clamp to their last day." };
+
+  var isSalary = pr.pay.basis==="salary";
+  var baseBad = isSalary ? !(+pr.pay.salary>0) : !(+pr.pay.rate>0);
+  var moneyField = function(field, width){
+    var bad = !(+pr.pay[field]>0);
+    return React.createElement("input", { type:"number", inputMode:"decimal", min:0, step:0.25,
+      value:pr.pay[field],
+      onChange:function(e){ mutate(function(n){ n.pay[field]=e.target.value; }); },
+      style:Object.assign({},INPUT_STYLE,{width:width,flexShrink:0,padding:"0.42rem 0.4rem",
+        fontFamily:S.fontMono,fontSize:"0.88rem",minHeight:"2.1rem",boxSizing:"border-box",textAlign:"center",
+        border:"2px solid "+(bad?S.dangerText:S.border), color:bad?S.dangerText:S.text}) });
+  };
+  return React.createElement(Modal, { title:"Pay & Work Week", onClose:props.onClose, wide:true,
+    onSave:function(){ props.onDone(pr); }, saveLabel:"Done" },
+    React.createElement("div", { style:sectionWrap },
+      React.createElement("div", { style:sectionHead }, "Base Pay"),
+      React.createElement("div", { style:sectionNote },
+        "All pay calculations are gross and do not include any state or federal deductions."),
+      segRow("basis", [ {k:"hourly",label:"Hourly"}, {k:"salary",label:"Salary"} ],
+        pr.pay.basis, function(k){ mutate(function(n){ n.pay.basis=k; }); }),
+      React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",marginTop:"0.55rem"} },
+        React.createElement("span", { style:{color:S.textDim,fontFamily:S.fontMono,fontSize:"0.95rem",flexShrink:0} }, "$"),
+        isSalary ? moneyField("salary","110px") : moneyField("rate","84px"),
+        React.createElement("span", { style:{fontSize:"0.8rem",color:S.textDim,fontFamily:S.fontBody} },
+          isSalary ? "per pay period" : "per hour")
+      ),
+      isSalary && React.createElement("div", { style:{marginTop:"0.4rem",fontSize:"0.72rem",
+          color:S.textMuted,fontFamily:S.fontBody} },
+        "Overtime multipliers use the effective rate: salary divided by the scheduled hours in the pay period.")
+    ),
+    React.createElement("div", { style:sectionWrap },
+      React.createElement("div", { style:sectionHead }, "Week Starts On"),
+      React.createElement("div", { style:sectionNote }, "Sets the week boundary for reports and weekly pay."),
+      chipRow("ws", function(k){ return pr.weekStart===k; },
+        function(k){ mutate(function(n){ n.weekStart=k; }); })
+    ),
+    React.createElement("div", { style:sectionWrap },
+      React.createElement("div", { style:sectionHead }, "Overtime Days"),
+      React.createElement("div", { style:sectionNote }, "Days where worked time counts as overtime."),
+      chipRow("ot", function(k){ return pr.otDays.indexOf(k)>=0; },
+        function(k){ mutate(function(n){
+          var i=n.otDays.indexOf(k);
+          if(i>=0) n.otDays.splice(i,1); else n.otDays.push(k);
+        }); })
+    ),
+    React.createElement("div", { style:sectionWrap },
+      React.createElement("div", { style:sectionHead }, "Overtime Rate"),
+      React.createElement("div", { style:sectionNote }, otHint),
+      segRow("otk", [ {k:"1.5x",label:"1.5x"}, {k:"2x",label:"2x"}, {k:"flat",label:"+$/hr"} ],
+        pr.ot.kind, function(k){ mutate(function(n){ n.ot.kind=k; }); }),
+      pr.ot.kind==="flat" && React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",marginTop:"0.55rem"} },
+        React.createElement("span", { style:{color:S.textDim,fontFamily:S.fontMono,fontSize:"0.95rem",flexShrink:0} }, "$"),
+        React.createElement("input", { type:"number", inputMode:"decimal", min:0.25, step:0.25, value:pr.ot.flatExtra,
+          onChange:function(e){ mutate(function(n){ n.ot.flatExtra=e.target.value; }); },
+          style:Object.assign({},INPUT_STYLE,{width:"84px",flexShrink:0,padding:"0.42rem 0.4rem",
+            fontFamily:S.fontMono,fontSize:"0.88rem",minHeight:"2.1rem",boxSizing:"border-box",textAlign:"center",
+            border:"2px solid "+(flatBad?S.dangerText:S.border), color:flatBad?S.dangerText:S.text}) }),
+        React.createElement("span", { style:{fontSize:"0.8rem",color:S.textDim,fontFamily:S.fontBody} }, "more per hour")
+      ),
+      React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",marginTop:"0.55rem"} },
+        React.createElement("span", { style:{fontSize:"0.8rem",color:S.textDim,fontFamily:S.fontBody,flexShrink:0} }, "Hours excluded"),
+        React.createElement("input", { type:"number", inputMode:"numeric", min:0, step:1, value:pr.ot.excludeHrs,
+          onChange:function(e){ mutate(function(n){ n.ot.excludeHrs=e.target.value; }); },
+          style:Object.assign({},INPUT_STYLE,{width:"58px",flexShrink:0,padding:"0.42rem 0.4rem",
+            fontFamily:S.fontMono,fontSize:"0.88rem",minHeight:"2.1rem",boxSizing:"border-box",textAlign:"center",
+            border:"2px solid "+S.border, color:S.text}) }),
+        React.createElement("span", { style:{fontSize:"0.8rem",color:S.textDim,fontFamily:S.fontBody} }, "hours")
+      ),
+      React.createElement("div", { style:{marginTop:"0.45rem"} },
+        segRow("exu", [ {k:"cycle",label:"Per pay cycle"}, {k:"week",label:"Per week"} ],
+          pr.ot.excludeUnit==="week"?"week":"cycle",
+          function(k){ mutate(function(n){ n.ot.excludeUnit=k; }); })
+      ),
+      React.createElement("div", { style:{marginTop:"0.4rem",fontSize:"0.72rem",color:S.textMuted,fontFamily:S.fontBody} },
+        "The first excluded hours of overtime "+
+        (pr.ot.excludeUnit==="week" ? "each week " : "each pay cycle ")+
+        (pr.pay.basis==="salary"
+          ? "are covered by salary - no extra pay."
+          : "pay the base rate, not the overtime rate."))
+    ),
+    React.createElement("div", { style:{marginBottom:"0.4rem"} },
+      React.createElement("div", { style:sectionHead }, "Pay Cycle"),
+      React.createElement("div", { style:sectionNote }, cycleHints[pr.cycle.period]),
+      segRow("cyc", [ {k:"daily",label:"Daily"}, {k:"weekly",label:"Weekly"},
+                      {k:"biweekly",label:"Biweekly"}, {k:"monthly",label:"Monthly"} ],
+        pr.cycle.period, function(k){ mutate(function(n){ n.cycle.period=k; }); }),
+      pr.cycle.period!=="daily" && React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",marginTop:"0.55rem"} },
+        React.createElement("span", { style:{fontSize:"0.8rem",color:S.textDim,fontFamily:S.fontBody,flexShrink:0} }, "Cycle start"),
+        React.createElement("input", { type:"date", value:pr.cycle.start,
+          onChange:function(e){ mutate(function(n){ n.cycle.start=e.target.value; }); },
+          style:Object.assign(TIME_FIELD_STYLE(S.text, S.border), { flex:"1 1 auto", minWidth:"130px", maxWidth:"170px" }) })
+      )
+    )
+  );
+}
+
+function WorkScheduleModal(props){
+  var draftS=useState(function(){
+    // normalize doubles as the deep copy, so Cancel discards cleanly and the
+    // draft always carries the full shape including unpaidBreaks
+    return normalizeSchedule(props.schedule);
+  });
+  var setDraft=draftS[1]; var draft=draftS[0];
+  var showBreaksS=useState(false); var setShowBreaks=showBreaksS[1]; var showBreaks=showBreaksS[0];
+  var showPayS=useState(false); var setShowPay=showPayS[1]; var showPay=showPayS[0];
+  function patch(k, field, value){
+    setDraft(function(prev){
+      // day edits only touch the one day; unpaidBreaks rides along by reference
+      var next=Object.assign({},prev);
+      next[k]=Object.assign({},prev[k]);
+      next[k][field]=value;
+      return next;
+    });
+  }
+  function setUB(ub){
+    setDraft(function(prev){ return Object.assign({},prev,{unpaidBreaks:ub}); });
+  }
+  function setPR(pr){
+    setDraft(function(prev){ return Object.assign({},prev,{payroll:pr}); });
+  }
+  var ub=draft.unpaidBreaks;
+  var pr=draft.payroll;
+  var CYCLE_LABELS={daily:"Daily",weekly:"Weekly",biweekly:"Biweekly",monthly:"Monthly"};
+  var basisTag = pr.pay.basis==="salary"
+    ? "Salary"
+    : (+pr.pay.rate>0 ? "Hourly "+fmtMoney(+pr.pay.rate)+"/hr" : "Hourly");
+  var paySummary = basisTag+" \u00b7 "+DAY_LABELS[pr.weekStart]+" start \u00b7 "+CYCLE_LABELS[pr.cycle.period]+" pay \u00b7 OT "+
+    (pr.ot.kind==="flat" ? "+$"+pr.ot.flatExtra+"/hr" : pr.ot.kind) +
+    (+pr.ot.excludeHrs>0 ? " after "+pr.ot.excludeHrs+"h"+(pr.ot.excludeUnit==="week"?"/wk":"") : "") +
+    (pr.otDays.length ? " ("+pr.otDays.map(function(k){ return DAY_CHIP[k]; }).join(" ")+")" : "");
+  var grossWeek = DAY_KEYS.reduce(function(a,k){ return a+schMinutes(draft[k]); },0);
+  var weekMins  = DAY_KEYS.reduce(function(a,k){ return a+schNetMinutes(draft,k); },0);
+  var breakWeek = grossWeek - weekMins;
+  var timeInput = function(k, field){
+    var invalid = draft[k].on && schMinutes(draft[k])===0;
+    var col = draft[k].on ? (invalid?S.dangerText:S.text) : S.textMuted;
+    return React.createElement("input", { type:"time", value:draft[k][field], disabled:!draft[k].on,
+      onChange:function(e){ patch(k, field, e.target.value); },
+      style:Object.assign(TIME_FIELD_STYLE(col, invalid?S.dangerText:S.border),
+        { flex:"0 1 94px", minWidth:"80px", opacity:draft[k].on?1:0.45 }) });
+  };
+  return React.createElement(React.Fragment, null,
+    React.createElement(Modal, { title:"Work Schedule", onClose:props.onClose, wide:true,
+    onSave:function(){ props.onSave(draft); }, saveLabel:"Save Schedule" },
+    React.createElement("div", { style:{fontSize:"0.8rem",color:S.textDim,marginBottom:"0.9rem"} },
+      "Days and hours you normally work. Reports will measure tracked time against this."),
+    // ---- pay & work week ----
+    React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.6rem",padding:"0.15rem 0 0.7rem",
+        borderBottom:"1px solid "+S.border} },
+      React.createElement("div", { style:{flex:1,minWidth:0,fontFamily:S.fontBody} },
+        React.createElement("div", { style:{color:S.text,fontWeight:600,fontSize:"0.9rem",whiteSpace:"nowrap"} }, "Pay & Work Week"),
+        React.createElement("div", { style:{color:S.textMuted,fontSize:"0.72rem",marginTop:"0.1rem",
+          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"} }, paySummary)
+      ),
+      React.createElement("button", { "data-flat":true,
+        onClick:function(){ setShowPay(true); },
+        style:{flexShrink:0,background:S.bg1,border:"1.5px solid "+S.borderBright,borderRadius:S.radius3,
+               padding:"0.45rem 0.8rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,
+               fontWeight:600,fontSize:"0.82rem",whiteSpace:"nowrap"} },
+        "Edit")
+    ),
+    DAY_KEYS.map(function(k){
+      var d=draft[k];
+      var invalid = d.on && schMinutes(d)===0;
+      return React.createElement("div", { key:k,
+        style:{display:"flex",alignItems:"center",gap:"0.45rem",padding:"0.5rem 0",borderBottom:"1px solid "+S.border} },
+        // Day toggle: tap the name to switch the day on or off. The column is
+        // sized by an invisible bold "Wednesday" so every name's right edge
+        // lands on the same line, tight against the start field, in any theme
+        // font - and the fields themselves all start at the same x.
+        React.createElement("button", { "data-flat":true, onClick:function(){ patch(k,"on",!d.on); },
+          "aria-pressed":d.on?"true":"false",
+          style:{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"0.4rem",flexShrink:0,background:"none",border:"none",padding:"0.25rem 0",cursor:"pointer",fontFamily:S.fontBody} },
+          React.createElement("span", { style:{width:"10px",height:"10px",borderRadius:"50%",flexShrink:0,
+            background:d.on?S.successText:"transparent", border:"2px solid "+(d.on?S.successText:S.chromeBdr)} }),
+          React.createElement("span", { style:{position:"relative",display:"inline-block",whiteSpace:"nowrap"} },
+            // sizer: widest label at the heaviest weight the real one can take
+            React.createElement("span", { "aria-hidden":"true", style:{visibility:"hidden",fontWeight:600,fontSize:"0.9rem"} }, DAY_LABELS.wed),
+            React.createElement("span", { style:{position:"absolute",right:0,top:0,
+              color:d.on?S.text:S.textMuted,fontWeight:d.on?600:400,fontSize:"0.9rem"} }, DAY_LABELS[k])
+          )
+        ),
+        timeInput(k,"start"),
+        timeInput(k,"end"),
+        React.createElement("span", { style:{width:"46px",flexShrink:0,marginLeft:"auto",textAlign:"right",fontSize:"0.74rem",fontFamily:S.fontMono,
+          color: invalid?S.dangerText:(d.on?S.textDim:S.textMuted)} },
+          d.on ? (invalid?"end?":fmtHours(schNetMinutes(draft,k))) : "off")
+      );
+    }),
+    // ---- unpaid breaks ----
+    React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.6rem",padding:"0.7rem 0",
+        borderBottom:"1px solid "+S.border} },
+      React.createElement("button", { "data-flat":true,
+        onClick:function(){ haptic(10); setUB(Object.assign({},ub,{enabled:!ub.enabled})); },
+        "aria-pressed":ub.enabled?"true":"false",
+        style:{display:"flex",alignItems:"center",gap:"0.55rem",flex:1,minWidth:0,textAlign:"left",
+               background:"none",border:"none",padding:"0.25rem 0",cursor:"pointer",fontFamily:S.fontBody} },
+        React.createElement("span", { style:{width:"10px",height:"10px",borderRadius:"50%",flexShrink:0,
+          background:ub.enabled?S.successText:"transparent", border:"2px solid "+(ub.enabled?S.successText:S.chromeBdr)} }),
+        React.createElement("span", { style:{color:ub.enabled?S.text:S.textMuted,fontWeight:ub.enabled?600:400,fontSize:"0.9rem",whiteSpace:"nowrap"} },
+          "Unpaid Breaks")
+      ),
+      ub.enabled && React.createElement("button", { "data-flat":true,
+        onClick:function(){ setShowBreaks(true); },
+        style:{flexShrink:0,background:S.bg1,border:"1.5px solid "+S.borderBright,borderRadius:S.radius3,
+               padding:"0.45rem 0.8rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,
+               fontWeight:600,fontSize:"0.82rem",whiteSpace:"nowrap"} },
+        "Edit Breaks")
+    ),
+    ub.enabled && breakWeek>0 && React.createElement("div", { style:{display:"flex",justifyContent:"space-between",
+        padding:"0.6rem 0 0",fontFamily:S.fontBody} },
+      React.createElement("span", { style:{color:S.textDim,fontSize:"0.8rem"} }, "Unpaid breaks per week"),
+      React.createElement("span", { style:{color:S.warnText,fontSize:"0.8rem",fontFamily:S.fontMono} }, "-"+fmtHours(breakWeek))
+    ),
+    React.createElement("div", { style:{display:"flex",justifyContent:"space-between",padding:"0.85rem 0 0.2rem",fontFamily:S.fontBody} },
+      React.createElement("span", { style:{color:S.textDim,fontSize:"0.85rem"} }, "Scheduled per week"),
+      React.createElement("span", { style:{color:S.text,fontWeight:700,fontFamily:S.fontMono} }, fmtHours(weekMins))
+    )
+    ),
+    // Nested as a sibling overlay, never inside the modal card: fixed
+    // positioning breaks inside backdrop-filter surfaces (known bug class).
+    showBreaks && React.createElement(UnpaidBreaksModal, { value:ub, schedule:draft,
+      onDone:function(next){ setUB(next); setShowBreaks(false); },
+      onClose:function(){ setShowBreaks(false); } }),
+    showPay && React.createElement(PayWorkWeekModal, { value:pr,
+      onDone:function(next){ setPR(next); setShowPay(false); },
+      onClose:function(){ setShowPay(false); } })
+  );
+}
+
+// ---- UNPAID BREAKS MODAL ----------------------------------------------------
+// Edits a draft copy of the schedule's unpaid breaks. "Every work day" breaks
+// apply to all scheduled days; custom daily breaks stack per day on top of
+// them. Done hands the result back to the schedule draft - nothing commits
+// until Save Schedule.
+function UnpaidBreaksModal(props){
+  var ubS=useState(function(){
+    var src=props.value||{}, custom={};
+    DAY_KEYS.forEach(function(k){
+      custom[k]=((src.custom&&src.custom[k])||[]).map(function(b){ return Object.assign({},b); });
+    });
+    return { enabled:src.enabled!==false,
+             weekly:(src.weekly||[]).map(function(b){ return Object.assign({},b); }),
+             custom:custom };
+  });
+  var setUb=ubS[1]; var ub=ubS[0];
+  var openDayS=useState(props.initialOpenDay||null); var setOpenDay=openDayS[1]; var openDay=openDayS[0];
+
+  function mutate(fn){
+    setUb(function(prev){
+      var next={ enabled:prev.enabled, weekly:prev.weekly.slice(), custom:{} };
+      DAY_KEYS.forEach(function(k){ next.custom[k]=prev.custom[k].slice(); });
+      fn(next);
+      return next;
+    });
+  }
+  function listOf(n, dayKey){ return dayKey ? n.custom[dayKey] : n.weekly; }
+  function addBreak(dayKey){
+    haptic(10);
+    mutate(function(n){ listOf(n,dayKey).push({ id:uid(), name:"", note:"", start:"12:00", mins:30 }); });
+    if(dayKey) setOpenDay(dayKey);
+  }
+  function editBreak(dayKey, id, field, value){
+    mutate(function(n){
+      var arr=listOf(n,dayKey);
+      for(var i=0;i<arr.length;i++){
+        if(arr[i].id===id){ arr[i]=Object.assign({},arr[i]); arr[i][field]=value; }
+      }
+    });
+  }
+  function removeBreak(dayKey, id){
+    haptic(10);
+    mutate(function(n){
+      var out=listOf(n,dayKey).filter(function(b){ return b.id!==id; });
+      if(dayKey) n.custom[dayKey]=out; else n.weekly=out;
+    });
+  }
+
+  // week deduction preview against the live schedule draft
+  var preview=Object.assign({}, props.schedule, { unpaidBreaks:Object.assign({},ub,{enabled:true}) });
+  var weekDeduct=DAY_KEYS.reduce(function(a,k){ return a+schDayBreakMins(preview,k); },0);
+
+  var sectionHead={fontSize:"0.72rem",textTransform:"uppercase",letterSpacing:"0.08em",
+                   color:S.textDim,fontWeight:700,fontFamily:S.fontBody,marginBottom:"0.15rem"};
+  var sectionNote={fontSize:"0.76rem",color:S.textMuted,fontFamily:S.fontBody,marginBottom:"0.55rem"};
+
+  function addBtn(dayKey){
+    return React.createElement("button", { "data-flat":true, onClick:function(){ addBreak(dayKey); },
+      style:{display:"block",width:"100%",background:"none",border:"1.5px dashed "+S.borderBright,
+             borderRadius:S.radius3,padding:"0.55rem",color:S.successMid,cursor:"pointer",
+             fontFamily:S.fontBody,fontWeight:700,fontSize:"0.85rem"} },
+      "+ Add Break");
+  }
+  function breakCard(dayKey, b){
+    var minsBad = !(+b.mins>0);
+    var startBad = toMin(b.start)==null;
+    return React.createElement("div", { key:b.id,
+      style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,
+             padding:"0.6rem",marginBottom:"0.5rem"} },
+      React.createElement("div", { style:{display:"flex",gap:"0.5rem",marginBottom:"0.45rem"} },
+        React.createElement("input", { value:b.name, placeholder:"e.g. Lunch",
+          onChange:function(e){ editBreak(dayKey, b.id, "name", e.target.value); },
+          style:Object.assign({},INPUT_STYLE,{flex:1,minWidth:0,padding:"0.45rem 0.6rem",fontSize:"0.88rem"}) }),
+        React.createElement("button", { "data-flat":true, "aria-label":"Remove break",
+          onClick:function(){ removeBreak(dayKey, b.id); },
+          style:{flexShrink:0,width:"36px",background:S.bg0,border:"1.5px solid "+S.border,
+                 borderRadius:S.radius3,color:S.dangerText,cursor:"pointer",
+                 fontFamily:S.fontBody,fontWeight:700,fontSize:"1rem",lineHeight:1} },
+          "\u00d7")
+      ),
+      React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.45rem"} },
+        React.createElement("input", { type:"time", value:b.start,
+          onChange:function(e){ editBreak(dayKey, b.id, "start", e.target.value); },
+          style:Object.assign(TIME_FIELD_STYLE(startBad?S.dangerText:S.text, startBad?S.dangerText:S.border),
+            { flex:"0 1 94px", minWidth:"80px" }) }),
+        React.createElement("input", { type:"number", inputMode:"numeric", min:1, step:5, value:b.mins,
+          onChange:function(e){ editBreak(dayKey, b.id, "mins", e.target.value); },
+          style:Object.assign({},INPUT_STYLE,{width:"64px",flexShrink:0,padding:"0.42rem 0.4rem",
+            fontFamily:S.fontMono,fontSize:"0.88rem",minHeight:"2.1rem",boxSizing:"border-box",
+            textAlign:"center",
+            border:"2px solid "+(minsBad?S.dangerText:S.border),
+            color:minsBad?S.dangerText:S.text}) }),
+        React.createElement("span", { style:{fontSize:"0.78rem",color:S.textDim,fontFamily:S.fontBody,flexShrink:0} }, "min")
+      ),
+      React.createElement("input", { value:b.note, placeholder:"Description (optional)",
+        onChange:function(e){ editBreak(dayKey, b.id, "note", e.target.value); },
+        style:Object.assign({},INPUT_STYLE,{padding:"0.42rem 0.6rem",fontSize:"0.8rem",color:S.textDim}) })
+    );
+  }
+
+  return React.createElement(Modal, { title:"Unpaid Breaks", onClose:props.onClose, wide:true,
+    onSave:function(){ props.onDone(ub); }, saveLabel:"Done" },
+    // every work day
+    React.createElement("div", { style:{marginBottom:"1.1rem"} },
+      React.createElement("div", { style:sectionHead }, "Every Work Day"),
+      React.createElement("div", { style:sectionNote }, "Deducted from each scheduled day."),
+      ub.weekly.map(function(b){ return breakCard(null, b); }),
+      addBtn(null)
+    ),
+    // custom daily
+    React.createElement("div", { style:{marginBottom:"0.9rem"} },
+      React.createElement("div", { style:sectionHead }, "Custom Daily Breaks"),
+      React.createElement("div", { style:sectionNote }, "Extra breaks for specific days, combined with the ones above."),
+      DAY_KEYS.map(function(k){
+        var d=props.schedule && props.schedule[k];
+        var on=!!(d&&d.on);
+        var count=ub.custom[k].length;
+        var isOpen=openDay===k;
+        return React.createElement("div", { key:k, style:{borderBottom:"1px solid "+S.border} },
+          React.createElement("button", { "data-flat":true, "data-dayrow":k,
+            onClick:function(){ setOpenDay(isOpen?null:k); },
+            style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",
+                   background:"none",border:"none",padding:"0.6rem 0",cursor:"pointer",fontFamily:S.fontBody} },
+            React.createElement("span", { style:{flex:1,minWidth:0,color:on?S.text:S.textMuted,
+              fontWeight:on?600:400,fontSize:"0.9rem"} },
+              DAY_LABELS[k]+(on?"":" (off)")),
+            count>0 && React.createElement("span", { style:{flexShrink:0,minWidth:"20px",textAlign:"center",
+              background:S.successBg2,border:"1px solid "+S.successBorder,borderRadius:"999px",
+              padding:"0.05rem 0.4rem",color:S.successText,fontSize:"0.72rem",fontFamily:S.fontMono,fontWeight:700} },
+              String(count)),
+            React.createElement("span", { style:{flexShrink:0,fontSize:"0.8rem",color:S.textDim} }, isOpen?"\u2228":"\u203a")
+          ),
+          isOpen && React.createElement("div", { style:{paddingBottom:"0.6rem"} },
+            !on && React.createElement("div", { style:{fontSize:"0.74rem",color:S.textMuted,
+              fontFamily:S.fontBody,marginBottom:"0.45rem"} },
+              "This day is off in the schedule - breaks here have no effect until it is on."),
+            ub.custom[k].map(function(b){ return breakCard(k, b); }),
+            addBtn(k)
+          )
+        );
+      })
+    ),
+    weekDeduct>0 && React.createElement("div", { style:{display:"flex",justifyContent:"space-between",
+        padding:"0.7rem 0 0.1rem",fontFamily:S.fontBody} },
+      React.createElement("span", { style:{color:S.textDim,fontSize:"0.85rem"} }, "Unpaid per week"),
+      React.createElement("span", { style:{color:S.warnText,fontWeight:700,fontFamily:S.fontMono} }, "-"+fmtHours(weekDeduct))
+    )
+  );
+}
+
+function TrackingModal(props){
+  var settings=props.settings, onChange=props.onChange;
+  function set(key, value){
+    var next=Object.assign({},settings); next[key]=value; onChange(next);
+  }
+  var sectionBox={marginBottom:"1.1rem",paddingBottom:"1rem",borderBottom:"1px solid "+S.border};
+  var sectionHead={fontSize:"0.78rem",textTransform:"uppercase",letterSpacing:"0.08em",color:S.textDim,fontWeight:700,marginBottom:"0.35rem"};
+  var note={fontSize:"0.8rem",color:S.textDim,marginBottom:"0.7rem"};
+  return React.createElement(Modal, { title:"Tracking", onClose:props.onClose, onSave:props.onClose, wide:true },
+    // How time is captured. Applies live, like Themes and Layout.
+    React.createElement("div", { style:sectionBox },
+      React.createElement("div", { style:sectionHead }, "Capture"),
+      React.createElement("div", { style:note }, "How time gets onto a project: running timers, or entering it by hand."),
+      React.createElement(Toggle, {
+        name:"tracking", keys:["timer","manual"], value:settings.tracking==="manual"?"manual":"timer",
+        labelOf:function(k){ return k==="timer"?"Timers":"Manual Entry"; },
+        onChange:function(v){ set("tracking", v); }
+      })
+    ),
+    React.createElement("div", { style:sectionBox },
+      React.createElement("div", { style:sectionHead }, "Time Increments"),
+      React.createElement("div", { style:note },
+        "Standard shows days, hours, minutes and seconds. Tenths shows decimal hours to the hundredth (1h 30m becomes 1.50h) - no days. Applies everywhere, instantly."),
+      React.createElement(Toggle, {
+        name:"timeinc", keys:["standard","tenths"], value:settings.timeInc==="tenths"?"tenths":"standard",
+        labelOf:function(k){ return k==="standard"?"Standard":"Tenths"; },
+        onChange:function(v){ set("timeInc", v); }
+      })
+    ),
+    // ---- notifications ----
+    (function(){
+      var cfg=normalizeNotifs(settings.notifs);
+      function setCfg(next){ set("notifs", next); }
+      function patchScope(sk, fields){
+        var next=normalizeNotifs(cfg);
+        next[sk]=Object.assign({}, next[sk], fields);
+        setCfg(next);
+      }
+      function patchLead(sk, i, fields){
+        var next=normalizeNotifs(cfg);
+        next[sk].leads=next[sk].leads.map(function(l,j){ return j===i?Object.assign({},l,fields):l; });
+        setCfg(next);
+      }
+      function dot(on){
+        return React.createElement("span", { style:{width:"10px",height:"10px",borderRadius:"50%",flexShrink:0,
+          background:on?S.successText:"transparent", border:"2px solid "+(on?S.successText:S.chromeBdr)} });
+      }
+      function leadRow(sk, i){
+        var ld=cfg[sk].leads[i];
+        var bad=ld.on && !(+ld.hrs>0 && +ld.hrs<=48);
+        return React.createElement("div", { key:sk+i, style:{display:"flex",alignItems:"center",gap:"0.5rem",
+            padding:"0.3rem 0 0.3rem 1.4rem"} },
+          React.createElement("button", { "data-flat":true, "data-notiflead":sk+":"+i,
+            "aria-pressed":ld.on?"true":"false",
+            onClick:function(){ haptic(8); patchLead(sk,i,{on:!ld.on}); },
+            style:{display:"flex",alignItems:"center",gap:"0.5rem",background:"none",border:"none",
+                   padding:"0.15rem 0",cursor:"pointer",fontFamily:S.fontBody} },
+            dot(ld.on),
+            React.createElement("span", { style:{fontSize:"0.8rem",color:ld.on?S.text:S.textMuted} }, "Notify")
+          ),
+          React.createElement("input", { type:"number", inputMode:"decimal", min:0.5, max:48, step:0.5, value:ld.hrs,
+            disabled:!ld.on,
+            onChange:function(e){ patchLead(sk,i,{hrs:e.target.value}); },
+            style:Object.assign({},INPUT_STYLE,{width:"58px",flexShrink:0,padding:"0.35rem 0.3rem",
+              fontFamily:S.fontMono,fontSize:"0.85rem",minHeight:"1.9rem",boxSizing:"border-box",textAlign:"center",
+              border:"2px solid "+(bad?S.dangerText:S.border), color:bad?S.dangerText:(ld.on?S.text:S.textMuted),
+              opacity:ld.on?1:0.45}) }),
+          React.createElement("span", { style:{fontSize:"0.78rem",color:ld.on?S.textDim:S.textMuted,fontFamily:S.fontBody} },
+            "h before the end")
+        );
+      }
+      function scopeBlock(sk, title, sub){
+        var on=cfg[sk].on;
+        return React.createElement("div", { key:sk, style:{padding:"0.45rem 0",borderBottom:"1px solid "+S.border} },
+          React.createElement("button", { "data-flat":true, "data-notifscope":sk,
+            "aria-pressed":on?"true":"false",
+            onClick:function(){ haptic(8); patchScope(sk,{on:!on}); },
+            style:{display:"flex",alignItems:"center",gap:"0.55rem",width:"100%",textAlign:"left",
+                   background:"none",border:"none",padding:"0.2rem 0",cursor:"pointer",fontFamily:S.fontBody} },
+            dot(on),
+            React.createElement("span", { style:{flex:1,minWidth:0,color:on?S.text:S.textMuted,
+              fontWeight:on?600:400,fontSize:"0.9rem"} }, title),
+            React.createElement("span", { style:{flexShrink:0,fontSize:"0.72rem",color:S.textMuted} }, sub)
+          ),
+          on && sk==="period" && React.createElement("div", { style:{padding:"0.35rem 0 0.15rem 1.4rem",display:"flex",gap:"0.3rem"} },
+            ["week","month","quarter","year"].map(function(k){
+              var sel=cfg.period.kind===k;
+              return React.createElement("button", { key:k, "data-flat":true, "data-notifkind":k,
+                onClick:function(){ haptic(8); patchScope("period",{kind:k}); },
+                style:{flex:1,minWidth:0,background:sel?S.infoBg:S.bg1,
+                       border:"1.5px solid "+(sel?S.actionBdr:S.border),borderRadius:S.radius3,
+                       padding:"0.4rem 0",color:sel?S.infoText:S.textDim,fontWeight:sel?700:600,
+                       fontSize:"0.72rem",fontFamily:S.fontBody,cursor:"pointer"} },
+                {week:"Week",month:"Month",quarter:"Qtr",year:"Year"}[k]);
+            })),
+          on && leadRow(sk,0),
+          on && leadRow(sk,1)
+        );
+      }
+      var perm = (typeof Notification!=="undefined") ? Notification.permission : "unsupported";
+      return React.createElement("div", { style:{marginBottom:"0.4rem"} },
+        React.createElement("div", { style:sectionHead }, "Notifications"),
+        React.createElement("div", { style:note },
+          "Fire when tracked time meets the scheduled amount for a scope, plus up to two warnings before its end time (48h max). Notifications fire while the app is open."),
+        scopeBlock("day", "Workday", "vs today's schedule"),
+        scopeBlock("cycle", "Pay Cycle", "vs cycle schedule"),
+        scopeBlock("period", "Time Period", "vs period schedule"),
+        React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.6rem",paddingTop:"0.7rem"} },
+          React.createElement("span", { style:{flex:1,fontSize:"0.76rem",color:S.textMuted,fontFamily:S.fontBody} },
+            perm==="granted" ? "System banners: allowed"
+            : perm==="denied" ? "System banners: blocked in iOS Settings"
+            : perm==="unsupported" ? "System banners: not available here (in-app only)"
+            : "System banners: not yet allowed"),
+          perm==="default" && React.createElement("button", { "data-flat":true,
+            onClick:function(){ try{ Notification.requestPermission(); }catch(e){} },
+            style:{flexShrink:0,background:S.bg1,border:"1.5px solid "+S.borderBright,borderRadius:S.radius3,
+                   padding:"0.4rem 0.7rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,
+                   fontWeight:600,fontSize:"0.78rem"} },
+            "Allow")
+        )
+      );
+    })()
+  );
+}
+
 function SettingsModal(props){
   var settings=props.settings, onChange=props.onChange, onClose=props.onClose;
   var sectionHead={fontSize:"0.75rem",textTransform:"uppercase",letterSpacing:"0.1em",color:S.textDim,fontWeight:700,marginBottom:"0.4rem"};
@@ -18591,7 +19661,7 @@ function SettingsModal(props){
   var themeKey=themeKeyOf(settings);
 
   return (
-    React.createElement(Modal, { title:"Settings", onClose:onClose, onSave:onClose, wide:true },
+    React.createElement(Modal, { title:"Themes and Layout", onClose:onClose, onSave:onClose, wide:true },
       // Appearance, ordered the way it is chosen: theme first, then the palette
       // and type that theme allows, then the mode it renders in.
       React.createElement("div", { style:sectionBox },
@@ -18641,7 +19711,6 @@ function SettingsModal(props){
       ),
 
       pending("Layout", "Density, card sizes, and what shows on each row."),
-      pending("Tracking", "How time is captured - timers, manual entry, rounding."),
 
       // Reach: which hand holds the phone, and which end of the screen the bar sits at.
       React.createElement("div", { style:sectionBox },
@@ -18814,6 +19883,296 @@ function DaySummary(props){
         })
       )
     )
+  );
+}
+
+// ---- REPORTS ----------------------------------------------------------------
+// Day / week / month / quarter / year rollups measured against the work
+// schedule. Running timers are passed in as synthetic logs so the current
+// period never reads lower than the cards on the board.
+function ReportsModal(props){
+  var kindS=useState(props.initialKind||"week"); var setKind=kindS[1]; var kind=kindS[0];
+  var offS=useState(0); var setOff=offS[1]; var off=offS[0];
+  var openS=useState({}); var setOpen=openS[1]; var open=openS[0];
+  var copiedS=useState(false); var setCopied=copiedS[1]; var copied=copiedS[0];
+
+  var now=Date.now();
+  var payroll=(props.schedule&&props.schedule.payroll)||null;
+  var weekStart=(payroll&&payroll.weekStart)||"mon";
+  var isPay = kind==="pay";
+  var range = isPay ? payCycleRange(payroll, off) : periodRange(kind, off, null, weekStart);
+  if(isPay) range.kind="pay";
+  var allLogs=(props.logs||[]).concat(props.liveLogs||[]);
+  var roll=buildRollup({
+    logs:allLogs,
+    projects:props.projects||[], disruptions:props.disruptions, breaks:props.breaks,
+    laneMeta:props.laneMeta, laneOrder:props.laneOrder, range:range,
+    otDays:payroll?payroll.otDays:[]
+  });
+  var ot=(payroll&&payroll.ot)||{kind:"1.5x",flatExtra:6.25};
+  var otMult = ot.kind==="2x" ? 2 : 1.5;
+  var hasOtDays = !!(payroll && payroll.otDays && payroll.otDays.length);
+  var schedMins=scheduledMinutes(props.schedule, range.start, range.end);
+  var paceMins=scheduledToDate(props.schedule, range.start, range.end, now);
+  var trackedMins=roll.trackedMs/60000;
+  var coverPct = schedMins>0 ? Math.round(trackedMins/schedMins*100) : null;
+  var pacePct  = paceMins>0  ? Math.round(trackedMins/paceMins*100)  : null;
+  var fillPct  = schedMins>0 ? Math.min(100, trackedMins/schedMins*100) : 0;
+  var markPct  = schedMins>0 ? Math.min(100, paceMins/schedMins*100)    : 0;
+  var partial  = now>range.start && now<range.end;
+  var rel=periodRel(kind, off);
+
+  function share(ms){ return roll.trackedMs>0 ? (ms/roll.trackedMs*100) : 0; }
+  function toggle(key){
+    setOpen(function(prev){ var n=Object.assign({},prev); n[key]=!n[key]; return n; });
+  }
+  function stepTo(next){ setOff(next); setOpen({}); haptic(8); }
+
+  // Plain-text version for pasting into a log or an email.
+  function reportText(){
+    var out=["Time Report - "+periodLabel(range)+(props.testMode?" [TEST]":""),""];
+    roll.lanes.forEach(function(ln){
+      out.push(ln.label.toUpperCase()+"  "+fmtDur(ln.ms,true));
+      ln.projects.forEach(function(p){
+        out.push("  "+String(p.name).slice(0,32).padEnd(34)+fmtDur(p.ms,true).padStart(9));
+        p.children.forEach(function(c){
+          out.push("    > "+String(c.name).slice(0,28).padEnd(30)+fmtDur(c.ms,true).padStart(9));
+        });
+      });
+      out.push("");
+    });
+    out.push("Tracked: "+fmtDur(roll.trackedMs,true));
+    if(isPay){
+      out.push("Regular: "+fmtDur(roll.regMs,true));
+      if(excludeHrs>0) out.push("OT excluded (first "+excludeHrs+"h"+(excludeUnit==="week"?" each week":"")+"): "+fmtDur(exclH*3600000,true));
+      out.push("Overtime: "+fmtDur(effOtH*3600000,true)+" "+otTag);
+      if(ot.kind==="flat") out.push("OT premium: "+fmtMoney(otPremium));
+      else if(isSalary && salaryAmt>0) out.push("OT pay: "+fmtMoney(otPay));
+      else if(!isSalary) out.push("Pay-weighted hours: "+fmtDur(weightedMs,true));
+      if(grossPay!=null) out.push("Gross pay: "+fmtMoney(grossPay));
+      out.push("All pay figures are gross - no state or federal deductions.");
+    }
+    if(schedMins>0) out.push("Scheduled: "+fmtHours(schedMins)+(coverPct!=null?"  ("+coverPct+"% covered)":""));
+    if(roll.clockedMs>0) out.push("Clocked in: "+fmtDur(roll.clockedMs,true));
+    if(roll.breakMs>0) out.push("Breaks ("+roll.breakCount+"): "+fmtDur(roll.breakMs,true));
+    if(roll.distMs>0) out.push("Disruptions ("+roll.distCount+"): "+fmtDur(roll.distMs,true)+" lost");
+    out.push("Days with time: "+roll.activeDays);
+    return out.join("\n");
+  }
+  function copy(){
+    try{
+      navigator.clipboard.writeText(reportText()).then(function(){
+        setCopied(true); setTimeout(function(){ setCopied(false); },2000);
+      });
+    }catch(e){}
+  }
+
+  // ---- pieces ----
+  var seg=React.createElement("div", { style:{display:"flex",gap:"0.3rem",marginBottom:"0.7rem"} },
+    PERIODS.concat(["pay"]).map(function(k){
+      var on=k===kind;
+      return React.createElement("button", { key:k, "data-flat":true,
+        onClick:function(){ setKind(k); setOff(0); setOpen({}); haptic(8); },
+        style:{flex:1,background:on?S.infoBg:S.bg1,border:"1.5px solid "+(on?S.actionBdr:S.border),
+               borderRadius:S.radius3,padding:"0.5rem 0.1rem",color:on?S.infoText:S.textDim,
+               fontWeight:on?700:600,fontSize:"0.72rem",fontFamily:S.fontBody,cursor:"pointer",whiteSpace:"nowrap"} },
+        PERIOD_LABELS[k]);
+    })
+  );
+
+  function arrow(glyph, disabled, onClick){
+    return React.createElement("button", { "data-flat":true, disabled:disabled,
+      onClick:function(){ if(!disabled) onClick(); },
+      style:{width:"38px",height:"38px",flexShrink:0,background:S.bg1,
+             border:"1.5px solid "+S.border,borderRadius:S.radius3,
+             color:disabled?S.textMuted:S.text,fontFamily:S.fontMono,fontSize:"1rem",
+             cursor:disabled?"default":"pointer",opacity:disabled?0.4:1} }, glyph);
+  }
+  var nav=React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.85rem"} },
+    arrow("\u2039", false, function(){ stepTo(off-1); }),
+    React.createElement("div", { style:{flex:1,minWidth:0,textAlign:"center"} },
+      React.createElement("div", { style:{color:S.text,fontWeight:700,fontSize:"0.9rem",
+        whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"} }, periodLabel(range)),
+      rel && React.createElement("div", { style:{color:S.textDim,fontSize:"0.7rem",
+        textTransform:"uppercase",letterSpacing:"0.08em",marginTop:"0.1rem"} }, rel)
+    ),
+    arrow("\u203a", off>=0, function(){ stepTo(off+1); })
+  );
+
+  // Tracked against scheduled, with a tick showing how far into the schedule
+  // the period actually is. Behind the tick means behind pace, not behind target.
+  var bar=React.createElement("div", { style:{position:"relative",height:"10px",background:S.bg0,
+      borderRadius:"999px",overflow:"hidden",border:"1px solid "+S.border} },
+    React.createElement("div", { style:{position:"absolute",left:0,top:0,bottom:0,width:fillPct+"%",
+      background:S.successText,borderRadius:"999px",transition:"width 0.2s"} }),
+    partial && markPct>0 && markPct<100 && React.createElement("div", { style:{position:"absolute",
+      left:markPct+"%",top:0,bottom:0,width:"2px",background:S.warnText,opacity:0.9} })
+  );
+
+  var summary=React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,
+      borderRadius:S.radius,padding:"0.85rem",marginBottom:"0.85rem"} },
+    React.createElement("div", { style:{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:"0.5rem",marginBottom:"0.55rem"} },
+      React.createElement(Mono, { style:{fontSize:"1.5rem",fontWeight:600,color:S.text,lineHeight:1} }, fmtDur(roll.trackedMs,true)),
+      React.createElement("span", { style:{fontSize:"0.78rem",color:S.textDim,fontFamily:S.fontBody,textAlign:"right"} },
+        schedMins>0 ? ("of "+fmtHours(schedMins)+" scheduled") : "no schedule set")
+    ),
+    schedMins>0 && bar,
+    schedMins>0 && React.createElement("div", { style:{display:"flex",justifyContent:"space-between",
+        marginTop:"0.4rem",fontSize:"0.72rem",fontFamily:S.fontBody} },
+      React.createElement("span", { style:{color:S.textDim} }, coverPct+"% of the period"),
+      partial && pacePct!=null && React.createElement("span", {
+        style:{color: pacePct>=95 ? S.successText : (pacePct>=75 ? S.warnText : S.textDim) } },
+        pacePct+"% of pace ("+fmtHours(paceMins)+" so far)")
+    )
+  );
+
+  // Pay tab math. The exclusion is per pay period: the first excludeHrs of
+  // overtime get base treatment - an hourly worker earns the base rate for
+  // them, a salaried worker earns nothing extra (the salary covers them).
+  // Salary multipliers price OT off the effective rate: salary divided by the
+  // scheduled hours in this period. Every dollar figure is gross.
+  var payCfg=Object.assign({basis:"hourly",rate:0,salary:0}, (payroll&&payroll.pay)||{});
+  var isSalary = payCfg.basis==="salary";
+  var baseRate=+payCfg.rate||0, salaryAmt=+payCfg.salary||0;
+  var excludeHrs=Math.max(0, +ot.excludeHrs||0);
+  var excludeUnit = ot.excludeUnit==="week" ? "week" : "cycle";
+  var otRawH=roll.otMs/3600000, regH=roll.regMs/3600000;
+  // per-cycle: one allowance for the whole period; per-week: each
+  // weekStart-aligned week inside the period gets its own allowance
+  var exclH;
+  if(excludeUnit==="week" && excludeHrs>0 && isPay){
+    exclH=overtimeByWeek(allLogs, range, payroll?payroll.otDays:[], weekStart)
+      .reduce(function(a,w){ return a+Math.min(w.otMs/3600000, excludeHrs); },0);
+  } else {
+    exclH=Math.min(otRawH, excludeHrs);
+  }
+  var effOtH=otRawH-exclH;
+  var effRate = isSalary ? (schedMins>0 ? salaryAmt/(schedMins/60) : 0) : baseRate;
+  var flatX=+ot.flatExtra||0;
+  var otHourPay = ot.kind==="flat" ? (isSalary ? flatX : baseRate+flatX) : effRate*otMult;
+  var otPay = effOtH*otHourPay;
+  var otPremium = ot.kind==="flat" ? effOtH*flatX : null;
+  var weightedMs = roll.regMs + (exclH + effOtH*otMult)*3600000;
+  var baseSet = isSalary ? salaryAmt>0 : baseRate>0;
+  var grossPay = baseSet ? (isSalary ? salaryAmt+otPay : (regH+exclH)*baseRate+otPay) : null;
+  var otTag = ot.kind==="flat" ? "(+"+fmtMoney(flatX)+"/hr)"
+            : (isSalary && salaryAmt>0 ? "(x"+otMult+" @ "+fmtMoney(effRate)+"/hr eff.)" : "(x"+otMult+")");
+
+  function payRow(label, value, col, bold){
+    return React.createElement("div", { style:{display:"flex",justifyContent:"space-between",
+        alignItems:"baseline",gap:"0.6rem",padding:"0.3rem 0"} },
+      React.createElement("span", { style:{color:S.textDim,fontSize:"0.82rem",fontFamily:S.fontBody,minWidth:0} }, label),
+      React.createElement(Mono, { style:{fontSize:bold?"0.95rem":"0.88rem",fontWeight:bold?700:600,
+        color:col||S.text,flexShrink:0} }, value)
+    );
+  }
+  var payCard = !isPay ? null : React.createElement("div", { style:{background:S.bg1,
+      border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.7rem 0.85rem",marginBottom:"0.85rem"} },
+    isSalary
+      ? payRow("Salary (per period)", salaryAmt>0?fmtMoney(salaryAmt):"not set", salaryAmt>0?S.text:S.textMuted)
+      : payRow("Base rate", baseRate>0?fmtMoney(baseRate)+"/hr":"not set", baseRate>0?S.text:S.textMuted),
+    payRow("Regular", fmtDur(roll.regMs,true)),
+    excludeHrs>0 && payRow("OT excluded (first "+excludeHrs+"h"+(excludeUnit==="week"?" each week":"")+(isSalary?", no extra)":", base rate)"),
+      fmtDur(exclH*3600000,true), exclH>0?S.textDim:S.textMuted),
+    payRow("Overtime "+otTag, fmtDur(effOtH*3600000,true), effOtH>0?S.warnText:S.textMuted),
+    ot.kind==="flat"
+      ? payRow("OT premium", fmtMoney(otPremium), otPremium>0?S.successText:S.textMuted)
+      : (isSalary
+          ? (salaryAmt>0 && payRow("OT pay", fmtMoney(otPay), otPay>0?S.successText:S.textMuted))
+          : payRow("Pay-weighted hours", fmtDur(weightedMs,true))),
+    grossPay!=null && payRow("Gross pay", fmtMoney(grossPay), S.successText, true),
+    !baseSet && React.createElement("div", { style:{marginTop:"0.35rem",fontSize:"0.72rem",
+        color:S.textMuted,fontFamily:S.fontBody} },
+      isSalary ? "Set your salary in Work Schedule > Pay & Work Week to see gross pay."
+               : "Set your base rate in Work Schedule > Pay & Work Week to see gross pay."),
+    !hasOtDays && React.createElement("div", { style:{marginTop:"0.35rem",fontSize:"0.72rem",
+        color:S.textMuted,fontFamily:S.fontBody} },
+      "No overtime days set - pick them in Work Schedule > Pay & Work Week."),
+    React.createElement("div", { style:{marginTop:"0.45rem",paddingTop:"0.45rem",
+        borderTop:"1px solid "+S.border,fontSize:"0.7rem",color:S.textMuted,fontFamily:S.fontBody} },
+      "All pay figures are gross and do not include any state or federal deductions.")
+  );
+
+  function stat(label, value, col){
+    return React.createElement("div", { style:{flex:"1 1 0",minWidth:"70px",background:S.bg1,
+        border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.5rem 0.4rem",textAlign:"center"} },
+      React.createElement("div", { style:{fontSize:"0.62rem",textTransform:"uppercase",letterSpacing:"0.07em",
+        color:S.textMuted,fontFamily:S.fontBody,marginBottom:"0.15rem",whiteSpace:"nowrap"} }, label),
+      React.createElement(Mono, { style:{fontSize:"0.82rem",fontWeight:600,color:col||S.text} }, value)
+    );
+  }
+  var stats=React.createElement("div", { style:{display:"flex",gap:"0.4rem",flexWrap:"wrap",marginBottom:"1rem"} },
+    stat("Clocked", roll.clockedMs>0?fmtDur(roll.clockedMs,true):"--"),
+    stat("Breaks", roll.breakMs>0?fmtDur(roll.breakMs,true):"--", roll.breakMs>0?S.warnText:S.textMuted),
+    stat("Disrupt", roll.distCount>0?(fmtDur(roll.distMs,true)+" x"+roll.distCount):"--", roll.distCount>0?S.dangerText:S.textMuted),
+    stat("Days", String(roll.activeDays))
+  );
+
+  function projRow(ln, p){
+    var key=ln.key+":"+p.id;
+    var hasKids=p.children.length>0;
+    var isOpen=!!open[key];
+    return React.createElement("div", { key:key },
+      React.createElement("button", { "data-flat":true,
+        onClick:function(){ if(hasKids){ toggle(key); haptic(6); } },
+        style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",
+               padding:"0.4rem 0",cursor:hasKids?"pointer":"default",fontFamily:S.fontBody} },
+        React.createElement("div", { style:{display:"flex",alignItems:"baseline",gap:"0.5rem"} },
+          React.createElement("span", { style:{flex:1,minWidth:0,color:p.gone?S.textMuted:S.text,
+            fontSize:"0.86rem",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"} },
+            (hasKids?(isOpen?"\u2228 ":"\u203a "):"")+p.name),
+          React.createElement(Mono, { style:{fontSize:"0.8rem",color:S.text,flexShrink:0} }, fmtDur(p.ms,true)),
+          React.createElement("span", { style:{fontSize:"0.7rem",color:S.textMuted,width:"34px",
+            textAlign:"right",flexShrink:0,fontFamily:S.fontMono} }, Math.round(share(p.ms))+"%")
+        ),
+        React.createElement("div", { style:{height:"4px",background:S.bg0,borderRadius:"999px",
+          overflow:"hidden",marginTop:"0.25rem"} },
+          React.createElement("div", { style:{height:"100%",width:share(p.ms)+"%",background:ln.accent,borderRadius:"999px"} })
+        )
+      ),
+      isOpen && React.createElement("div", { style:{paddingLeft:"0.9rem",borderLeft:"1px solid "+S.border,
+        marginLeft:"0.2rem",marginBottom:"0.3rem"} },
+        p.children.map(function(c){
+          return React.createElement("div", { key:c.id, style:{display:"flex",alignItems:"baseline",
+            gap:"0.5rem",padding:"0.22rem 0"} },
+            React.createElement("span", { style:{flex:1,minWidth:0,color:S.textDim,fontSize:"0.8rem",
+              overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontFamily:S.fontBody} }, c.name),
+            React.createElement(Mono, { style:{fontSize:"0.76rem",color:S.textDim,flexShrink:0} }, fmtDur(c.ms,true))
+          );
+        })
+      )
+    );
+  }
+
+  var body = roll.trackedMs<=0
+    ? React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,
+        padding:"1.6rem 1rem",textAlign:"center",color:S.textDim,fontFamily:S.fontBody,fontSize:"0.85rem"} },
+        "No time tracked in this "+PERIOD_LONG[kind]+".")
+    : React.createElement("div", null,
+        roll.lanes.map(function(ln){
+          return React.createElement("div", { key:ln.key, style:{marginBottom:"1rem"} },
+            React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",
+                paddingBottom:"0.35rem",borderBottom:"1px solid "+S.border,marginBottom:"0.25rem"} },
+              React.createElement("div", { style:{width:"10px",height:"10px",borderRadius:"50%",
+                background:ln.accent,flexShrink:0} }),
+              React.createElement("span", { style:{flex:1,minWidth:0,color:S.text,fontWeight:700,
+                fontSize:"0.72rem",textTransform:"uppercase",letterSpacing:"0.08em",
+                overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontFamily:S.fontBody} }, ln.label),
+              React.createElement(Mono, { style:{fontSize:"0.8rem",color:S.textDim,flexShrink:0} }, fmtDur(ln.ms,true))
+            ),
+            ln.projects.map(function(p){ return projRow(ln,p); })
+          );
+        })
+      );
+
+  return React.createElement(Modal, { title:"Reports", onClose:props.onClose, wide:true, cancelLabel:"Close" },
+    seg, nav, summary, payCard, stats, body,
+    roll.trackedMs>0 && React.createElement("button", { "data-flat":true, onClick:copy,
+      style:{width:"100%",marginTop:"0.4rem",background:copied?S.successBg2:S.bg1,
+             border:"1px solid "+(copied?S.successBorder:S.border),borderRadius:S.radius,
+             padding:"0.7rem",color:copied?S.successText:S.textDim,cursor:"pointer",
+             fontFamily:S.fontBody,fontWeight:600,fontSize:"0.85rem"} },
+      copied?"Copied!":"Copy report")
   );
 }
 
@@ -19053,17 +20412,49 @@ function ProjectCard(props){
   var stageCol = stagesAllDone ? S.stageDoneText : meta.accent;
 
   if(cardCollapsed){
+    // The pill keeps live control: a bare icon+text (no button chrome, per the
+    // space budget) mirroring the big card's three start states. When a
+    // sub-task is the running timer, the control targets it - tapping Stop on
+    // the collapsed parent must never start the parent over the top of it.
+    var liveActive = isActive || !!subActive;
+    var liveInterrupted = liveActive && interrupting;
+    var pillLblCol  = liveActive ? (liveInterrupted ? S.distLbl : meta.accent) : S.chromeText;
+    var pillLbl = liveInterrupted ? "Paused" : (liveActive ? "Stop" : "Start");
+    var pillTarget = isActive ? proj.id : (subActive ? subActive.id : proj.id);
+    var pillPulse = liveActive && !liveInterrupted;
     return (
       React.createElement("div", { "data-draggable":true, style:{marginBottom:"0.45rem"} },
         React.createElement("div", {
+          "data-pulse": pillPulse ? "1" : undefined,
           onMouseDown:function(e){ swipeX.current=e.clientX; },
           onMouseUp:function(e){ if(swipeX.current!==null){ var dx=e.clientX-swipeX.current; if(dx>50){ haptic(8); setCardCollapsedPersist(false); } } swipeX.current=null; },
           onTouchStart:function(e){ if(e.touches&&e.touches.length) swipeX.current=e.touches[0].clientX; },
           onTouchEnd:function(e){ if(swipeX.current!==null&&e.changedTouches&&e.changedTouches.length){ var dx=e.changedTouches[0].clientX-swipeX.current; if(dx>50){ haptic(8); setCardCollapsedPersist(false); } } swipeX.current=null; },
-          style:{height:"24px",border:"2.5px solid "+cardBdr,borderRadius:"999px",background:cardBg,cursor:"grab",opacity:0.92,display:"flex",alignItems:"center",justifyContent:"center",gap:"0.6rem",overflow:"hidden",boxShadow:cardGlow,touchAction:"pan-y",WebkitUserSelect:"none",userSelect:"none"} },
-          React.createElement("span", { style:{fontSize:"0.74rem",fontWeight:700,color:meta.accent,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",fontFamily:S.fontBody} }, proj.name),
+          style:Object.assign({height:"24px",border:"2.5px solid "+cardBdr,borderRadius:"999px",background:cardBg,cursor:"grab",opacity:0.92,display:"flex",alignItems:"center",gap:"0.6rem",overflow:"hidden",padding:"0 0.35rem 0 0.75rem",boxShadow:cardGlow,touchAction:"pan-y",WebkitUserSelect:"none",userSelect:"none"}, pulseVars(cardBdr)) },
+          // Title anchored left, control anchored right - the pill's Stop
+          // lands on the same edge as every expanded card's Start button.
+          React.createElement("span", { style:{flex:"1 1 auto",textAlign:"left",fontSize:"0.74rem",fontWeight:700,color:meta.accent,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,fontFamily:S.fontBody} }, proj.name),
           subTasks.length>0 && React.createElement("span", { style:{fontSize:"0.66rem",color:meta.accent,opacity:0.7,whiteSpace:"nowrap",fontFamily:S.fontBody} }, subTasks.length+" tasks"),
-          (isActive||todayMs>0) && React.createElement(Mono, { style:{fontSize:"0.7rem",color:timCol,fontWeight:700,whiteSpace:"nowrap"} }, fmtDur(todayMs,true))
+          (liveActive||todayMs>0) && React.createElement(Mono, { style:{fontSize:"0.7rem",color:timCol,fontWeight:700,whiteSpace:"nowrap"} }, fmtDur(todayMs,true)),
+          React.createElement("span", { "data-pillctl":true, role:"button", "aria-label":pillLbl,
+            onClick:function(e){ e.stopPropagation(); haptic(10); onToggle(pillTarget); },
+            onMouseDown:function(e){ e.stopPropagation(); },
+            onTouchStart:function(e){ e.stopPropagation(); },
+            style:{display:"flex",alignItems:"center",gap:"0.28rem",flexShrink:0,cursor:"pointer",alignSelf:"stretch",padding:"0 0.2rem"} },
+            liveInterrupted
+              ? React.createElement("svg", { width:11,height:11,viewBox:"0 0 22 22",fill:"none" },
+                  React.createElement("rect", { x:"4",y:"4",width:"5",height:"14",rx:"1.5",fill:S.distIcon }),
+                  React.createElement("rect", { x:"13",y:"4",width:"5",height:"14",rx:"1.5",fill:S.distIcon })
+                )
+              : liveActive
+                ? React.createElement("svg", { width:11,height:11,viewBox:"0 0 22 22",fill:"none" },
+                    React.createElement("rect", { x:"3",y:"3",width:"16",height:"16",rx:"2",fill:meta.accent })
+                  )
+                : React.createElement("svg", { width:11,height:11,viewBox:"0 0 22 22",fill:"none" },
+                    React.createElement("path", { d:"M6 4 L18 11 L6 18 Z", fill:S.chromeIcon })
+                  ),
+            React.createElement("span", { style:{fontSize:"0.68rem",fontWeight:700,color:pillLblCol,fontFamily:S.fontBody,lineHeight:1,whiteSpace:"nowrap"} }, pillLbl)
+          )
         )
       )
     );
@@ -19074,7 +20465,9 @@ function ProjectCard(props){
       // A themed card is its own stacking context (backdrop-filter or texture),
       // so a menu inside it cannot outrank a later sibling card. Lift the whole
       // card for as long as its menu is open.
-      React.createElement("div", { "data-surface":"panel", "data-menu-open":(menu||stagesMenu)?"1":undefined, style:{background:cardBg,border:"3px solid "+cardBdr,borderRadius:S.radius2,overflow:"visible",position:"relative",zIndex:(menu||stagesMenu)?80:"auto",transition:"all 0.15s",boxShadow:cardGlow} },
+      React.createElement("div", { "data-surface":"panel", "data-menu-open":(menu||stagesMenu)?"1":undefined,
+        "data-pulse": ((isActive||!!subActive)&&!interrupting) ? "1" : undefined,
+        style:Object.assign({background:cardBg,border:"3px solid "+cardBdr,borderRadius:S.radius2,overflow:"visible",position:"relative",zIndex:(menu||stagesMenu)?80:"auto",transition:"all 0.15s",boxShadow:cardGlow}, pulseVars(cardBdr)) },
         // Row 1: drag + title + gear + start
         React.createElement("div", { ref:menuRef, style:{display:"flex",alignItems:"center",gap:"0.5rem",padding:"0.75rem 0.75rem 0.4rem 1rem"} },
           editMode && React.createElement("span", { onMouseDown:dragHandleProps.onMouseDown, onTouchStart:dragHandleProps.onTouchStart, style:{cursor:"grab",color:S.mutedGlyph,fontSize:"1.3rem",userSelect:"none",touchAction:"none",flexShrink:0} }, "\u283f"),
@@ -19221,6 +20614,10 @@ function LaneSection(props){
     : S.fill==="glass" ? meta.accent+"55"
     : (S.mode==="light" ? meta.accent+"22" : meta.bg);
   var topLevel=allProjects.filter(function(p){ return p.lane===lane&&p.parentId===null; }).sort(function(a,b){ return (a.order||0)-(b.order||0); });
+  // The running project (or sub-task) inside this lane, for the collapsed
+  // oval: it names the timer and drives the border pulse.
+  var laneActiveProj = activeId!=null ? allProjects.find(function(p){ return p.id===activeId && p.lane===lane; }) : null;
+  var lanePulse = !!laneActiveProj && !interrupting;
 
   return (
     React.createElement("div", { "data-surface":"lane", style:{marginBottom:"1.25rem",position:"relative",zIndex:addOpen?90:"auto"} },
@@ -19240,6 +20637,9 @@ function LaneSection(props){
           },
           onClick:function(e){ if(swiped.current){ swiped.current=false; return; } laneTaps(); }
         }, meta.label),
+        React.createElement("span", { "data-lanecount":true, style:{flexShrink:0,fontSize:"0.78rem",fontWeight:700,
+          color:meta.accent,opacity:0.65,fontFamily:S.fontMono,letterSpacing:"normal",textTransform:"none"} },
+          topLevel.length),
         editMode&&!isBuiltin && React.createElement("button", { onClick:function(){ if(removeArm){ setRemoveArm(false); onDeleteLane(lane); } else { setRemoveArm(true); } },
           style:{background:removeArm?S.dangerBg2:"none",border:"1px solid "+(removeArm?S.dangerBright:S.dangerText),borderRadius:"6px",padding:"0.15rem 0.5rem",color:removeArm?S.dangerBright:S.dangerText,cursor:"pointer",fontSize:"0.72rem",fontWeight:removeArm?700:600,fontFamily:S.fontBody,textTransform:"none",letterSpacing:"normal"} }, removeArm?"Confirm remove?":"Remove"),
         addOpen && React.createElement("div", { ref:menuAutoScroll, "data-surface":"menu", "data-menu-open":"1", style:{position:"absolute",top:"calc(100% + 4px)",left:UI.left?"auto":0,right:UI.left?0:"auto",minWidth:"240px",background:S.menuBg,border:"1px solid "+S.border,borderRadius:S.radius2,overflow:"hidden",boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:150,textTransform:"none",letterSpacing:"normal"} },
@@ -19265,11 +20665,41 @@ function LaneSection(props){
       ),
       collapsed
         ? React.createElement("div", {
+            "data-pulse": lanePulse ? "1" : undefined,
+            "data-laneoval":lane,
             onMouseDown:function(e){ swipeX.current=e.clientX; },
             onMouseUp:function(e){ if(swipeX.current!==null){ var dx=e.clientX-swipeX.current; if(dx>50){ haptic(8); setCollapsedPersist(false); } } swipeX.current=null; },
             onTouchStart:function(e){ if(e.touches&&e.touches.length) swipeX.current=e.touches[0].clientX; },
             onTouchEnd:function(e){ if(swipeX.current!==null&&e.changedTouches&&e.changedTouches.length){ var dx=e.changedTouches[0].clientX-swipeX.current; if(dx>50){ haptic(8); setCollapsedPersist(false); } } swipeX.current=null; },
-            style:{height:"16px",border:"2.5px solid "+meta.accent,borderRadius:"999px",background:laneOvalBg,cursor:"grab",opacity:0.85,marginTop:"0.15rem",touchAction:"pan-y"} })
+            style:Object.assign({height:laneActiveProj?"20px":"16px",border:"2.5px solid "+meta.accent,borderRadius:"999px",background:laneOvalBg,cursor:"grab",opacity:laneActiveProj?0.95:0.85,marginTop:"0.15rem",touchAction:"pan-y",display:"flex",alignItems:"center",padding:laneActiveProj?"0 0.75rem":"0",overflow:"hidden"}, pulseVars(meta.accent)) },
+            // A collapsed lane still names its running timer, so nothing
+            // active is ever fully out of sight.
+            laneActiveProj && React.createElement("span", { style:{flex:1,minWidth:0,fontSize:"0.68rem",fontWeight:700,
+              color:meta.accent,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",fontFamily:S.fontBody} },
+              (interrupting?"Paused: ":"")+laneActiveProj.name),
+            laneActiveProj && React.createElement(Mono, { style:{flexShrink:0,fontSize:"0.66rem",fontWeight:700,
+              color:interrupting?S.distDim:meta.accent} }, fmtDur(elapsed,true)),
+            // Same bare icon+text control as the card pill. toggleProject
+            // resumes an interrupted timer and stops a running one - and once
+            // stopped, laneActiveProj goes null and the oval empties itself.
+            laneActiveProj && React.createElement("span", { "data-ovalctl":true, role:"button",
+              "aria-label": interrupting?"Resume":"Stop",
+              onClick:function(e){ e.stopPropagation(); haptic(10); onToggle(laneActiveProj.id); },
+              onMouseDown:function(e){ e.stopPropagation(); },
+              onTouchStart:function(e){ e.stopPropagation(); },
+              style:{display:"flex",alignItems:"center",gap:"0.28rem",flexShrink:0,cursor:"pointer",alignSelf:"stretch",padding:"0 0.2rem",marginLeft:"0.5rem"} },
+              interrupting
+                ? React.createElement("svg", { width:11,height:11,viewBox:"0 0 22 22",fill:"none" },
+                    React.createElement("path", { d:"M6 4 L18 11 L6 18 Z", fill:S.distIcon })
+                  )
+                : React.createElement("svg", { width:11,height:11,viewBox:"0 0 22 22",fill:"none" },
+                    React.createElement("rect", { x:"3",y:"3",width:"16",height:"16",rx:"2",fill:meta.accent })
+                  ),
+              React.createElement("span", { style:{fontSize:"0.66rem",fontWeight:700,
+                color:interrupting?S.distLbl:meta.accent,fontFamily:S.fontBody,lineHeight:1,whiteSpace:"nowrap"} },
+                interrupting?"Resume":"Stop")
+            )
+          )
         : topLevel.length===0
         ? React.createElement("div", { style:{color:S.textMuted,fontSize:"0.82rem",padding:"0.5rem 0"} }, "No items yet - use Add to create one.")
         : topLevel.map(function(proj,idx){
@@ -19375,16 +20805,30 @@ function App(){
   var disruptTargetS=useState(null); var setDisruptTarget=disruptTargetS[1]; var disruptTarget=disruptTargetS[0];
   var showBreakS=useState(false); var setShowBreak=showBreakS[1]; var showBreak=showBreakS[0];
   var showDayS=useState(false); var setShowDay=showDayS[1]; var showDay=showDayS[0];
+  var showReportsS=useState(false); var setShowReports=showReportsS[1]; var showReports=showReportsS[0];
   var showNewLaneS=useState(false); var setShowNewLane=showNewLaneS[1]; var showNewLane=showNewLaneS[0];
   var showEditLanesS=useState(false); var setShowEditLanes=showEditLanesS[1]; var showEditLanes=showEditLanesS[0];
   var confirmDeleteS=useState(null); var setConfirmDelete=confirmDeleteS[1]; var confirmDelete=confirmDeleteS[0];
-  var settingsS=useState(function(){ return load("tt_settings",{ layout:"comfortable", tracking:"timer", colorScheme:"bright-pastels", theme:"neon-dream", schemes:{}, fonts:{}, mode:"dark", handedness:"right", headerPos:"top" }); });
+  var settingsS=useState(function(){
+    var st = load("tt_settings",{ layout:"comfortable", tracking:"timer", colorScheme:"bright-pastels", theme:"neon-dream", schemes:{}, fonts:{}, mode:"dark", handedness:"right", headerPos:"top" });
+    // Settings saved before the schedule existed get the default merged in, so
+    // every consumer can rely on the shape being present.
+    // Every saved schedule shape - missing entirely, or from before unpaid
+    // breaks existed - is normalized to the full current shape.
+    st.workSchedule = normalizeSchedule(st.workSchedule);
+    st.notifs = normalizeNotifs(st.notifs);
+    if(!st.timeInc) st.timeInc = "standard";
+    return st;
+  });
   var setSettings=settingsS[1]; var settings=settingsS[0];
   // Must run before ANY colour is derived below - S and C are module-level, so
   // deriving first would paint the previous render's palette. The 1s tick used
   // to mask this; the first paint after a load was still wrong.
   applyTokens(settings);
   var showSettingsS=useState(false); var setShowSettings=showSettingsS[1]; var showSettings=showSettingsS[0];
+  var showScheduleS=useState(false); var setShowSchedule=showScheduleS[1]; var showSchedule=showScheduleS[0];
+  var showTrackingS=useState(false); var setShowTracking=showTrackingS[1]; var showTracking=showTrackingS[0];
+  var timeMenuOpenS=useState(false); var setTimeMenuOpen=timeMenuOpenS[1]; var timeMenuOpen=timeMenuOpenS[0];
   var distPresetsS=useState(function(){ return load("tt_distpresets",DEFAULT_DIST_PRESETS); });
   var setDistPresets=distPresetsS[1]; var distPresets=distPresetsS[0];
   var distMenuOpenS=useState(false); var setDistMenuOpen=distMenuOpenS[1]; var distMenuOpen=distMenuOpenS[0];
@@ -19472,18 +20916,66 @@ function App(){
   var openDist=disruptions.find(function(d){ return !d.endTime; });
   var activeProj=projects.find(function(p){ return p.id===activeId; });
   var todayDistMs=todayDist.reduce(function(a,d){ return a+d.duration; },0);
+  var notifToastS=useState(null); var setNotifToast=notifToastS[1]; var notifToast=notifToastS[0];
+  // Checks due notifications once per tick. Fired keys persist per period
+  // instance so nothing repeats, and entries older than 8 days are pruned.
+  useEffect(function(){
+    var cfg=settings.notifs;
+    if(!cfg || !(cfg.day&&cfg.day.on || cfg.cycle&&cfg.cycle.on || cfg.period&&cfg.period.on)) return;
+    var fired=load("tt_notif_fired",{});
+    var due=evalNotifications(cfg, settings.workSchedule, logs.concat(liveLogs()), Date.now(), fired);
+    if(!due.length) return;
+    var now=Date.now(), cutoff=now-8*86400000, pruned={};
+    Object.keys(fired).forEach(function(k){ if(fired[k]>cutoff) pruned[k]=fired[k]; });
+    due.forEach(function(d){
+      pruned[d.key]=now;
+      try{
+        if(typeof Notification!=="undefined" && Notification.permission==="granted"){
+          new Notification(d.title, { body:d.body });
+        }
+      }catch(e){}
+    });
+    save("tt_notif_fired", pruned);
+    haptic([30,60,30]);
+    var last=due[due.length-1];
+    setNotifToast({ title:last.title, body:last.body, at:now });
+  },[nowTick]);
+  // toast auto-dismiss
+  useEffect(function(){
+    if(!notifToast) return;
+    var t=setTimeout(function(){ setNotifToast(null); }, 8000);
+    return function(){ clearTimeout(t); };
+  },[notifToast]);
+  // Timers that are still running have no log row yet. Reports fold them in as
+  // synthetic logs so the current period never reads lower than the board.
+  function liveLogs(){
+    var out=[];
+    if(activeId!=null && activeStart && activeProj){
+      var par=activeProj.parentId!=null?projects.find(function(p){ return p.id===activeProj.parentId; }):null;
+      out.push({ id:"live", projectId:activeProj.id, projectName:activeProj.name, lane:activeProj.lane,
+        type:"project", startTime:activeStart, endTime:null, duration:Math.max(0,nowTick-activeStart),
+        parentId:activeProj.parentId||null, parentName:par?par.name:null });
+    }
+    if(atWorkStart){
+      out.push({ id:"live-atwork", projectId:null, projectName:"At Work", lane:null, type:"atwork",
+        startTime:atWorkStart, endTime:null, duration:Math.max(0,nowTick-atWorkStart),
+        parentId:null, parentName:null });
+    }
+    return out;
+  }
   var clocked=!!atWorkStart;
 
   // Close every popup - modals and all dropdown menus - before opening a new one
   function closeAllPopups(){
     setShowAdd(null); setEditProj(null); setStagesProj(null); setShowDisrupt(false);
     setShowBreak(false); setShowDay(false); setShowNewLane(false); setShowEditLanes(false);
+    setShowReports(false);
     setConfirmDelete(null); setShowTestConfirm(false);
-    setMenuOpen(false); setAddMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowSettings(false);
+    setMenuOpen(false); setAddMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowSettings(false); setShowSchedule(false); setShowTracking(false); setTimeMenuOpen(false);
     try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){}
   }
   useEffect(function(){
-    function closeHeaderMenus(){ setMenuOpen(false); setAddMenuOpen(false); setDistMenuOpen(false); }
+    function closeHeaderMenus(){ setMenuOpen(false); setAddMenuOpen(false); setDistMenuOpen(false); setTimeMenuOpen(false); }
     window.addEventListener("ttCloseMenus",closeHeaderMenus);
     return function(){ window.removeEventListener("ttCloseMenus",closeHeaderMenus); };
   },[]);
@@ -19741,6 +21233,23 @@ function App(){
         "@import url('"+S.fontImport+"'); "+
         "@keyframes ttBlink { 0%,55% { opacity:1; } 56%,100% { opacity:0.12; } } "+
         "@keyframes ttScroll { 0% { transform:translateX(0); } 100% { transform:translateX(-16.6667%); } } "+
+        // Running projects breathe: border color and glow ease between the
+        // lane accent and a brightened peak. Driven by CSS vars so one rule
+        // serves every lane color.
+        "@keyframes ttPulse { 0%,100% { border-color:var(--pulse-a); box-shadow:0 0 8px var(--pulse-s1); } 50% { border-color:var(--pulse-b); box-shadow:0 0 20px var(--pulse-s2); } } "+
+        "[data-pulse='1']{ animation: ttPulse 2.4s ease-in-out infinite; } "+
+        // iOS renders a time input's value inside shadow parts with their own
+        // UA background and color. Make every part transparent and force it to
+        // carry the input's color; -webkit-text-fill-color outranks UA color.
+        "input[type='time'],input[type='date']{ -webkit-appearance:none; appearance:none; } "+
+        "input[type='time']::-webkit-date-and-time-value,input[type='date']::-webkit-date-and-time-value{ text-align:center; min-height:1.15em; margin:0; background:transparent; color:inherit; -webkit-text-fill-color:currentColor; } "+
+        "input[type='time']::-webkit-datetime-edit,input[type='date']::-webkit-datetime-edit,"+
+        "input[type='time']::-webkit-datetime-edit-fields-wrapper,input[type='date']::-webkit-datetime-edit-fields-wrapper,"+
+        "input[type='time']::-webkit-datetime-edit-hour-field,input[type='time']::-webkit-datetime-edit-minute-field,"+
+        "input[type='time']::-webkit-datetime-edit-ampm-field,input[type='date']::-webkit-datetime-edit-month-field,"+
+        "input[type='date']::-webkit-datetime-edit-day-field,input[type='date']::-webkit-datetime-edit-year-field,"+
+        "input[type='time']::-webkit-datetime-edit-text,input[type='date']::-webkit-datetime-edit-text{ "+
+        "background:transparent; color:inherit; -webkit-text-fill-color:currentColor; padding:0; } "+
         S.themeCss),
 
       // ---- TEST MODE FRAME ----
@@ -19800,16 +21309,41 @@ function App(){
                   React.createElement("span", { style:{fontSize:"0.92rem",fontWeight:600,color:S.mutedGlyph,whiteSpace:"nowrap"} }, "Edit Lanes")
                 )
               ),
+              // Time Settings (accordion): the schedule and how time is captured
+              React.createElement("button", { "data-flat":true, onClick:function(){ setTimeMenuOpen(function(x){ return !x; }); setAddMenuOpen(false); },
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:timeMenuOpen?rgba(S.bg0,0.5):"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+                React.createElement("svg", { width:14, height:14, viewBox:"0 0 28 28", fill:"none" },
+                  React.createElement("circle", { cx:"14", cy:"14", r:"11", stroke:S.chromeText, strokeWidth:"2.5" }),
+                  React.createElement("path", { d:"M14 8 L14 14 L18 17", stroke:S.chromeText, strokeWidth:"2.5", strokeLinecap:"round", strokeLinejoin:"round" })
+                ),
+                React.createElement("span", { style:{flex:1} }, "Time Settings"),
+                React.createElement("span", { style:{fontSize:"0.8rem",color:S.textDim} }, timeMenuOpen?"v":">")
+              ),
+              timeMenuOpen && React.createElement("div", { style:{background:rgba(S.bg0,0.5),borderBottom:"1px solid "+S.border} },
+                React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowSchedule(true); },
+                  style:{display:"flex",alignItems:"center",gap:"0.65rem",width:"100%",background:"none",border:"none",padding:"0.7rem 1rem 0.7rem 2rem",cursor:"pointer",fontFamily:S.fontBody,textAlign:"left"} },
+                  React.createElement("span", { style:{fontSize:"0.92rem",fontWeight:600,color:S.text,whiteSpace:"nowrap"} }, "Work Schedule")
+                ),
+                React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowTracking(true); },
+                  style:{display:"flex",alignItems:"center",gap:"0.65rem",width:"100%",background:"none",border:"none",padding:"0.7rem 1rem 0.7rem 2rem",cursor:"pointer",fontFamily:S.fontBody,textAlign:"left"} },
+                  React.createElement("span", { style:{fontSize:"0.92rem",fontWeight:600,color:S.text,whiteSpace:"nowrap"} }, "Tracking")
+                )
+              ),
               // Settings
               React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowSettings(true); },
                 style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
                 React.createElement(GearSVG, { size:14, col:S.chromeText }),
-                React.createElement("span", null, "App Settings")
+                React.createElement("span", null, "Themes and Layout")
               ),
               // Summary
               React.createElement("button", { "data-flat":true, onClick:function(){ if(todayLogs.length){ closeAllPopups(); setShowDay(true); } },
                 style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:summaryCol,cursor:todayLogs.length?"pointer":"default",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
                 "Summary"
+              ),
+              // Reports
+              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowReports(true); },
+                style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+                "Reports"
               ),
               // Arrange
               React.createElement("button", { "data-flat":true, onClick:function(){ setEditMode(function(x){ return !x; }); setMenuOpen(false); },
@@ -19933,10 +21467,27 @@ function App(){
       showDisrupt && React.createElement(DisruptionModal, { projName:disruptTarget?disruptTarget.name:null, onStart:startDisruption, onCancel:function(){ setShowDisrupt(false); } }),
       showBreak && React.createElement(BreakModal, { onStart:startBreak, onCancel:function(){ setShowBreak(false); } }),
       showDay && React.createElement(DaySummary, { logs:todayLogs, disruptions:disruptions, breaks:todayBreaks, onClose:function(){ setShowDay(false); }, testMode:testMode }),
+      notifToast && React.createElement("div", { "data-surface":"panel", role:"status",
+        onClick:function(){ setNotifToast(null); },
+        style:{position:"fixed",left:"50%",transform:"translateX(-50%)",
+               top:"calc(env(safe-area-inset-top, 0px) + 3.4rem)",zIndex:950,maxWidth:"min(92vw, 380px)",
+               background:S.bg1,border:"2px solid "+S.borderBright,borderRadius:S.radius,
+               padding:"0.6rem 0.9rem",boxShadow:"0 6px 24px rgba(0,0,0,0.35)",cursor:"pointer"} },
+        React.createElement("div", { style:{color:S.text,fontWeight:700,fontSize:"0.86rem",fontFamily:S.fontBody} }, notifToast.title),
+        React.createElement("div", { style:{color:S.textDim,fontSize:"0.78rem",marginTop:"0.15rem",fontFamily:S.fontBody} }, notifToast.body)
+      ),
+      showReports && React.createElement(ReportsModal, { logs:logs, projects:projects, disruptions:disruptions,
+        breaks:breaks, laneMeta:laneMeta, laneOrder:laneOrder, schedule:settings.workSchedule, testMode:testMode,
+        liveLogs:liveLogs(), onClose:function(){ setShowReports(false); } }),
       showNewLane && React.createElement(NewLaneModal, { onSave:function(label,col){ addLane(label,col); setShowNewLane(false); }, onCancel:function(){ setShowNewLane(false); } }),
       showEditLanes && React.createElement(EditLanesModal, { laneOrder:laneOrder, laneMeta:laneMeta, projects:projects, onDeleteLane:deleteLaneWithProjects, onSave:saveLaneEdits, onCancel:function(){ setShowEditLanes(false); } }),
       confirmDelete && React.createElement(DeleteProjectModal, { proj:confirmDelete, allProjects:projects, laneMeta:laneMeta, onMoveTasks:doMoveTasks, onDeleteAll:doDeleteAll, onCancel:function(){ setConfirmDelete(null); } }),
       showSettings && React.createElement(SettingsModal, { settings:settings, onChange:setSettings, onClose:function(){ setShowSettings(false); } }),
+      showSchedule && React.createElement(WorkScheduleModal, { schedule:settings.workSchedule,
+        onSave:function(sch){ setSettings(Object.assign({},settings,{workSchedule:sch})); setShowSchedule(false); },
+        onClose:function(){ setShowSchedule(false); } }),
+      showTracking && React.createElement(TrackingModal, { settings:settings, onChange:setSettings,
+        onClose:function(){ setShowTracking(false); } }),
       showEditPresets && React.createElement(EditDistPresetsModal, { presets:distPresets, onSave:function(items){ setDistPresets(items.length?items:DEFAULT_DIST_PRESETS); setShowEditPresets(false); }, onCancel:function(){ setShowEditPresets(false); } }),
       showTestConfirm && React.createElement(Modal, { title:"Exit Test Mode", onClose:function(){ setShowTestConfirm(false); } },
         React.createElement("p", { style:{color:S.textDim,marginBottom:"1rem",fontSize:"0.9rem"} }, "Exit test mode? Test data will be cleared."),
@@ -19948,6 +21499,7 @@ function App(){
     )
   );
 }
+
 
 try {
   ReactDOMClient.createRoot(document.getElementById('root')).render(React.createElement(App));
