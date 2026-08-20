@@ -18,7 +18,7 @@
 </head>
 <body>
 <pre id="err"></pre>
-<div id="root"><div id="boot">Time Tracker build 08-18 notify<br>
+<div id="root"><div id="boot">Time Tracker build 08-19 backup<br>
 HTML loaded &#10003; &mdash; starting scripts&hellip;<br>
 <span style="font-size:11px;opacity:.7">If this message never goes away, the scripts below it failed to run.<br>
 If you cannot see this message at all, the file itself is not being displayed.</span></div></div>
@@ -17270,6 +17270,65 @@ function todayStr(){ return new Date().toDateString(); }
 function haptic(pattern){ try{ if(navigator&&navigator.vibrate) navigator.vibrate(pattern||10); }catch(e){} }
 function load(key, def){ try{ var v=localStorage.getItem(key); return v?JSON.parse(v):def; }catch(e){ return def; } }
 function save(key, val){ try{ localStorage.setItem(key,JSON.stringify(val)); }catch(e){} }
+
+// ---------------- Backup & restore ----------------
+// Every app key is tt_-prefixed, so a backup is simply every tt_* key with its
+// raw (already-JSON) string value. Modules that store under tt_mod_* later
+// are covered automatically. Restore is replace-all: existing tt_* keys are
+// cleared first, so a restore really is the backed-up state.
+var TT_KEY_PREFIX="tt_";
+function backupBuild(storage){
+  var data={};
+  try{
+    for(var i=0;i<storage.length;i++){
+      var k=storage.key(i);
+      if(k && k.indexOf(TT_KEY_PREFIX)===0) data[k]=storage.getItem(k);
+    }
+  }catch(e){}
+  return { ttBackup:1, app:"Time Tracker", exportedAt:new Date().toISOString(), data:data };
+}
+function backupValidate(obj){
+  if(!obj || obj.ttBackup!==1 || typeof obj.data!=="object" || obj.data===null || Array.isArray(obj.data))
+    return "Not a Time Tracker backup file.";
+  var keys=Object.keys(obj.data);
+  if(!keys.length) return "Backup contains no data.";
+  for(var i=0;i<keys.length;i++){
+    if(keys[i].indexOf(TT_KEY_PREFIX)!==0) return "Backup contains unexpected keys.";
+    if(typeof obj.data[keys[i]]!=="string") return "Backup data is malformed.";
+    try{ JSON.parse(obj.data[keys[i]]); }catch(e){ return "Backup data is malformed."; }
+  }
+  return null;
+}
+function backupSummary(obj){
+  function count(key){
+    try{ var v=JSON.parse(obj.data[key]); return Array.isArray(v)?v.length:null; }catch(e){ return null; }
+  }
+  var range=null;
+  try{
+    var ls=JSON.parse(obj.data["tt_logs"])||[];
+    var min=Infinity, max=-Infinity;
+    ls.forEach(function(l){ if(l&&l.startTime){ if(l.startTime<min)min=l.startTime; if(l.startTime>max)max=l.startTime; } });
+    if(min<Infinity) range={min:min,max:max};
+  }catch(e){}
+  return { keys:Object.keys(obj.data||{}).length, logs:count("tt_logs"),
+           projects:count("tt_projects"), range:range, exportedAt:obj.exportedAt||null };
+}
+function backupApply(obj, storage){
+  var err=backupValidate(obj);
+  if(err) return { ok:false, error:err };
+  try{
+    var stale=[];
+    for(var i=0;i<storage.length;i++){
+      var k=storage.key(i);
+      if(k && k.indexOf(TT_KEY_PREFIX)===0) stale.push(k);
+    }
+    stale.forEach(function(k){ storage.removeItem(k); });
+    Object.keys(obj.data).forEach(function(k){ storage.setItem(k, obj.data[k]); });
+    return { ok:true, keys:Object.keys(obj.data).length, removed:stale.length };
+  }catch(e){
+    return { ok:false, error:"Could not write the backup: "+((e&&e.message)||"storage error") };
+  }
+}
 function getMeta(laneMeta, lane){
   var m = (laneMeta&&laneMeta[lane]) || DEFAULT_META[lane] || { label:lane, accent:"#888", bg:"#111", dim:"#333" };
   var set = S.lanes;
@@ -19363,6 +19422,118 @@ function WorkScheduleModal(props){
   );
 }
 
+// ---- BACKUP & RESTORE MODAL -------------------------------------------------
+// Export: every tt_* key as a JSON file, delivered via the share sheet when
+// available, a download link otherwise, clipboard as the last resort.
+// Restore: pick a file, review the summary, then an explicit replace-all
+// confirm. The app reloads afterward so everything re-boots through the
+// normalizers.
+function BackupModal(props){
+  var statusS=useState(null); var setStatus=statusS[1]; var status=statusS[0];
+  var pendingS=useState(null); var setPending=pendingS[1]; var pending=pendingS[0];
+
+  function doExport(){
+    haptic(10);
+    var obj=backupBuild(localStorage);
+    var json=JSON.stringify(obj);
+    var name="time-tracker-backup-"+isoDate(new Date())+".json";
+    try{
+      if(typeof File!=="undefined" && navigator.share && navigator.canShare &&
+         navigator.canShare({ files:[new File([json],name,{type:"application/json"})] })){
+        navigator.share({ files:[new File([json],name,{type:"application/json"})], title:name })
+          .then(function(){ setStatus({ok:true,msg:"Backup shared."}); })
+          .catch(function(){ setStatus(null); });
+        return;
+      }
+    }catch(e){}
+    try{
+      var url=URL.createObjectURL(new Blob([json],{type:"application/json"}));
+      var a=document.createElement("a");
+      a.href=url; a.download=name;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function(){ URL.revokeObjectURL(url); },5000);
+      setStatus({ok:true,msg:"Backup downloaded as "+name+"."});
+      return;
+    }catch(e){}
+    try{
+      navigator.clipboard.writeText(json).then(function(){
+        setStatus({ok:true,msg:"Backup JSON copied to the clipboard - paste it somewhere safe."});
+      });
+    }catch(e){ setStatus({ok:false,msg:"Could not export on this device."}); }
+  }
+
+  function onPickFile(e){
+    var f=e.target && e.target.files && e.target.files[0];
+    if(!f) return;
+    setStatus(null);
+    try{
+      var r=new FileReader();
+      r.onload=function(){
+        var obj=null;
+        try{ obj=JSON.parse(String(r.result)); }catch(err){ setStatus({ok:false,msg:"That file is not valid JSON."}); return; }
+        var bad=backupValidate(obj);
+        if(bad){ setStatus({ok:false,msg:bad}); return; }
+        setPending({ obj:obj, summary:backupSummary(obj) });
+      };
+      r.onerror=function(){ setStatus({ok:false,msg:"Could not read that file."}); };
+      r.readAsText(f);
+    }catch(err){ setStatus({ok:false,msg:"Could not read that file."}); }
+    try{ e.target.value=""; }catch(err2){}
+  }
+
+  function doRestore(){
+    if(!pending) return;
+    haptic([20,50,20]);
+    var res=backupApply(pending.obj, localStorage);
+    if(!res.ok){ setStatus({ok:false,msg:res.error}); setPending(null); return; }
+    setStatus({ok:true,msg:"Restored. Reloading..."});
+    try{ setTimeout(function(){ location.reload(); }, 400); }catch(e){}
+  }
+
+  function fmtStamp(iso){
+    try{ return new Date(iso).toLocaleDateString([], {month:"short",day:"numeric",year:"numeric"}); }
+    catch(e){ return String(iso||""); }
+  }
+  var note={fontSize:"0.78rem",color:S.textDim,fontFamily:S.fontBody,marginBottom:"0.7rem"};
+  var btn={display:"block",width:"100%",background:S.bg1,border:"1.5px solid "+S.borderBright,
+           borderRadius:S.radius,padding:"0.75rem",color:S.text,cursor:"pointer",
+           fontFamily:S.fontBody,fontWeight:700,fontSize:"0.9rem"};
+
+  return React.createElement(Modal, { title:"Backup & Restore", onClose:props.onClose, cancelLabel:"Close" },
+    React.createElement("div", { style:note },
+      "Everything lives on this phone: deleting the app from the home screen deletes your tracked time with it. Export a backup regularly and keep it somewhere safe."),
+    React.createElement("button", { "data-flat":true, onClick:doExport, style:btn }, "Export Backup"),
+    React.createElement("div", { style:{margin:"1rem 0 0.4rem",fontSize:"0.72rem",textTransform:"uppercase",
+      letterSpacing:"0.08em",color:S.textDim,fontWeight:700,fontFamily:S.fontBody} }, "Restore"),
+    React.createElement("div", { style:note },
+      "Restoring replaces everything currently in the app with the backup."),
+    !pending && React.createElement("label", { style:Object.assign({},btn,{textAlign:"center"}) },
+      "Choose Backup File",
+      React.createElement("input", { type:"file", accept:"application/json,.json",
+        onChange:onPickFile, style:{display:"none"} })
+    ),
+    pending && React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,
+        borderRadius:S.radius,padding:"0.8rem",marginBottom:"0.6rem"} },
+      React.createElement("div", { style:{color:S.text,fontWeight:700,fontSize:"0.88rem",
+        fontFamily:S.fontBody,marginBottom:"0.35rem"} }, "Backup from "+fmtStamp(pending.summary.exportedAt)),
+      React.createElement("div", { style:{color:S.textDim,fontSize:"0.8rem",fontFamily:S.fontBody} },
+        (pending.summary.projects!=null ? pending.summary.projects+" projects, " : "")+
+        (pending.summary.logs!=null ? pending.summary.logs+" log entries" : pending.summary.keys+" data sets")+
+        (pending.summary.range ? " ("+fmtStamp(new Date(pending.summary.range.min).toISOString())+
+          " - "+fmtStamp(new Date(pending.summary.range.max).toISOString())+")" : "")),
+      React.createElement("button", { "data-flat":true, onClick:doRestore,
+        style:Object.assign({},btn,{marginTop:"0.6rem",background:S.dangerBg2,
+          border:"1.5px solid "+S.dangerText,color:S.dangerText}) },
+        "Replace All Data & Restore"),
+      React.createElement("button", { "data-flat":true, onClick:function(){ setPending(null); setStatus(null); },
+        style:Object.assign({},btn,{marginTop:"0.45rem",fontWeight:600,color:S.textDim}) },
+        "Pick a Different File")
+    ),
+    status && React.createElement("div", { style:{marginTop:"0.6rem",fontSize:"0.8rem",fontFamily:S.fontBody,
+      color:status.ok?S.successText:S.dangerText} }, status.msg)
+  );
+}
+
 // ---- UNPAID BREAKS MODAL ----------------------------------------------------
 // Edits a draft copy of the schedule's unpaid breaks. "Every work day" breaks
 // apply to all scheduled days; custom daily breaks stack per day on top of
@@ -20806,6 +20977,7 @@ function App(){
   var showBreakS=useState(false); var setShowBreak=showBreakS[1]; var showBreak=showBreakS[0];
   var showDayS=useState(false); var setShowDay=showDayS[1]; var showDay=showDayS[0];
   var showReportsS=useState(false); var setShowReports=showReportsS[1]; var showReports=showReportsS[0];
+  var showBackupS=useState(false); var setShowBackup=showBackupS[1]; var showBackup=showBackupS[0];
   var showNewLaneS=useState(false); var setShowNewLane=showNewLaneS[1]; var showNewLane=showNewLaneS[0];
   var showEditLanesS=useState(false); var setShowEditLanes=showEditLanesS[1]; var showEditLanes=showEditLanesS[0];
   var confirmDeleteS=useState(null); var setConfirmDelete=confirmDeleteS[1]; var confirmDelete=confirmDeleteS[0];
@@ -20969,7 +21141,7 @@ function App(){
   function closeAllPopups(){
     setShowAdd(null); setEditProj(null); setStagesProj(null); setShowDisrupt(false);
     setShowBreak(false); setShowDay(false); setShowNewLane(false); setShowEditLanes(false);
-    setShowReports(false);
+    setShowReports(false); setShowBackup(false);
     setConfirmDelete(null); setShowTestConfirm(false);
     setMenuOpen(false); setAddMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowSettings(false); setShowSchedule(false); setShowTracking(false); setTimeMenuOpen(false);
     try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){}
@@ -21345,6 +21517,11 @@ function App(){
                 style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
                 "Reports"
               ),
+              // Backup & Restore
+              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowBackup(true); },
+                style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+                "Backup & Restore"
+              ),
               // Arrange
               React.createElement("button", { "data-flat":true, onClick:function(){ setEditMode(function(x){ return !x; }); setMenuOpen(false); },
                 style:{display:"block",width:"100%",textAlign:"left",background:editMode?S.bg3:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:editMode?S.arrangeText:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:editMode?700:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
@@ -21476,6 +21653,7 @@ function App(){
         React.createElement("div", { style:{color:S.text,fontWeight:700,fontSize:"0.86rem",fontFamily:S.fontBody} }, notifToast.title),
         React.createElement("div", { style:{color:S.textDim,fontSize:"0.78rem",marginTop:"0.15rem",fontFamily:S.fontBody} }, notifToast.body)
       ),
+      showBackup && React.createElement(BackupModal, { onClose:function(){ setShowBackup(false); } }),
       showReports && React.createElement(ReportsModal, { logs:logs, projects:projects, disruptions:disruptions,
         breaks:breaks, laneMeta:laneMeta, laneOrder:laneOrder, schedule:settings.workSchedule, testMode:testMode,
         liveLogs:liveLogs(), onClose:function(){ setShowReports(false); } }),
