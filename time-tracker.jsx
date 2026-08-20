@@ -2313,6 +2313,106 @@ function BackupModal(props){
   );
 }
 
+// ---- EXTENSIONS MODAL -------------------------------------------------------
+// Phase 2: the à la carte switchboard. Every registered module is listed here
+// whether it is on or off - this screen is the only place enablement changes.
+// Switching a module off hides it everywhere but keeps its data, so the choice
+// is always reversible; throwing the data away is a separate, deliberate act.
+function fmtBytes(n){
+  if(n<1024) return n+" B";
+  if(n<1024*1024) return (n/1024).toFixed(n<10240?1:0)+" KB";
+  return (n/1048576).toFixed(1)+" MB";
+}
+function ExtensionsModal(props){
+  var tickS=useState(0); var setTick=tickS[1]; var tick=tickS[0];
+  var confirmS=useState(null); var setConfirm=confirmS[1]; var confirm=confirmS[0];
+  var mods=ttModules();
+
+  function refresh(){ setTick(function(x){ return x+1; }); if(props.onChange) props.onChange(); }
+  function flip(m, on){
+    haptic(10);
+    ttSetModuleEnabled(m.id, on);
+    setConfirm(null);
+    refresh();
+  }
+  function wipe(m){
+    haptic([12,40,12]);
+    ttClearModuleData(m.id);
+    setConfirm(null);
+    refresh();
+  }
+
+  var rowBox={ background:S.bg1, border:"1px solid "+S.border, borderRadius:S.radius,
+               padding:"0.8rem 0.9rem", marginBottom:"0.7rem" };
+  var titleRow={ display:"flex", alignItems:"baseline", gap:"0.5rem", marginBottom:"0.2rem" };
+  var summary={ fontSize:"0.8rem", color:S.textDim, marginBottom:"0.6rem", lineHeight:1.35 };
+  var metaRow={ display:"flex", alignItems:"center", justifyContent:"space-between",
+                gap:"0.5rem", marginTop:"0.55rem", fontSize:"0.72rem", color:S.textDim };
+
+  var body = mods.length===0
+    ? React.createElement("div", { style:{ border:"2px dashed "+S.borderBright, borderRadius:S.radius,
+        padding:"1.1rem 0.9rem", textAlign:"center" } },
+        React.createElement("div", { style:{ color:S.text, fontWeight:700, fontSize:"0.92rem", marginBottom:"0.35rem" } },
+          "No extensions yet"),
+        React.createElement("div", { style:{ color:S.textDim, fontSize:"0.82rem", lineHeight:1.4 } },
+          "Extensions add new kinds of record beside the timer - tools, materials, "+
+          "build steps. They ship inside the app and switch on here.")
+      )
+    : React.createElement("div", null,
+        mods.map(function(m){
+          var on=ttModuleEnabled(m.id);
+          var use=ttModuleUsage(m.id);
+          var asking=confirm===m.id;
+          return React.createElement("div", { key:m.id, style:rowBox },
+            React.createElement("div", { style:titleRow },
+              React.createElement("span", { style:{ flex:1, minWidth:0, color:S.text, fontWeight:700,
+                fontSize:"0.95rem", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" } }, m.title),
+              React.createElement(Mono, { style:{ fontSize:"0.7rem", color:S.textMuted, flexShrink:0 } }, "v"+m.version)
+            ),
+            m.summary && React.createElement("div", { style:summary }, m.summary),
+            React.createElement(Toggle, {
+              name:m.title, keys:["off","on"], value:on?"on":"off",
+              labelOf:function(k){ return k==="on" ? "On" : "Off"; },
+              onChange:function(v){ flip(m, v==="on"); }
+            }),
+            React.createElement("div", { style:metaRow },
+              React.createElement("span", null,
+                use.keys ? (use.keys+(use.keys===1?" key":" keys")+" \u00B7 "+fmtBytes(use.bytes)) : "no data stored"),
+              use.keys>0 && !asking && React.createElement("button", { "data-flat":true,
+                onClick:function(){ haptic(8); setConfirm(m.id); },
+                style:{ background:"none", border:"none", padding:"0.2rem 0.1rem", color:S.dangerText,
+                        cursor:"pointer", fontFamily:S.fontBody, fontWeight:600, fontSize:"0.72rem" } },
+                "Delete data")
+            ),
+            // Deleting is destructive and irreversible, so it asks - and says
+            // plainly that a backup is the way back.
+            asking && React.createElement("div", { style:{ marginTop:"0.55rem", background:S.dangerBg2,
+                border:"1px solid "+S.dangerTint, borderRadius:S.radius3, padding:"0.65rem 0.7rem" } },
+              React.createElement("div", { style:{ color:S.dangerText, fontSize:"0.78rem", marginBottom:"0.55rem", lineHeight:1.35 } },
+                "Delete everything "+m.title+" has stored? This cannot be undone except from a backup."),
+              React.createElement("div", { style:{ display:"flex", gap:"0.45rem" } },
+                React.createElement("button", { onClick:function(){ wipe(m); },
+                  style:{ flex:1, background:S.dangerBg, border:"1px solid "+S.dangerBright, borderRadius:S.radius3,
+                          padding:"0.6rem", color:S.dangerText, cursor:"pointer", fontWeight:700,
+                          fontFamily:S.fontBody, fontSize:"0.82rem" } }, "Delete"),
+                React.createElement("button", { onClick:function(){ setConfirm(null); },
+                  style:{ flex:1, background:S.bg1, border:"1px solid "+S.border, borderRadius:S.radius3,
+                          padding:"0.6rem", color:S.textDim, cursor:"pointer",
+                          fontFamily:S.fontBody, fontSize:"0.82rem" } }, "Keep")
+              )
+            )
+          );
+        })
+      );
+
+  return React.createElement(Modal, { title:"Extensions", onClose:props.onClose, cancelLabel:"Close" },
+    React.createElement("div", { style:{ fontSize:"0.8rem", color:S.textDim, marginBottom:"0.85rem", lineHeight:1.4 } },
+      "Switching one off hides it everywhere and keeps its data. Everything here "+
+      "is included in Backup & Restore."),
+    body
+  );
+}
+
 // ---- UNPAID BREAKS MODAL ----------------------------------------------------
 // Edits a draft copy of the schedule's unpaid breaks. "Every work day" breaks
 // apply to all scheduled days; custom daily breaks stack per day on top of
@@ -3919,6 +4019,27 @@ function ttBootModules(storage){
   return ran;
 }
 
+// ---- data accounting --------------------------------------------------------
+// What a module is costing in storage, so the Extensions screen can show it and
+// the user can decide whether to keep it. Bytes are the stored JSON length,
+// which is what actually counts against the localStorage quota.
+function ttModuleUsage(id, storage){
+  var store=ttModStorage(id, storage), st=ttStore(storage);
+  var keys=store.keys(), bytes=0;
+  keys.forEach(function(k){
+    try{ var v=st.getItem(ttModKey(id,k)); if(v) bytes+=v.length; }catch(e){}
+  });
+  return { keys:keys.length, bytes:bytes };
+}
+// Deleting a module's data is separate from switching it off: off is
+// reversible and keeps everything, this is the deliberate throw-away.
+function ttClearModuleData(id, storage){
+  if(!TT_BY_ID[id]) return 0;
+  var store=ttModStorage(id, storage), n=store.keys().length;
+  store.clear();
+  return n;
+}
+
 // ---- host hooks -------------------------------------------------------------
 // Each returns [] with no modules registered, which is why Phase 1 is invisible.
 function ttModuleNav(storage){
@@ -3981,6 +4102,9 @@ var TT = {
   storage: ttModStorage,
   key: ttModKey,
   prefix: TT_MOD_PREFIX,
+
+  usage: ttModuleUsage,
+  clearData: ttClearModuleData,
 
   nav: ttModuleNav,
   screen: ttModuleScreen,
@@ -4114,8 +4238,13 @@ export default function App(){
   var showDayS=useState(false); var setShowDay=showDayS[1]; var showDay=showDayS[0];
   var showReportsS=useState(false); var setShowReports=showReportsS[1]; var showReports=showReportsS[0];
   var showBackupS=useState(false); var setShowBackup=showBackupS[1]; var showBackup=showBackupS[0];
+  var showExtensionsS=useState(false); var setShowExtensions=showExtensionsS[1]; var showExtensions=showExtensionsS[0];
   // Whichever module screen is open, as { id, screen }. Null with no modules.
   var modScreenS=useState(null); var setModScreen=modScreenS[1]; var modScreen=modScreenS[0];
+  // Enablement lives in storage, not in React state, so a toggle in Extensions
+  // would otherwise leave the menu stale. Bumping this forces the re-render
+  // that makes ttModuleNav() and the Reports hooks read the store again.
+  var modTickS=useState(0); var setModTick=modTickS[1];
   var showNewLaneS=useState(false); var setShowNewLane=showNewLaneS[1]; var showNewLane=showNewLaneS[0];
   var showEditLanesS=useState(false); var setShowEditLanes=showEditLanesS[1]; var showEditLanes=showEditLanesS[0];
   var confirmDeleteS=useState(null); var setConfirmDelete=confirmDeleteS[1]; var confirmDelete=confirmDeleteS[0];
@@ -4279,7 +4408,7 @@ export default function App(){
   function closeAllPopups(){
     setShowAdd(null); setEditProj(null); setStagesProj(null); setShowDisrupt(false);
     setShowBreak(false); setShowDay(false); setShowNewLane(false); setShowEditLanes(false);
-    setShowReports(false); setShowBackup(false); setModScreen(null);
+    setShowReports(false); setShowBackup(false); setShowExtensions(false); setModScreen(null);
     setConfirmDelete(null); setShowTestConfirm(false);
     setMenuOpen(false); setAddMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowSettings(false); setShowSchedule(false); setShowTracking(false); setTimeMenuOpen(false);
     try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){}
@@ -4673,6 +4802,11 @@ export default function App(){
                 style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
                 "Backup & Restore"
               ),
+              // Extensions
+              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowExtensions(true); },
+                style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+                "Extensions"
+              ),
               // Module rows: one group header, then one row per enabled module
               // that declares a nav entry. Renders nothing while none exist.
               modGroups.map(function(g){
@@ -4818,6 +4952,9 @@ export default function App(){
         React.createElement("div", { style:{color:S.textDim,fontSize:"0.78rem",marginTop:"0.15rem",fontFamily:S.fontBody} }, notifToast.body)
       ),
       showBackup && React.createElement(BackupModal, { onClose:function(){ setShowBackup(false); } }),
+      showExtensions && React.createElement(ExtensionsModal, {
+        onChange:function(){ setModTick(function(x){ return x+1; }); },
+        onClose:function(){ setShowExtensions(false); } }),
       // Module screens mount here: a sibling of the core modals, never nested
       // inside a backdrop-filter surface, so the glass themes stay correct.
       modScreen && ttModuleScreen(modScreen.id, modScreen.screen) &&

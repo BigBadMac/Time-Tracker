@@ -26,7 +26,7 @@ A module is a plain object passed to `TT.define()`.
 | `title` | yes | Human name for menus and the Extensions list. |
 | `version` | yes | Integer ≥ 1. The module's own schema version. |
 | `summary` | no | One line of description. |
-| `defaultEnabled` | no | `false` unless stated. À la carte means off first. |
+| `defaultEnabled` | no | `false` unless stated. À la carte means off first — the user turns it on in Extensions. |
 | `nav` | no | `{ label, screen, group }` — one row in the settings menu that opens `screens[screen]`. `group` defaults to `"Modules"`. |
 | `screens` | no | `{ name: Component }`. Rendered as sibling overlays. |
 | `storage` | no | `{ keys: [bare slugs], normalize(store, api) }`. |
@@ -116,30 +116,38 @@ once the user enables it in Extensions (Phase 2); until then set
 ## Tests
 
 ```
-python3 build.py --src time-tracker.jsx --shell index.html --out index.html \
-                 --stamp "08-20 module platform"
-node tt-tests.js time-tracker.jsx    # source
-node boot.js                          # the built payload, evaluated and rendered
+node tt-tests.js time-tracker.jsx
 ```
 
-`build.py` replaces only the app `<script>`; the inlined React 19 bundle, the
-manifest links, the service-worker registration and the error trap are copied
-through byte for byte. `boot.js` evaluates the built payload against a stub DOM
-and renders `App` once — it is not a Playwright substitute, but it catches a
-file that will not load on the phone.
-
-`tt-tests.js` is one file, three suites, 291 assertions: the contract, a reference module's full
+One file, four suites, 334 assertions: the contract, a reference module's full
 lifecycle (including a v1→v2 migration at boot), and the host wiring plus the
 architectural invariants. The syntax gate runs first when `typescript` is
 installed and is skipped cleanly when it is not.
+
+## Extensions screen
+
+Settings menu → **Extensions**. Lists every *registered* module, on or off — it
+is the only place enablement changes. Each row shows the title, version, summary,
+an On/Off `Toggle`, and the storage the module is holding.
+
+Two distinct actions, deliberately kept apart:
+
+- **Off** hides the module everywhere and **keeps its data**. Reversible.
+- **Delete data** wipes `tt_mod_<id>_*` for that module only, behind a
+  confirmation. It does not change the on/off state, and it does not touch core
+  data or any other module. The only way back is a backup.
+
+`TT.usage(id)` returns `{ keys, bytes }`; `TT.clearData(id)` returns how many
+keys it removed.
 
 ## Roadmap position
 
 - **Phase 0** — export/import. Done.
 - **Phase 1** — this. Contract, registry, namespaced storage, boot normalizers,
   nav/screen/settings/reports hosts, conformance suite.
-- **Phase 2** — Extensions screen: list modules, toggle them, persist. The
-  plumbing (`TT.enabled` / `TT.setEnabled` / `tt_modules`) already exists.
+- **Phase 2** — Extensions screen. Done. Settings menu → **Extensions** lists
+  every registered module with an On/Off switch, its version, summary, and what
+  it is costing in storage, plus a confirmed **Delete data** per module.
 - **Phase 3** — first real module, Tool Tracker.
 - **Phase 4** — Project Builder, last, because it extends the core project
   entity rather than sitting beside it.

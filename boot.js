@@ -16,7 +16,8 @@ const navigator = { vibrate(){}, clipboard: { writeText: () => Promise.resolve()
 const document = { addEventListener(){}, removeEventListener(){}, getElementById: () => null };
 const src = fs.readFileSync(process.argv[2] || "/tmp/app_only.js", "utf8");
 const fn = new Function("React", "window", "localStorage", "navigator", "document", "Event",
-  src + "\nreturn { App, TT };");
+  src + "\nreturn { App, TT: typeof TT !== 'undefined' ? TT : null," +
+        " ExtensionsModal: typeof ExtensionsModal !== 'undefined' ? ExtensionsModal : null };");
 const out = fn(React, win, localStorage, navigator, document, function Event(t){ return { type: t }; });
 
 const ok = [];
@@ -28,6 +29,23 @@ ok.push(["no modules registered", out.TT.modules().length === 0]);
 ok.push(["nav empty", out.TT.nav().length === 0]);
 ok.push(["boot is a no-op with no modules", out.TT.boot().length === 0]);
 ok.push(["report hooks empty", out.TT.reportSections({}).length === 0 && out.TT.reportText({}).length === 0]);
+
+// The Extensions screen, empty and populated. Rendering it here is the closest
+// thing to opening it on the phone that this container can manage.
+let ext = "";
+try {
+  const { renderToStaticMarkup } = require("react-dom/server");
+  ext = renderToStaticMarkup(React.createElement(out.ExtensionsModal, { onClose(){}, onChange(){} }));
+  ok.push(["Extensions renders empty", ext.indexOf("No extensions yet") >= 0]);
+  out.TT.define({ id: "probe", title: "Probe Module", version: 3, summary: "A test fixture." });
+  out.TT.storage("probe").set("items", [1, 2, 3]);
+  const full = renderToStaticMarkup(React.createElement(out.ExtensionsModal, { onClose(){}, onChange(){} }));
+  ok.push(["Extensions lists a module", full.indexOf("Probe Module") >= 0]);
+  ok.push(["shows its version", full.indexOf("v3") >= 0]);
+  ok.push(["shows its storage cost", /1 key/.test(full)]);
+  ok.push(["offers to delete its data", full.indexOf("Delete data") >= 0]);
+  ok.push(["defaults to Off", /aria-checked="true"[^>]*>Off</.test(full)]);
+} catch (e) { ok.push(["Extensions renders", false]); console.log("   " + e.message); }
 
 // Render App once through the test renderer path react provides in-tree.
 let rendered = null;

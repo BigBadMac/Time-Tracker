@@ -1,8 +1,8 @@
 // tt-tests.js - the whole static test estate for the Time Tracker in one file.
 //   node tt-tests.js [path/to/time-tracker.jsx]
-// Three suites: the module contract, a reference module's full lifecycle, and
-// the host wiring plus the architectural invariants. Syntax checking runs
-// first when the TypeScript parser is available.
+// Four suites: the module contract, a reference module's full lifecycle, the
+// host wiring plus the architectural invariants, and the Extensions screen.
+// The syntax gate runs first when the TypeScript parser is available.
 const fs = require("fs");
 const SRC_PATH = process.argv[2] || process.env.TT_SRC || "time-tracker.jsx";
 
@@ -49,7 +49,6 @@ function report(title) {
   }
   return { pass, fail, total, cases: suites.length };
 }
-
 
 // ---- syntax gate ------------------------------------------------------------
 function syntaxCheck() {
@@ -169,6 +168,7 @@ function loadPlatform(opts) {
 // ============================================================
 // contract: the module contract
 // ============================================================
+(function(){
 // t_platform.js - conformance suite for the module contract (TT platform v1).
 
 // A minimal module that satisfies the contract, used as the baseline everywhere.
@@ -539,9 +539,12 @@ test("the platform itself reaches localStorage in exactly one place", () => {
 });
 
 
+})();
+
 // ============================================================
 // reference: a full module, end to end
 // ============================================================
+(function(){
 // t_reference.js - a throwaway Tool Tracker built only in the test, to prove
 // the contract is actually sufficient for the module Phase 3 will ship. If a
 // real module would need something this one cannot express, it fails here
@@ -674,9 +677,12 @@ test("two modules coexist without knowing about each other", () => {
 });
 
 
+})();
+
 // ============================================================
 // wiring: the host actually mounts the platform
 // ============================================================
+(function(){
 // t_wiring.js - the platform is only real if the app actually mounts it.
 // Static assertions against the source, plus a live round-trip of the core
 // backup functions over module-owned keys.
@@ -754,10 +760,11 @@ test("module settings panels mount inside Themes and Layout", () => {
 });
 
 // ---- Phase 1 changes nothing visible ----------------------------------------
-test("no modules ship in this build, so the UI is unchanged", () => {
+test("no modules ship in this build; Extensions is the only new surface", () => {
   eq(count(/TT\.define\(\{/g), 0, "nothing is registered in the app source");
   eq(count(/ttDefineModule\(\{/g), 0, "and nothing bypasses TT.define");
   eq(count(/TT_REGISTRY\.push/g), 1, "the only push is inside ttDefineModule");
+  eq(count(/setShowExtensions\(true\)/g), 1, "exactly one way into Extensions");
 });
 
 // ---- invariants the refactor must not have broken ---------------------------
@@ -831,6 +838,132 @@ test("a restore clears module data the backup did not contain", () => {
   eq(st.getItem("tt_mod_ghost_items"), null, "orphaned module data does not survive replace-all");
 });
 
+
+})();
+
+// ============================================================
+// extensions: the Phase 2 switchboard
+// ============================================================
+(function(){
+// t_extensions.js - Phase 2: the Extensions screen and the accounting it needs.
+const s = source();
+const has = (re, label) => ok(re.test(s), label);
+const count = (re) => (s.match(re) || []).length;
+
+function base(over) {
+  return Object.assign({ id: "tools", title: "Tool Tracker", version: 1 }, over || {});
+}
+
+// ---- accounting --------------------------------------------------------------
+test("usage reports only this module's keys and bytes", () => {
+  const st = memStorage({ tt_logs: '["a lot of core data here"]' });
+  const p = loadPlatform({ storage: st });
+  p.TT.define(base());
+  p.TT.define(base({ id: "materials", title: "Materials" }));
+  same(p.TT.usage("tools"), { keys: 0, bytes: 0 }, "a fresh module costs nothing");
+  p.ttModStorage("tools").set("items", [1, 2]);        // "[1,2]"      -> 5
+  p.ttModStorage("tools").set("schema", 1);            // "1"          -> 1
+  p.ttModStorage("materials").set("items", ["xxxxxxx"]);
+  same(p.TT.usage("tools"), { keys: 2, bytes: 6 }, "counts stored JSON length");
+  eq(p.TT.usage("materials").keys, 1, "the other module is counted separately");
+  same(p.TT.usage("ghost"), { keys: 0, bytes: 0 }, "an unknown id reports nothing");
+});
+
+test("deleting a module's data touches nothing else", () => {
+  const st = memStorage({ tt_logs: "[]", tt_modules: '{"tools":true}' });
+  const p = loadPlatform({ storage: st });
+  p.TT.define(base());
+  p.TT.define(base({ id: "materials", title: "Materials" }));
+  p.ttModStorage("tools").set("items", [1]);
+  p.ttModStorage("materials").set("items", [2]);
+  eq(p.TT.clearData("tools"), 1, "reports how many keys went");
+  eq(p.TT.usage("tools").keys, 0, "its data is gone");
+  eq(p.TT.usage("materials").keys, 1, "the neighbour is untouched");
+  eq(st.getItem("tt_logs"), "[]", "core data untouched");
+  eq(st.getItem("tt_modules"), '{"tools":true}', "enablement survives a data wipe");
+  eq(p.TT.clearData("ghost"), 0, "an unknown id is a no-op");
+});
+
+test("deleting data does not disable, and disabling does not delete", () => {
+  const p = loadPlatform();
+  p.TT.define(base({ defaultEnabled: true }));
+  p.ttModStorage("tools").set("items", [1]);
+  p.TT.clearData("tools");
+  eq(p.TT.isEnabled("tools"), true, "still on after a wipe");
+  p.ttModStorage("tools").set("items", [1]);
+  p.TT.setEnabled("tools", false);
+  eq(p.TT.usage("tools").keys, 1, "still holding its data after being switched off");
+});
+
+// ---- the screen ---------------------------------------------------------------
+test("the Extensions screen exists and is reachable", () => {
+  has(/function ExtensionsModal\(props\)\{/, "component defined");
+  has(/React\.createElement\(ExtensionsModal, \{/, "mounted in the overlay list");
+  has(/setShowExtensions\(true\)/, "opened from the settings menu");
+  ok(s.indexOf('"Extensions"\n              )') > 0 || /}, "Extensions"/.test(s), "a menu row labelled Extensions");
+  const fn = s.slice(s.indexOf("function closeAllPopups(){"));
+  ok(/setShowExtensions\(false\)/.test(fn.slice(0, fn.indexOf("\n  }"))), "closed with every other popup");
+});
+
+test("it is a sibling overlay like every other modal", () => {
+  const i = s.indexOf("React.createElement(BackupModal");
+  const j = s.indexOf("React.createElement(ExtensionsModal");
+  const k = s.indexOf("ttModuleContext(modScreen.id");
+  ok(i < j && j < k, "sits between Backup and the module screens");
+  const mod = s.slice(s.indexOf("function ExtensionsModal(props){"));
+  ok(/React\.createElement\(Modal, \{ title:"Extensions"/.test(mod), "built on the core Modal, no new layer");
+});
+
+test("it lists every module, not just the enabled ones", () => {
+  const mod = s.slice(s.indexOf("function ExtensionsModal(props){"), s.indexOf("// ---- UNPAID BREAKS MODAL"));
+  ok(/var mods=ttModules\(\);/.test(mod), "reads the whole registry");
+  ok(!/ttEnabledModules\(/.test(mod), "does not filter to enabled - that would hide the switch");
+  ok(/ttModuleEnabled\(m\.id\)/.test(mod), "asks each one whether it is on");
+  ok(/keys:\["off","on"\]/.test(mod), "uses the core Toggle for the switch");
+});
+
+test("toggling writes through and forces the host to recompute", () => {
+  const mod = s.slice(s.indexOf("function ExtensionsModal(props){"), s.indexOf("// ---- UNPAID BREAKS MODAL"));
+  ok(/ttSetModuleEnabled\(m\.id, on\)/.test(mod), "persists the choice");
+  ok(/props\.onChange\(\)/.test(mod), "tells the host");
+  has(/onChange:function\(\)\{ setModTick\(function\(x\)\{ return x\+1; \}\); \}/, "the host bumps its tick");
+  has(/var modTickS=useState\(0\)/, "the tick exists");
+});
+
+test("deleting data asks first and says how to get it back", () => {
+  const mod = s.slice(s.indexOf("function ExtensionsModal(props){"), s.indexOf("// ---- UNPAID BREAKS MODAL"));
+  ok(/setConfirm\(m\.id\)/.test(mod), "the delete button only arms a confirmation");
+  ok(/ttClearModuleData\(m\.id\)/.test(mod), "the confirmation is what wipes");
+  ok(/cannot be undone except from a backup/.test(mod), "the copy points at the backup");
+  ok(/"Keep"/.test(mod), "and there is a way out");
+  eq((mod.match(/ttClearModuleData/g) || []).length, 1, "exactly one call site");
+});
+
+test("the empty state explains what extensions are", () => {
+  const mod = s.slice(s.indexOf("function ExtensionsModal(props){"), s.indexOf("// ---- UNPAID BREAKS MODAL"));
+  ok(/mods\.length===0/.test(mod), "branches on an empty registry");
+  ok(/No extensions yet/.test(mod), "says so plainly");
+});
+
+test("byte formatting stays readable at every scale", () => {
+  const fmt = new Function(s.slice(s.indexOf("function fmtBytes(n){"),
+    s.indexOf("function ExtensionsModal")) + "return fmtBytes;")();
+  eq(fmt(0), "0 B", "zero");
+  eq(fmt(512), "512 B", "bytes");
+  eq(fmt(2048), "2.0 KB", "small kilobytes keep a decimal");
+  eq(fmt(300000), "293 KB", "large kilobytes drop it");
+  eq(fmt(3 * 1048576), "3.0 MB", "megabytes");
+});
+
+// ---- Phase 2 is the only visible change --------------------------------------
+test("still no modules ship, so Extensions is the whole diff", () => {
+  eq(count(/TT\.define\(\{/g), 0, "nothing is registered in the app source");
+  eq(count(/ttDefineModule\(\{/g), 0, "and nothing bypasses TT.define");
+  eq(count(/TT_REGISTRY\.push/g), 1, "the only push is inside ttDefineModule");
+});
+
+
+})();
 
 // ---- run --------------------------------------------------------------------
 console.log("");
