@@ -18,7 +18,7 @@
 </head>
 <body>
 <pre id="err"></pre>
-<div id="root"><div id="boot">Time Tracker build 08-19 backup<br>
+<div id="root"><div id="boot">Time Tracker build 08-20 module platform<br>
 HTML loaded &#10003; &mdash; starting scripts&hellip;<br>
 <span style="font-size:11px;opacity:.7">If this message never goes away, the scripts below it failed to run.<br>
 If you cannot see this message at all, the file itself is not being displayed.</span></div></div>
@@ -19903,6 +19903,15 @@ function SettingsModal(props){
         })
       ),
 
+      // Module panels, each in the same section box the core uses, so a module
+      // cannot drift from the settings language. None registered yet.
+      ttSettingsPanels().map(function(m){
+        return React.createElement("div", { key:m.id, style:sectionBox },
+          React.createElement("div", { style:sectionHead }, m.title),
+          React.createElement(m.settingsPanel, ttModuleContext(m.id, { settings:settings, onChange:onChange }))
+        );
+      }),
+
       React.createElement("button", { onClick:onClose,
         style:{width:"100%",background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.85rem",color:S.textDim,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600} }, "Close")
     )
@@ -20093,6 +20102,15 @@ function ReportsModal(props){
   var partial  = now>range.start && now<range.end;
   var rel=periodRel(kind, off);
 
+  // What a module's reports hook is handed: the window being viewed and the
+  // core's own rollup, so a module reports against the same period the user is
+  // looking at instead of recomputing one.
+  function modReportCtx(){
+    return { kind:kind, range:range, rollup:roll, logs:allLogs,
+             projects:props.projects||[], schedule:props.schedule,
+             testMode:!!props.testMode, now:now };
+  }
+
   function share(ms){ return roll.trackedMs>0 ? (ms/roll.trackedMs*100) : 0; }
   function toggle(key){
     setOpen(function(prev){ var n=Object.assign({},prev); n[key]=!n[key]; return n; });
@@ -20128,6 +20146,9 @@ function ReportsModal(props){
     if(roll.breakMs>0) out.push("Breaks ("+roll.breakCount+"): "+fmtDur(roll.breakMs,true));
     if(roll.distMs>0) out.push("Disruptions ("+roll.distCount+"): "+fmtDur(roll.distMs,true)+" lost");
     out.push("Days with time: "+roll.activeDays);
+    // Modules append their own lines to the copied report, after the core's.
+    var modLines=ttReportText(modReportCtx());
+    if(modLines.length){ out.push(""); out=out.concat(modLines); }
     return out.join("\n");
   }
   function copy(){
@@ -20336,8 +20357,14 @@ function ReportsModal(props){
         })
       );
 
+  // Module sections sit below the core rollup, above the copy button. Empty
+  // list with no modules registered, so the modal is unchanged today.
+  var modSections=ttReportSections(modReportCtx()).map(function(sec){
+    return React.createElement("div", { key:sec.id, style:{marginTop:"0.9rem"} }, sec.el);
+  });
+
   return React.createElement(Modal, { title:"Reports", onClose:props.onClose, wide:true, cancelLabel:"Close" },
-    seg, nav, summary, payCard, stats, body,
+    seg, nav, summary, payCard, stats, body, modSections,
     roll.trackedMs>0 && React.createElement("button", { "data-flat":true, onClick:copy,
       style:{width:"100%",marginTop:"0.4rem",background:copied?S.successBg2:S.bg1,
              border:"1px solid "+(copied?S.successBorder:S.border),borderRadius:S.radius,
@@ -20895,8 +20922,338 @@ function LaneSection(props){
   );
 }
 
+// ---- MODULE PLATFORM ---------------------------------------------------------
+// Phase 1 draws the line between the app and the platform it stands on.
+//
+// CORE - never a module, always present:
+//   the timer engine and session restore, lanes / projects / sub-tasks, logs,
+//   disruptions and breaks, the schedule + unpaid-break + pay-cycle engine,
+//   Reports, Backup & Restore, themes and tokens, settings.
+//
+// MODULE TERRITORY - anything that introduces a new kind of record alongside
+//   the timer: Tool Tracker, Materials Tracker, Project Builder, and whatever
+//   comes after. A module ships inside this same index.html - iOS isolates
+//   storage per home-screen app, so a separate app could never see these
+//   projects - and is switched on or off by the user rather than downloaded.
+//
+// THE CONTRACT. A module is a plain object passed to TT.define():
+//   id             required  slug: lowercase, leading letter, [a-z0-9-], 2-24.
+//                            Permanent - it names the module's storage keys.
+//   title          required  human name for menus and the Extensions list.
+//   version        required  integer >= 1, the module's own schema version.
+//   summary        optional  one line of description.
+//   defaultEnabled optional  false unless stated. A la carte means off first.
+//   nav            optional  { label, screen, group } - one row in the settings
+//                            menu that opens screens[screen].
+//   screens        optional  { name: Component }. Rendered as sibling overlays,
+//                            never nested inside a backdrop-filter surface.
+//   storage        optional  { keys:[bare slugs], normalize(store, api) }.
+//                            Keys are namespaced tt_mod_<id>_<key>. The
+//                            normalizer runs once at boot, before first paint,
+//                            for enabled and disabled modules alike, and must
+//                            be idempotent and never throw.
+//   settingsPanel  optional  Component rendered inside Themes and Layout.
+//   reports        optional  { section(ctx), text(ctx) } - an extra Reports
+//                            block and extra lines in the copied report.
+//   Any other field is rejected: an unknown key is a typo, not a feature.
+//
+// RULES a module lives by:
+//   - Storage only through ctx.storage. Never touch localStorage directly -
+//     that is what keeps Backup & Restore whole and enable/disable reversible.
+//   - Tokens are live. Call TT.tokens() inside render; never cache S at load
+//     time, because the palette changes underneath when the theme does.
+//   - Any dropdown a module opens broadcasts TT.closeMenus() first.
+//   - Stacking belongs to the core: row 80, lane 95, below-header 300,
+//     modals 900. Modules use TT.ui.Modal rather than inventing layers.
+//
+// Nothing below changes what the app draws. With no modules registered every
+// hook in here resolves to an empty list and renders null.
+// ==== TT PLATFORM BEGIN ====
+var TT_CONTRACT_VERSION = 1;
+var TT_MOD_PREFIX   = "tt_mod_";        // every module key starts here
+var TT_ENABLED_KEY  = "tt_modules";     // { "<id>": true|false }
+var TT_ID_RE        = /^[a-z][a-z0-9-]{1,23}$/;
+var TT_KEY_RE       = /^[a-z][a-z0-9-]{0,31}$/;
+var TT_FIELDS = ["id","title","version","summary","defaultEnabled","nav",
+                 "screens","storage","settingsPanel","reports"];
+
+var TT_REGISTRY = [];   // registration order
+var TT_BY_ID    = {};
+var TT_BOOTED   = {};
+
+function ttStore(storage){
+  if(storage) return storage;
+  try{ return localStorage; }catch(e){ return null; }
+}
+
+// ---- keys -------------------------------------------------------------------
+function ttModKey(id, key){
+  // typeof first: String(undefined) is "undefined", which is itself a legal
+  // slug, so a regex alone would happily namespace a module that has no id.
+  if(typeof id!=="string"  || !TT_ID_RE.test(id))  throw new TypeError("bad module id: "+id);
+  if(typeof key!=="string" || !TT_KEY_RE.test(key)) throw new TypeError("bad module key: "+key);
+  return TT_MOD_PREFIX + id + "_" + key;
+}
+
+// A module never sees localStorage; it gets one of these, bound to its own id.
+// Reads that fail - missing, corrupt, quota-blocked - return the default rather
+// than throwing, exactly like the core's load().
+function ttModStorage(id, storage){
+  var st = ttStore(storage);
+  var prefix = TT_MOD_PREFIX + id + "_";
+  var api = {
+    id: id,
+    key: function(k){ return ttModKey(id, k); },
+    get: function(k, def){
+      try{ var v = st.getItem(ttModKey(id,k)); return v==null ? def : JSON.parse(v); }
+      catch(e){ return def; }
+    },
+    set: function(k, val){
+      try{ st.setItem(ttModKey(id,k), JSON.stringify(val)); return true; }
+      catch(e){ return false; }
+    },
+    remove: function(k){ try{ st.removeItem(ttModKey(id,k)); }catch(e){} },
+    keys: function(){
+      var out=[];
+      try{
+        for(var i=0;i<st.length;i++){
+          var k=st.key(i);
+          if(k && k.indexOf(prefix)===0) out.push(k.slice(prefix.length));
+        }
+      }catch(e){}
+      return out;
+    },
+    clear: function(){ api.keys().forEach(function(k){ api.remove(k); }); }
+  };
+  return api;
+}
+
+// ---- registration -----------------------------------------------------------
+function ttValidateModule(spec){
+  var errs=[];
+  if(!spec || typeof spec!=="object" || Array.isArray(spec)) return ["module must be an object"];
+  Object.keys(spec).forEach(function(k){
+    if(TT_FIELDS.indexOf(k)<0) errs.push("unknown field: "+k);
+  });
+  if(typeof spec.id!=="string" || !TT_ID_RE.test(spec.id)) errs.push("id must match "+TT_ID_RE);
+  else if(TT_BY_ID[spec.id]) errs.push("duplicate id: "+spec.id);
+  if(typeof spec.title!=="string" || !spec.title.trim()) errs.push("title is required");
+  if(typeof spec.version!=="number" || !isFinite(spec.version) ||
+     Math.floor(spec.version)!==spec.version || spec.version<1) errs.push("version must be an integer >= 1");
+  if(spec.summary!==undefined && typeof spec.summary!=="string") errs.push("summary must be a string");
+  if(spec.defaultEnabled!==undefined && typeof spec.defaultEnabled!=="boolean") errs.push("defaultEnabled must be a boolean");
+
+  if(spec.screens!==undefined){
+    if(typeof spec.screens!=="object" || spec.screens===null || Array.isArray(spec.screens)) errs.push("screens must be an object");
+    else Object.keys(spec.screens).forEach(function(n){
+      if(typeof spec.screens[n]!=="function") errs.push("screen "+n+" must be a component function");
+    });
+  }
+  if(spec.nav!==undefined){
+    if(typeof spec.nav!=="object" || spec.nav===null || Array.isArray(spec.nav)) errs.push("nav must be an object");
+    else{
+      if(typeof spec.nav.label!=="string" || !spec.nav.label.trim()) errs.push("nav.label is required");
+      if(typeof spec.nav.screen!=="string" || !spec.nav.screen) errs.push("nav.screen is required");
+      else if(!(spec.screens && spec.screens[spec.nav.screen])) errs.push("nav.screen names no screen: "+spec.nav.screen);
+      if(spec.nav.group!==undefined && typeof spec.nav.group!=="string") errs.push("nav.group must be a string");
+    }
+  }
+  if(spec.storage!==undefined){
+    if(typeof spec.storage!=="object" || spec.storage===null || Array.isArray(spec.storage)) errs.push("storage must be an object");
+    else{
+      if(!Array.isArray(spec.storage.keys)) errs.push("storage.keys must be an array");
+      else spec.storage.keys.forEach(function(k){
+        if(typeof k!=="string" || !TT_KEY_RE.test(k)) errs.push("storage key must be a bare slug: "+k);
+      });
+      if(spec.storage.normalize!==undefined && typeof spec.storage.normalize!=="function")
+        errs.push("storage.normalize must be a function");
+    }
+  }
+  if(spec.settingsPanel!==undefined && typeof spec.settingsPanel!=="function") errs.push("settingsPanel must be a component function");
+  if(spec.reports!==undefined){
+    if(typeof spec.reports!=="object" || spec.reports===null || Array.isArray(spec.reports)) errs.push("reports must be an object");
+    else{
+      if(spec.reports.section!==undefined && typeof spec.reports.section!=="function") errs.push("reports.section must be a function");
+      if(spec.reports.text!==undefined && typeof spec.reports.text!=="function") errs.push("reports.text must be a function");
+    }
+  }
+  return errs;
+}
+
+// Registration is strict and loud: a malformed module is a build-time mistake,
+// and failing at eval beats shipping a module that half-works on the floor.
+function ttDefineModule(spec){
+  var errs=ttValidateModule(spec);
+  if(errs.length) throw new Error("module "+((spec&&spec.id)||"?")+": "+errs.join("; "));
+  var m={
+    id:spec.id, title:spec.title, version:spec.version,
+    summary:spec.summary||"", defaultEnabled:!!spec.defaultEnabled,
+    nav:spec.nav||null, screens:spec.screens||{}, storage:spec.storage||null,
+    settingsPanel:spec.settingsPanel||null, reports:spec.reports||null
+  };
+  TT_REGISTRY.push(m); TT_BY_ID[m.id]=m;
+  return m;
+}
+function ttModules(){ return TT_REGISTRY.slice(); }
+function ttModule(id){ return TT_BY_ID[id]||null; }
+
+// ---- enablement -------------------------------------------------------------
+// The map only records deliberate choices; a module absent from it falls back
+// to its own defaultEnabled, so shipping a new module never rewrites saved state.
+function ttEnabledMap(storage){
+  var st=ttStore(storage);
+  try{
+    var v=st.getItem(TT_ENABLED_KEY);
+    var o=v?JSON.parse(v):null;
+    return (o && typeof o==="object" && !Array.isArray(o)) ? o : {};
+  }catch(e){ return {}; }
+}
+function ttModuleEnabled(id, storage){
+  var m=TT_BY_ID[id]; if(!m) return false;
+  var map=ttEnabledMap(storage);
+  return Object.prototype.hasOwnProperty.call(map,id) ? !!map[id] : !!m.defaultEnabled;
+}
+function ttSetModuleEnabled(id, on, storage){
+  if(!TT_BY_ID[id]) return false;
+  var st=ttStore(storage), map=ttEnabledMap(storage);
+  map[id]=!!on;
+  try{ st.setItem(TT_ENABLED_KEY, JSON.stringify(map)); }catch(e){ return false; }
+  return true;
+}
+function ttEnabledModules(storage){
+  return TT_REGISTRY.filter(function(m){ return ttModuleEnabled(m.id, storage); });
+}
+
+// ---- boot -------------------------------------------------------------------
+// Runs for every registered module, enabled or not: data left by a module the
+// user switched off still has to be valid when they switch it back on. One run
+// per module per session; a normalizer that throws is contained, not fatal.
+function ttBootModules(storage){
+  var ran=[];
+  TT_REGISTRY.forEach(function(m){
+    if(TT_BOOTED[m.id]) return;
+    TT_BOOTED[m.id]=true;
+    if(!m.storage || typeof m.storage.normalize!=="function") return;
+    try{ m.storage.normalize(ttModStorage(m.id, storage), TT); ran.push(m.id); }
+    catch(e){}
+  });
+  return ran;
+}
+
+// ---- host hooks -------------------------------------------------------------
+// Each returns [] with no modules registered, which is why Phase 1 is invisible.
+function ttModuleNav(storage){
+  return ttEnabledModules(storage).filter(function(m){ return m.nav; }).map(function(m){
+    return { id:m.id, label:m.nav.label, group:m.nav.group||"Modules", screen:m.nav.screen };
+  });
+}
+function ttModuleScreen(id, name){
+  var m=TT_BY_ID[id];
+  return (m && m.screens && m.screens[name]) || null;
+}
+function ttModuleContext(id, host){
+  var ctx=Object.assign({}, host||{});
+  ctx.moduleId=id;
+  ctx.storage=ttModStorage(id);
+  ctx.api=TT;
+  return ctx;
+}
+function ttSettingsPanels(storage){
+  return ttEnabledModules(storage).filter(function(m){ return m.settingsPanel; });
+}
+function ttReportSections(ctx, storage){
+  var out=[];
+  ttEnabledModules(storage).forEach(function(m){
+    if(!m.reports || !m.reports.section) return;
+    try{ var el=m.reports.section(ctx); if(el) out.push({ id:m.id, el:el }); }catch(e){}
+  });
+  return out;
+}
+function ttReportText(ctx, storage){
+  var out=[];
+  ttEnabledModules(storage).forEach(function(m){
+    if(!m.reports || !m.reports.text) return;
+    try{
+      var lines=m.reports.text(ctx);
+      if(typeof lines==="string") lines=[lines];
+      if(Array.isArray(lines)) lines.forEach(function(l){ if(typeof l==="string") out.push(l); });
+    }catch(e){}
+  });
+  return out;
+}
+
+// ---- the API ----------------------------------------------------------------
+// Everything a module is allowed to reach for. Style getters are functions, not
+// captured objects: S and INPUT_STYLE are mutated in place by applyTokens, and
+// a module that snapshots them at load time paints the previous theme.
+var TT = {
+  version: TT_CONTRACT_VERSION,
+
+  define: ttDefineModule,
+  validate: ttValidateModule,
+  modules: ttModules,
+  module: ttModule,
+  enabled: ttEnabledModules,
+  isEnabled: ttModuleEnabled,
+  setEnabled: ttSetModuleEnabled,
+  boot: ttBootModules,
+  context: ttModuleContext,
+
+  storage: ttModStorage,
+  key: ttModKey,
+  prefix: TT_MOD_PREFIX,
+
+  nav: ttModuleNav,
+  screen: ttModuleScreen,
+  settingsPanels: ttSettingsPanels,
+  reportSections: ttReportSections,
+  reportText: ttReportText,
+
+  tokens: function(){ return S; },
+  rgba: rgba,
+  haptic: haptic,
+  closeMenus: function(){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} },
+
+  ui: {
+    Modal: Modal,
+    ModalActions: ModalActions,
+    Mono: Mono,
+    Toggle: Toggle,
+    Carousel: Carousel,
+    saveStyle: MODAL_SAVE,
+    cancelStyle: MODAL_CANCEL,
+    timeFieldStyle: TIME_FIELD_STYLE,
+    inputStyle: function(){ return Object.assign({}, INPUT_STYLE); },
+    labelStyle: function(){ return Object.assign({}, LABEL_STYLE); }
+  },
+
+  fmt: {
+    dur: fmtDur, time: fmtTime, date: fmtDate,
+    hours: fmtHours, money: fmtMoney, pad: pad
+  },
+
+  time: {
+    DAY_KEYS: DAY_KEYS, DAY_LABELS: DAY_LABELS,
+    dayKeyOf: dayKeyOf, isoDate: isoDate, toMin: toMin,
+    startOfDay: startOfDay, addDays: addDays, startOfWeek: startOfWeek,
+    startOfMonth: startOfMonth, startOfQuarter: startOfQuarter, startOfYear: startOfYear,
+    periodRange: periodRange, periodLabel: periodLabel, payCycleRange: payCycleRange,
+    scheduledMinutes: scheduledMinutes, scheduledToDate: scheduledToDate,
+    schNetMinutes: schNetMinutes
+  },
+
+  data: { uid: uid, findProj: findProj, getChildren: getChildren, getDescendantIds: getDescendantIds }
+};
+try{ window.TT = TT; }catch(e){}
+// ==== TT PLATFORM END ====
+
 // ---- MAIN APP ---------------------------------------------------------------
 function App(){
+  // Module normalizers run once, in a lazy initializer, so every module's
+  // saved shape is current before the first paint - the same guarantee
+  // normalizeSchedule and normalizeNotifs give the core.
+  useState(function(){ return ttBootModules(); });
+
   // Mode
   var testModeS=useState(function(){ return load("tt_testmode",false); }); var setTestMode=testModeS[1]; var testMode=testModeS[0];
   var editModeS=useState(false); var setEditMode=editModeS[1]; var editMode=editModeS[0];
@@ -20978,6 +21335,8 @@ function App(){
   var showDayS=useState(false); var setShowDay=showDayS[1]; var showDay=showDayS[0];
   var showReportsS=useState(false); var setShowReports=showReportsS[1]; var showReports=showReportsS[0];
   var showBackupS=useState(false); var setShowBackup=showBackupS[1]; var showBackup=showBackupS[0];
+  // Whichever module screen is open, as { id, screen }. Null with no modules.
+  var modScreenS=useState(null); var setModScreen=modScreenS[1]; var modScreen=modScreenS[0];
   var showNewLaneS=useState(false); var setShowNewLane=showNewLaneS[1]; var showNewLane=showNewLaneS[0];
   var showEditLanesS=useState(false); var setShowEditLanes=showEditLanesS[1]; var showEditLanes=showEditLanesS[0];
   var confirmDeleteS=useState(null); var setConfirmDelete=confirmDeleteS[1]; var confirmDelete=confirmDeleteS[0];
@@ -21141,11 +21500,24 @@ function App(){
   function closeAllPopups(){
     setShowAdd(null); setEditProj(null); setStagesProj(null); setShowDisrupt(false);
     setShowBreak(false); setShowDay(false); setShowNewLane(false); setShowEditLanes(false);
-    setShowReports(false); setShowBackup(false);
+    setShowReports(false); setShowBackup(false); setModScreen(null);
     setConfirmDelete(null); setShowTestConfirm(false);
     setMenuOpen(false); setAddMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowSettings(false); setShowSchedule(false); setShowTracking(false); setTimeMenuOpen(false);
     try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){}
   }
+  // ---- Module nav ----
+  // Enabled modules that declare a nav entry become rows in the settings menu,
+  // bucketed by group in first-registered order. Empty until a module ships,
+  // so the menu is byte-identical to the previous build today.
+  var modNav=ttModuleNav();
+  var modGroups=[];
+  modNav.forEach(function(entry){
+    var g=modGroups.filter(function(x){ return x.name===entry.group; })[0];
+    if(!g){ g={ name:entry.group, items:[] }; modGroups.push(g); }
+    g.items.push(entry);
+  });
+  function openModule(entry){ closeAllPopups(); setModScreen({ id:entry.id, screen:entry.screen }); }
+
   useEffect(function(){
     function closeHeaderMenus(){ setMenuOpen(false); setAddMenuOpen(false); setDistMenuOpen(false); setTimeMenuOpen(false); }
     window.addEventListener("ttCloseMenus",closeHeaderMenus);
@@ -21522,6 +21894,19 @@ function App(){
                 style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
                 "Backup & Restore"
               ),
+              // Module rows: one group header, then one row per enabled module
+              // that declares a nav entry. Renders nothing while none exist.
+              modGroups.map(function(g){
+                return React.createElement("div", { key:g.name },
+                  React.createElement("div", { style:{padding:"0.55rem 1rem 0.35rem",color:S.textDim,fontSize:"0.66rem",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.09em",borderBottom:"1px solid "+S.border,background:rgba(S.bg0,0.5),whiteSpace:"nowrap"} }, g.name),
+                  g.items.map(function(entry){
+                    return React.createElement("button", { "data-flat":true, key:entry.id+":"+entry.screen,
+                      onClick:function(){ openModule(entry); },
+                      style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+                      entry.label);
+                  })
+                );
+              }),
               // Arrange
               React.createElement("button", { "data-flat":true, onClick:function(){ setEditMode(function(x){ return !x; }); setMenuOpen(false); },
                 style:{display:"block",width:"100%",textAlign:"left",background:editMode?S.bg3:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:editMode?S.arrangeText:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:editMode?700:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
@@ -21654,6 +22039,15 @@ function App(){
         React.createElement("div", { style:{color:S.textDim,fontSize:"0.78rem",marginTop:"0.15rem",fontFamily:S.fontBody} }, notifToast.body)
       ),
       showBackup && React.createElement(BackupModal, { onClose:function(){ setShowBackup(false); } }),
+      // Module screens mount here: a sibling of the core modals, never nested
+      // inside a backdrop-filter surface, so the glass themes stay correct.
+      modScreen && ttModuleScreen(modScreen.id, modScreen.screen) &&
+        React.createElement(ttModuleScreen(modScreen.id, modScreen.screen),
+          ttModuleContext(modScreen.id, {
+            settings:settings, projects:projects, logs:logs, laneMeta:laneMeta,
+            laneOrder:laneOrder, testMode:testMode, schedule:settings.workSchedule,
+            onClose:function(){ setModScreen(null); }
+          })),
       showReports && React.createElement(ReportsModal, { logs:logs, projects:projects, disruptions:disruptions,
         breaks:breaks, laneMeta:laneMeta, laneOrder:laneOrder, schedule:settings.workSchedule, testMode:testMode,
         liveLogs:liveLogs(), onClose:function(){ setShowReports(false); } }),
@@ -21677,7 +22071,6 @@ function App(){
     )
   );
 }
-
 
 try {
   ReactDOMClient.createRoot(document.getElementById('root')).render(React.createElement(App));

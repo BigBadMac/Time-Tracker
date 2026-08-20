@@ -700,8 +700,11 @@ test("the platform block is delimited exactly once", () => {
 // ---- boot --------------------------------------------------------------------
 test("module normalizers run at boot, before the first paint", () => {
   has(/useState\(function\(\)\{ return ttBootModules\(\); \}\)/, "boot runs in a lazy state initializer");
-  order("export default function App(){", "ttBootModules()", "boot is inside App");
-  const appBody = s.slice(s.indexOf("export default function App(){"));
+  // The build strips `export default`, so anchor on a form both files share.
+  const appDecl = /(export default )?function App\(\)\{/.exec(s);
+  ok(appDecl, "App is declared");
+  ok(appDecl.index < s.indexOf("ttBootModules()"), "boot is inside App");
+  const appBody = s.slice(appDecl.index);
   const bootAt = appBody.indexOf("ttBootModules()");
   const firstLoad = appBody.indexOf('load("tt_');
   ok(bootAt < firstLoad, "boot happens before the first core load()");

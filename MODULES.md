@@ -116,10 +116,19 @@ once the user enables it in Extensions (Phase 2); until then set
 ## Tests
 
 ```
-node tt-tests.js time-tracker.jsx
+python3 build.py --src time-tracker.jsx --shell index.html --out index.html \
+                 --stamp "08-20 module platform"
+node tt-tests.js time-tracker.jsx    # source
+node boot.js                          # the built payload, evaluated and rendered
 ```
 
-One file, three suites, 290 assertions: the contract, a reference module's full
+`build.py` replaces only the app `<script>`; the inlined React 19 bundle, the
+manifest links, the service-worker registration and the error trap are copied
+through byte for byte. `boot.js` evaluates the built payload against a stub DOM
+and renders `App` once — it is not a Playwright substitute, but it catches a
+file that will not load on the phone.
+
+`tt-tests.js` is one file, three suites, 291 assertions: the contract, a reference module's full
 lifecycle (including a v1→v2 migration at boot), and the host wiring plus the
 architectural invariants. The syntax gate runs first when `typescript` is
 installed and is skipped cleanly when it is not.
