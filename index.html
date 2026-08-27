@@ -18,7 +18,7 @@
 </head>
 <body>
 <pre id="err"></pre>
-<div id="root"><div id="boot">Time Tracker build 08-20 extensions<br>
+<div id="root"><div id="boot">Time Tracker build 08-22 nested pill tuck<br>
 HTML loaded &#10003; &mdash; starting scripts&hellip;<br>
 <span style="font-size:11px;opacity:.7">If this message never goes away, the scripts below it failed to run.<br>
 If you cannot see this message at all, the file itself is not being displayed.</span></div></div>
@@ -17266,7 +17266,14 @@ function fmtDur(ms, short){
 }
 function fmtTime(ts){ if(!ts) return "--"; var d=new Date(ts); return pad(d.getHours())+":"+pad(d.getMinutes()); }
 function fmtDate(ts){ if(!ts) return "--"; var d=new Date(ts); return (d.getMonth()+1)+"/"+d.getDate()+"/"+d.getFullYear(); }
-function todayStr(){ return new Date().toDateString(); }
+// ---- WORK DAY ---------------------------------------------------------------
+// Which work day a moment belongs to. Right now that is the calendar day, which
+// is what every surface has always assumed. It lives in one function so the
+// rule can become shift-relative without hunting down date maths everywhere:
+// nothing else in the app is allowed to call toDateString() on a record.
+function workDayOf(ts){ return new Date(ts).toDateString(); }
+function todayStr(){ return workDayOf(Date.now()); }
+function sameWorkDay(ts, dayKey){ return !!ts && workDayOf(ts)===dayKey; }
 function haptic(pattern){ try{ if(navigator&&navigator.vibrate) navigator.vibrate(pattern||10); }catch(e){} }
 function load(key, def){ try{ var v=localStorage.getItem(key); return v?JSON.parse(v):def; }catch(e){ return def; } }
 function save(key, val){ try{ localStorage.setItem(key,JSON.stringify(val)); }catch(e){} }
@@ -17338,6 +17345,140 @@ function getMeta(laneMeta, lane){
   }
   return m;
 }
+// ---- NESTING ----------------------------------------------------------------
+// A project can sit inside another project, not just tasks inside a project:
+// some work genuinely cannot start until a different project is finished, and
+// flattening that into a task loses the fact that it is a project in its own
+// right. Depth is capped because indentation runs out of phone before the
+// structure runs out of ideas.
+var MAX_NEST_DEPTH = 4;
+
+function projDepth(projects, id){
+  var d=0, cur=findProj(projects||[], id);
+  while(cur && cur.parentId!=null && d<32){ cur=findProj(projects, cur.parentId); d++; }
+  return d;
+}
+// How many levels hang below this one. A leaf is 0.
+function subtreeDepth(projects, id){
+  var kids=getChildren(projects||[], id), best=0;
+  for(var i=0;i<kids.length;i++) best=Math.max(best, 1+subtreeDepth(projects, kids[i].id));
+  return best;
+}
+// Whether `self` may be nested under `targetId`. Guards the three ways this
+// goes wrong: nesting something inside itself, inside its own descendant -
+// which would cut the whole branch off the board with no way back - or deeper
+// than the cap once its own subtree is carried along with it.
+function canNestUnder(projects, self, targetId){
+  if(targetId==null) return true;
+  var target=findProj(projects||[], targetId);
+  if(!target) return false;
+  if(self){
+    if(targetId===self.id) return false;
+    if(getDescendantIds(projects||[], self.id).indexOf(targetId)>=0) return false;
+  }
+  var carried = self ? subtreeDepth(projects, self.id) : 0;
+  return projDepth(projects, targetId) + 1 + carried <= MAX_NEST_DEPTH - 1;
+}
+// Every project in a lane that `self` could legally be nested under, depth-first
+// in board order, each tagged with how far to indent it in the picker.
+function nestTargets(projects, self, lane){
+  var out=[];
+  function walk(parentId, depth){
+    if(depth>MAX_NEST_DEPTH) return;
+    (projects||[]).filter(function(p){
+      return (p.parentId==null?null:p.parentId)===parentId && p.lane===lane && isOpen(p);
+    }).sort(function(a,b){ return (a.order||0)-(b.order||0); })
+      .forEach(function(p){
+        if(canNestUnder(projects, self, p.id)) out.push({ p:p, depth:depth });
+        walk(p.id, depth+1);
+      });
+  }
+  walk(null, 0);
+  return out;
+}
+
+// Depth-first order over a project and the projects nested inside it. That
+// order is exactly the order the cards appear down the screen, so using it as a
+// descending z-index makes every card paint over everything below it - parents
+// over their children, and an earlier sibling over a later one. Depth alone was
+// not enough: two siblings share a depth, and equal z-index falls back to DOM
+// order, which put the second sibling on top of the first.
+function projectStackOrder(projects, rootId){
+  var order={}, n=0;
+  (function walk(id){
+    order[id]=n++;
+    (projects||[]).filter(function(p){ return p.parentId===id && isOpen(p) && isProjectRole(p); })
+      .sort(function(a,b){ return (a.order||0)-(b.order||0); })
+      .forEach(function(c){ walk(c.id); });
+  })(rootId);
+  return order;
+}
+// 60 down to 2. The floor matters only past 58 nested cards, where the tail
+// ties instead of going negative and falling behind the lane itself.
+function stackZ(order, id){ return Math.max(2, 60 - (order[id]||0)); }
+
+// ---- PROJECT LIFECYCLE ------------------------------------------------------
+// A project is either ongoing - a daily task that repeats and never finishes -
+// or finite, with a beginning and an end. Either can be closed out at any time.
+//
+// Both facts are read through functions, never off the record directly, because
+// every project that already exists has neither field. An absent kind is
+// ongoing, which is exactly how they have always behaved, and an absent
+// closedAt is open. So there is no migration and nothing moves.
+// Project or task is its own fact, not something inferred from having a parent.
+// Inferring it meant nesting a project demoted it to a task, which is exactly
+// backwards: a project that has to happen before another project is still a
+// project. Records written before this field existed fall back to the old rule,
+// which was right for them - a child was a task, a root was a project.
+function projRole(p){
+  if(p && (p.role==="project" || p.role==="task")) return p.role;
+  return (p && p.parentId!=null) ? "task" : "project";
+}
+function isTaskRole(p){ return projRole(p)==="task"; }
+function isProjectRole(p){ return projRole(p)==="project"; }
+function projKind(p){ return (p && p.kind==="finite") ? "finite" : "ongoing"; }
+function isFinite_(p){ return projKind(p)==="finite"; }
+function isClosed(p){ return !!(p && typeof p.closedAt==="number" && p.closedAt>0); }
+function isOpen(p){ return !isClosed(p); }
+// Stages are the existing checklist. A finite project with every stage ticked
+// is the one moment worth offering to close, so that is what "done" means here.
+function stagesAllDone(p){
+  var st = (p && Array.isArray(p.stages)) ? p.stages : [];
+  return st.length>0 && st.every(function(s){ return s && s.done; });
+}
+function readyToClose(p){ return isOpen(p) && isFinite_(p) && stagesAllDone(p); }
+// Closing a parent while work still hangs off it would hide those tasks with no
+// way back to them, so it is refused and the blockers are named.
+function closeBlockers(projects, p){
+  if(!p) return [];
+  return getChildren(projects||[], p.id).filter(isOpen);
+}
+function canClose(projects, p){
+  if(!p) return { ok:false, blockers:[] };
+  if(isClosed(p)) return { ok:false, blockers:[] };
+  var b=closeBlockers(projects, p);
+  return { ok:b.length===0, blockers:b };
+}
+// A task belongs to its project, so it starts out the same type. Independent
+// afterwards - a one-off audit can sit under an ongoing daily task - but the
+// project is the sensible starting point rather than a blanket default.
+function inheritedKind(projects, parentId){
+  var parent = parentId!=null ? findProj(projects||[], parentId) : null;
+  return parent ? projKind(parent) : "ongoing";
+}
+// Open tasks under a project whose type no longer matches its own. Closed ones
+// are left alone: their type is history now and changing it says nothing.
+function mismatchedTasks(projects, proj){
+  if(!proj) return [];
+  var want=projKind(proj);
+  return getDescendantIds(projects||[], proj.id).map(function(id){
+    return findProj(projects, id);
+  }).filter(function(t){ return t && isOpen(t) && projKind(t)!==want; });
+}
+// The board shows open work only. Closed projects keep every log they ever had
+// - Reports and history are untouched - they simply stop being startable.
+function openProjects(projects){ return (projects||[]).filter(isOpen); }
+
 function getChildren(projects, parentId){ return projects.filter(function(p){ return p.parentId===parentId; }); }
 function getDescendantIds(projects, id){
   var result=[], queue=getChildren(projects,id);
@@ -17451,8 +17592,13 @@ var S = {
 
 // ---- PRIMITIVES --------------------------------------------------------------
 function Mono(props){
-  var style = Object.assign({ fontFamily:S.fontMono }, props.style||{});
-  return React.createElement("span", { style:style }, props.children);
+  // Everything but style and children is forwarded, so callers can hang a
+  // data- attribute or an aria label on a Mono span. Dropping them silently is
+  // how a data-glow ends up doing nothing at all.
+  var out = {};
+  Object.keys(props).forEach(function(k){ if(k!=="style" && k!=="children") out[k]=props[k]; });
+  out.style = Object.assign({ fontFamily:S.fontMono }, props.style||{});
+  return React.createElement("span", out, props.children);
 }
 
 // Floating modal action bar. Sticky inside the scrolling shell, so it stays
@@ -17501,7 +17647,12 @@ function Modal(props){
   );
 }
 
-var INPUT_STYLE = { direction:"ltr",textAlign:"left",width:"100%",background:"#0A0A16",border:"2px solid "+S.border,borderRadius:S.radius3,padding:"0.65rem 0.85rem",color:S.text,fontFamily:S.fontBody,fontSize:"0.92rem",outline:"none" };
+// 16px, not 0.92rem. Safari on iOS zooms the whole page in when a field with
+// text under 16px takes focus, and it never zooms back out when the field goes
+// away - so closing a modal left the app stuck larger than it started, needing
+// a manual pinch. Every focusable field in the app is pinned at 16px for that
+// reason; the stylesheet enforces it for any that set their own size.
+var INPUT_STYLE = { direction:"ltr",textAlign:"left",width:"100%",background:"#0A0A16",border:"2px solid "+S.border,borderRadius:S.radius3,padding:"0.65rem 0.85rem",color:S.text,fontFamily:S.fontBody,fontSize:"16px",outline:"none" };
 var LABEL_STYLE = { display:"block",color:S.textDim,fontSize:"0.75rem",marginBottom:"0.35rem",textTransform:"uppercase",letterSpacing:"0.08em" };
 
 // ---- DESIGN TOKENS -----------------------------------------------------------
@@ -18231,13 +18382,48 @@ function ProjectForm(props){
   var laneS = useState(project?project.lane:(defaultLane||"Daily Activity")); var setLane=laneS[1]; var lane=laneS[0];
   var notesS = useState(project?project.notes:""); var setNotes=notesS[1]; var notes=notesS[0];
   var parentIdS = useState(project?project.parentId:(defaultParentId||null)); var setParentId=parentIdS[1]; var parentId=parentIdS[0];
+  var kindS = useState(function(){
+    return project ? projKind(project) : inheritedKind(parents, defaultParentId||null);
+  });
+  var setKind=kindS[1]; var kind=kindS[0];
+  // Until the type is set by hand, it tracks whichever project is selected as
+  // the parent. Touch the toggle once and it stops moving underneath you.
+  var kindTouched=useRef(false);
+  // An existing project keeps whatever it already is, so moving it under
+  // another project does not quietly turn it into a task.
+  var roleS = useState(function(){
+    return project ? projRole(project) : ((defaultParentId||null)!=null ? "task" : "project");
+  });
+  var setRole=roleS[1]; var role=roleS[0];
+  // A select hands back a string; project ids are numbers, and every child
+  // lookup in the app is a strict ===. Storing the raw value here would file
+  // the project under a parent nothing can match, so it is resolved back to the
+  // real id before it goes anywhere.
+  function resolveParentId(v){
+    if(v==null || v==="") return null;
+    var hit=(parents||[]).filter(function(p){ return String(p.id)===String(v); })[0];
+    return hit ? hit.id : null;
+  }
+  function pickParent(v){
+    var id=resolveParentId(v);
+    setParentId(id);
+    if(!project && !kindTouched.current) setKind(inheritedKind(parents, id));
+  }
 
-  var eligibleParents = parents.filter(function(p){ return p.lane===lane && p.parentId===null && p.id!==(project&&project.id); });
+  // Any project in the lane, not just the top-level ones, minus anything that
+  // would make a loop or bust the depth cap.
+  var eligibleParents = nestTargets(parents, project||null, lane);
+  // A project with a parent is a task. The form reads that off its own live
+  // selection rather than off how it was opened, so choosing a parent from the
+  // dropdown relabels the buttons with it.
+  var noun = (parentId!=null && role==="task") ? "Task" : "Project";
   var laneKeys = laneOrder.filter(function(k){ return getMeta(laneMeta,k); });
 
   function submit(){
     if(!name.trim()) return;
-    onSave({ name:name.trim(), lane:lane, notes:notes.trim(), parentId:parentId||null });
+    var pid=resolveParentId(parentId);
+    onSave({ name:name.trim(), lane:lane, notes:notes.trim(), parentId:pid, kind:kind,
+             role: pid==null ? "project" : role });
   }
 
   return (
@@ -18249,7 +18435,7 @@ function ProjectForm(props){
       ),
       React.createElement("div", null,
         React.createElement("label", { style:LABEL_STYLE }, "Lane"),
-        React.createElement("select", { value:lane, onChange:function(e){ setLane(e.target.value); setParentId(null); }, style:Object.assign({},INPUT_STYLE,{cursor:"pointer"}) },
+        React.createElement("select", { value:lane, onChange:function(e){ setLane(e.target.value); pickParent(null); }, style:Object.assign({},INPUT_STYLE,{cursor:"pointer"}) },
           laneKeys.map(function(k){
             var m=getMeta(laneMeta,k);
             return React.createElement("option", { key:k, value:k }, m.label);
@@ -18257,25 +18443,312 @@ function ProjectForm(props){
         )
       ),
       eligibleParents.length>0 && React.createElement("div", null,
-        React.createElement("label", { style:LABEL_STYLE }, "Parent project (optional)"),
-        React.createElement("select", { value:parentId||"", onChange:function(e){ setParentId(e.target.value||null); }, style:Object.assign({},INPUT_STYLE,{cursor:"pointer"}) },
-          React.createElement("option", { value:"" }, "-- None --"),
-          eligibleParents.map(function(p){ return React.createElement("option", { key:p.id, value:p.id }, p.name); })
-        )
+        React.createElement("label", { style:LABEL_STYLE }, "Nested under (optional)"),
+        React.createElement("select", { value:parentId==null?"":String(parentId), onChange:function(e){ pickParent(e.target.value||null); }, style:Object.assign({},INPUT_STYLE,{cursor:"pointer"}) },
+          React.createElement("option", { value:"" }, "-- Nothing, top level --"),
+          // Indented with figure spaces so the shape of the tree survives in a
+          // native select, which will not render markup.
+          eligibleParents.map(function(e){
+            return React.createElement("option", { key:e.p.id, value:String(e.p.id) },
+              (e.depth ? new Array(e.depth+1).join("\u2007\u2007\u2007")+"\u2514 " : "")+e.p.name);
+          })
+        ),
+        React.createElement("div", { style:{fontSize:"0.74rem",color:S.textMuted,lineHeight:1.4,marginTop:"0.35rem"} },
+          project ? "Change this to move it in or out of another project."
+                  : "Leave empty for a project of its own.")
+      ),
+      // Only meaningful once something is nested: at the top level everything
+      // is a project by definition.
+      parentId!=null && React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Nested as"),
+        React.createElement(Toggle, { name:"projrole", keys:["task","project"], value:role,
+          labelOf:function(k){ return k==="task" ? "A task" : "A project"; },
+          onChange:function(v){ setRole(v); } }),
+        React.createElement("div", { style:{fontSize:"0.74rem",color:S.textMuted,lineHeight:1.4,marginTop:"0.35rem"} },
+          role==="task"
+            ? "A step within the project above. Shown as a row inside it."
+            : "A project in its own right that the one above depends on. Shown as its own card, tucked under it.")
+      ),
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Type"),
+        React.createElement(Toggle, { name:"projkind", keys:["ongoing","finite"], value:kind,
+          labelOf:function(k){ return k==="ongoing" ? "Ongoing" : "Has an end"; },
+          onChange:function(v){ kindTouched.current=true; setKind(v); } }),
+        React.createElement("div", { style:{fontSize:"0.74rem",color:S.textMuted,lineHeight:1.4,marginTop:"0.4rem"} },
+          kind==="ongoing"
+            ? "Repeats and never finishes. You can still close it out whenever you want."
+            : "Has a beginning and an end. Tick off every stage and it will offer to close itself out.")
       ),
       React.createElement("div", null,
         React.createElement("label", { style:LABEL_STYLE }, "Notes"),
         React.createElement("textarea", { value:notes, onChange:function(e){ setNotes(e.target.value); }, placeholder:"Optional details", rows:2, style:Object.assign({},INPUT_STYLE,{resize:"vertical"}) })
       ),
       // Destructive action stays in the body - the floating bar is Save/Cancel.
-      project&&onDelete && React.createElement("button", { onClick:onDelete, style:{width:"100%",background:S.dangerBg,border:"1px solid "+S.dangerText,borderRadius:S.radius,padding:"0.7rem",color:S.dangerText,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600} }, "Delete Project"),
+      project&&onDelete && React.createElement("button", { onClick:onDelete, style:{width:"100%",background:S.dangerBg,border:"1px solid "+S.dangerText,borderRadius:S.radius,padding:"0.7rem",color:S.dangerText,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600} }, "Delete "+noun),
       React.createElement(ModalActions, null,
         React.createElement("button", { onClick:submit, disabled:!name.trim(), style:{flex:1,background:name.trim()?S.infoBg:S.bg2,border:"2.5px solid "+(name.trim()?S.actionBdr:S.border),borderRadius:S.radius,padding:"0.85rem",color:name.trim()?S.infoText:S.textMuted,fontWeight:700,cursor:name.trim()?"pointer":"default",fontFamily:S.fontBody,fontSize:"0.95rem"} },
-          project?"Save Changes":"Add Project"
+          project?"Save Changes":("Add "+noun)
         ),
         React.createElement("button", { onClick:onCancel, style:MODAL_CANCEL() }, "Cancel")
       )
     )
+  );
+}
+
+// ---- CLOSE-OUT MODAL --------------------------------------------------------
+// Closing keeps everything. The point of saying so plainly here is that the
+// button sits where Delete used to be the only ending a project had, and the
+// two need to be obviously different things.
+function CloseProjectModal(props){
+  var proj=props.proj, blockers=props.blockers||[], onClose=props.onClose, onConfirm=props.onConfirm;
+  var noteS=useState(""); var setNote=noteS[1]; var note=noteS[0];
+  var noun = proj && proj.parentId ? "Task" : "Project";
+  var blocked = blockers.length>0;
+
+  if(blocked){
+    return React.createElement(Modal, { title:"Close "+noun, onClose:onClose, ownActions:true },
+      React.createElement("p", { style:{color:S.textDim,fontSize:"0.88rem",lineHeight:1.5,marginBottom:"0.8rem"} },
+        proj.name+" still has "+blockers.length+" open task"+(blockers.length!==1?"s":"")+
+        ". Closing it now would take them off the board with no way back to them, so close them first."),
+      React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,
+        padding:"0.5rem 0.75rem",marginBottom:"1rem"} },
+        blockers.map(function(b){
+          return React.createElement("div", { key:b.id, style:{color:S.text,fontSize:"0.85rem",padding:"0.2rem 0"} },
+            "\u2022  "+b.name);
+        })
+      ),
+      React.createElement("button", { onClick:onClose, style:Object.assign({}, MODAL_CANCEL(), {width:"100%",flex:"none"}) }, "OK")
+    );
+  }
+
+  return React.createElement(Modal, { title:"Close Out "+noun, onClose:onClose, ownActions:true },
+    React.createElement("p", { style:{color:S.textDim,fontSize:"0.88rem",lineHeight:1.5,marginBottom:"0.9rem"} },
+      "Close out "+proj.name+"? It comes off the board and moves to the Archive. Every log, "+
+      "disruption and report figure it has ever had is kept, and you can reopen it at any time."),
+    React.createElement("div", { style:{marginBottom:"1rem"} },
+      React.createElement("label", { style:LABEL_STYLE }, "Closing note (optional)"),
+      React.createElement("input", { value:note, onChange:function(e){ setNote(e.target.value); },
+        placeholder:"e.g. Signed off by QA", style:INPUT_STYLE,
+        onKeyDown:function(e){ if(e.key==="Enter") onConfirm(note.trim()); } })
+    ),
+    React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
+      React.createElement("button", { onClick:function(){ onConfirm(note.trim()); },
+        style:{flex:1,background:S.successBg2,border:"2px solid "+S.successBorder,borderRadius:S.radius,
+               padding:"0.85rem",color:S.successText,cursor:"pointer",fontWeight:700,fontFamily:S.fontBody} },
+        "Close Out"),
+      React.createElement("button", { onClick:onClose, style:MODAL_CANCEL() }, "Cancel")
+    )
+  );
+}
+
+// ---- ADD NEW ----------------------------------------------------------------
+// One entry point for everything that can be created, asked as a question
+// rather than buried in a nested menu. Two steps at most: what, then where.
+// A task needs a project to hang off, so if there are none it says so instead
+// of offering an empty list.
+function AddNewModal(props){
+  var stage=props.stage, laneOrder=props.laneOrder||[], laneMeta=props.laneMeta;
+  var projects=props.projects||[], onPick=props.onPick, onClose=props.onClose;
+
+  function row(key, dot, label, sub, onClick){
+    return React.createElement("button", { key:key, "data-flat":true, onClick:onClick,
+      style:{display:"flex",alignItems:"center",gap:"0.7rem",width:"100%",textAlign:"left",
+             background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,
+             padding:"0.75rem 0.85rem",cursor:"pointer",fontFamily:S.fontBody} },
+      dot,
+      React.createElement("span", { style:{flex:1,minWidth:0} },
+        React.createElement("span", { style:{display:"block",color:S.text,fontWeight:700,fontSize:"0.92rem",
+          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"} }, label),
+        sub ? React.createElement("span", { style:{display:"block",color:S.textMuted,fontSize:"0.74rem",marginTop:"0.1rem",
+          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"} }, sub) : null
+      )
+    );
+  }
+  function dotOf(col, dashed){
+    return React.createElement("span", { style:{width:"11px",height:"11px",flexShrink:0,
+      borderRadius:dashed?"2px":"50%", background:dashed?"none":col,
+      border:dashed?("2px dashed "+col):"none"} });
+  }
+  var wrap = { display:"flex", flexDirection:"column", gap:"0.5rem" };
+
+  if(stage==="lane"){
+    return React.createElement(Modal, { title:"New Project In...", onClose:onClose, cancelLabel:"Cancel" },
+      React.createElement("div", { style:wrap },
+        laneOrder.map(function(k){
+          var m=getMeta(laneMeta,k);
+          var n=projects.filter(function(p){ return p.lane===k && p.parentId===null; }).length;
+          return row(k, dotOf(m.accent), m.label, n+" project"+(n!==1?"s":""),
+            function(){ onPick({ what:"project", lane:k }); });
+        })
+      )
+    );
+  }
+
+  if(stage==="project"){
+    var tops=projects.filter(function(p){ return p.parentId===null; });
+    if(!tops.length){
+      return React.createElement(Modal, { title:"New Task", onClose:onClose, cancelLabel:"Close" },
+        React.createElement("div", { style:{border:"2px dashed "+S.borderBright,borderRadius:S.radius,
+          padding:"1.2rem 1rem",textAlign:"center"} },
+          React.createElement("div", { style:{color:S.text,fontWeight:700,fontSize:"0.92rem",marginBottom:"0.3rem"} },
+            "No projects yet"),
+          React.createElement("div", { style:{color:S.textDim,fontSize:"0.8rem",lineHeight:1.45} },
+            "A task belongs to a project, so add a project first."))
+      );
+    }
+    var byLane=[];
+    laneOrder.forEach(function(k){
+      var inLane=tops.filter(function(p){ return p.lane===k; });
+      if(inLane.length) byLane.push({ lane:k, items:inLane });
+    });
+    return React.createElement(Modal, { title:"New Task Under...", onClose:onClose, cancelLabel:"Cancel" },
+      React.createElement("div", { style:wrap },
+        byLane.map(function(g){
+          var m=getMeta(laneMeta,g.lane);
+          return React.createElement("div", { key:g.lane, style:wrap },
+            React.createElement("div", { style:{fontSize:"0.68rem",textTransform:"uppercase",letterSpacing:"0.08em",
+              color:S.textDim,fontWeight:700,marginTop:"0.25rem"} }, m.label),
+            g.items.map(function(p){
+              var kids=getChildren(projects,p.id).length;
+              return row(p.id, dotOf(m.accent), p.name,
+                (isFinite_(p)?"Has an end":"Ongoing")+(kids?"  \u00B7  "+kids+" task"+(kids!==1?"s":""):""),
+                function(){ onPick({ what:"task", lane:p.lane, parentId:p.id }); });
+            })
+          );
+        })
+      )
+    );
+  }
+
+  return React.createElement(Modal, { title:"Add New", onClose:onClose, cancelLabel:"Cancel" },
+    React.createElement("p", { style:{color:S.textDim,fontSize:"0.86rem",lineHeight:1.45,marginBottom:"0.8rem"} },
+      "What would you like to add?"),
+    React.createElement("div", { style:wrap },
+      row("project", dotOf(S.successText), "New Project", "Sits in a lane on its own",
+        function(){ onPick({ what:"chooseLane" }); }),
+      row("task", dotOf(S.actionText), "New Task", "Belongs to a project",
+        function(){ onPick({ what:"chooseProject" }); }),
+      row("lane", dotOf(S.mutedGlyph, true), "New Lane", "A new column of work",
+        function(){ onPick({ what:"lane" }); })
+    )
+  );
+}
+
+// ---- MATCH TASKS ------------------------------------------------------------
+// Raised when a project's type changes and its tasks no longer agree. Asked
+// rather than done, because the tasks are independently settable on purpose -
+// silently rewriting them would throw away a deliberate choice.
+function MatchTasksModal(props){
+  var proj=props.proj, tasks=props.tasks||[], onMatch=props.onMatch, onLeave=props.onLeave;
+  var want = isFinite_(proj) ? "Has an end" : "Ongoing";
+  var other = isFinite_(proj) ? "Ongoing" : "Has an end";
+  var n = tasks.length;
+
+  // Everything starts ticked: following the project is the usual intent, and
+  // the previous version of this prompt was all-or-nothing in that direction.
+  // Untick what should keep its own setting; untick everything and nothing
+  // changes at all.
+  var selS=useState(function(){ var m={}; tasks.forEach(function(t){ m[t.id]=true; }); return m; });
+  var sel=selS[0], setSel=selS[1];
+  var chosen=tasks.filter(function(t){ return sel[t.id]; });
+  var allOn = chosen.length===n && n>0;
+  var noneOn = chosen.length===0;
+  function flip(id){ var next=Object.assign({},sel); next[id]=!next[id]; setSel(next); haptic(6); }
+  function flipAll(){ var v=!allOn, next={}; tasks.forEach(function(t){ next[t.id]=v; }); setSel(next); haptic(8); }
+
+  function box(on, partial){
+    return React.createElement("span", { style:{width:"22px",height:"22px",borderRadius:"6px",flexShrink:0,
+      background:on?S.successBg2:S.bg0, border:"2px solid "+(on||partial?S.successText:S.borderBright),
+      display:"flex",alignItems:"center",justifyContent:"center",
+      color:S.successText,fontSize:"0.8rem",fontWeight:800,lineHeight:1} },
+      on ? "\u2713" : (partial ? "\u2013" : ""));
+  }
+  function row(key, on, partial, label, sub, onClick, top){
+    return React.createElement("button", { key:key, "data-flat":true, onClick:onClick,
+      style:{display:"flex",alignItems:"center",gap:"0.6rem",width:"100%",textAlign:"left",
+             background:"none",border:"none",borderTop:top?"none":"1px solid "+S.border,
+             padding:"0.55rem 0.2rem",cursor:"pointer",fontFamily:S.fontBody} },
+      box(on, partial),
+      React.createElement("span", { style:{flex:1,minWidth:0} },
+        React.createElement("span", { style:{display:"block",color:S.text,fontSize:"0.88rem",fontWeight:top?700:600,
+          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"} }, label),
+        sub ? React.createElement("span", { style:{display:"block",color:S.textMuted,fontSize:"0.72rem",marginTop:"0.1rem"} }, sub) : null
+      )
+    );
+  }
+
+  return React.createElement(Modal, { title:"Match Tasks?", onClose:onLeave, ownActions:true },
+    React.createElement("p", { style:{color:S.textDim,fontSize:"0.88rem",lineHeight:1.5,marginBottom:"0.7rem"} },
+      proj.name+" is now set to \u201C"+want+"\u201D. "+n+" of its task"+(n!==1?"s are":" is")+
+      " still set to \u201C"+other+"\u201D. Tick the ones that should follow."),
+    React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,
+      padding:"0.1rem 0.75rem",marginBottom:"1rem",maxHeight:"240px",overflowY:"auto"} },
+      n>1 ? row("__all", allOn, !allOn && !noneOn, allOn?"Deselect all":"Select all", null, flipAll, true) : null,
+      tasks.map(function(t, i){
+        return row(t.id, !!sel[t.id], false, t.name, null, function(){ flip(t.id); }, n>1?false:(i===0));
+      })
+    ),
+    React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
+      React.createElement("button", { onClick:function(){ onMatch(chosen); },
+        style:{flex:1,background:noneOn?S.bg2:S.infoBg,border:"2px solid "+(noneOn?S.border:S.actionBdr),
+               borderRadius:S.radius,padding:"0.85rem",color:noneOn?S.textDim:S.infoText,
+               cursor:"pointer",fontWeight:700,fontFamily:S.fontBody} },
+        noneOn ? "Leave All As Is" : (chosen.length===1 ? "Change 1 Task" : "Change "+chosen.length+" Tasks")),
+      React.createElement("button", { onClick:onLeave, style:MODAL_CANCEL() }, "Cancel")
+    )
+  );
+}
+
+// ---- ARCHIVE ----------------------------------------------------------------
+// Everything that has been closed out, newest first. This is the historical
+// record: time totals are computed from the logs, which closing never touched.
+function ArchiveModal(props){
+  var projects=props.projects||[], logs=props.logs||[], laneMeta=props.laneMeta;
+  var onReopen=props.onReopen, onClose=props.onClose;
+  var closed=projects.filter(isClosed).sort(function(a,b){ return b.closedAt-a.closedAt; });
+
+  var msById={};
+  logs.forEach(function(l){
+    if(!l || l.type==="atwork" || l.projectId==null) return;
+    msById[l.projectId]=(msById[l.projectId]||0)+(l.duration||0);
+  });
+
+  return React.createElement(Modal, { title:"Archive", onClose:onClose, cancelLabel:"Close" },
+    closed.length===0
+      ? React.createElement("div", { style:{border:"2px dashed "+S.borderBright,borderRadius:S.radius,
+          padding:"1.4rem 1rem",textAlign:"center"} },
+          React.createElement("div", { style:{color:S.text,fontWeight:700,fontSize:"0.92rem",marginBottom:"0.3rem"} },
+            "Nothing closed out yet"),
+          React.createElement("div", { style:{color:S.textDim,fontSize:"0.8rem",lineHeight:1.45} },
+            "Close a project from its menu and it lands here, with all of its history."))
+      : React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.5rem"} },
+          closed.map(function(p){
+            var meta=getMeta(laneMeta,p.lane);
+            var kids=getChildren(projects,p.id);
+            var ms=(msById[p.id]||0)+getDescendantIds(projects,p.id).reduce(function(a,id){ return a+(msById[id]||0); },0);
+            return React.createElement("div", { key:p.id, style:{background:S.bg1,border:"1px solid "+S.border,
+              borderRadius:S.radius,padding:"0.7rem 0.85rem"} },
+              React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem"} },
+                React.createElement("span", { style:{width:"8px",height:"8px",borderRadius:"50%",flexShrink:0,background:meta.accent} }),
+                React.createElement("span", { style:{flex:1,minWidth:0,color:S.text,fontWeight:700,fontSize:"0.92rem",
+                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"} }, p.name),
+                React.createElement(Mono, { style:{color:S.textDim,fontSize:"0.8rem",fontWeight:700,flexShrink:0} }, fmtDur(ms,true))
+              ),
+              React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted,marginTop:"0.25rem"} },
+                meta.label+"  \u00B7  "+(isFinite_(p)?"Has an end":"Ongoing")
+                  +(p.parentId?"  \u00B7  task":"")
+                  +(kids.length?"  \u00B7  "+kids.length+" task"+(kids.length!==1?"s":""):"")
+                  +"  \u00B7  closed "+fmtDate(p.closedAt)),
+              p.closedNote ? React.createElement("div", { style:{fontSize:"0.78rem",color:S.textDim,marginTop:"0.3rem",lineHeight:1.35} }, p.closedNote) : null,
+              React.createElement("div", { style:{display:"flex",justifyContent:"flex-end",marginTop:"0.5rem"} },
+                React.createElement("button", { "data-flat":true, onClick:function(){ onReopen(p); },
+                  style:{background:"none",border:"1.5px solid "+S.actionBdr,borderRadius:S.radius3,
+                         padding:"0.4rem 0.7rem",color:S.actionText,cursor:"pointer",fontWeight:700,
+                         fontFamily:S.fontBody,fontSize:"0.78rem"} }, "Reopen")
+              )
+            );
+          })
+        )
   );
 }
 
@@ -18302,31 +18775,130 @@ function DisruptionModal(props){
   );
 }
 
+// ---- CLOCK-IN DAY PROMPT ----------------------------------------------------
+// Shown when the clock starts outside the scheduled window. There is no default
+// and no dismissal: the app cannot know whether 21:40 is a long Wednesday or an
+// early Thursday, and quietly guessing wrong silently misfiles a whole shift.
+// Two answers, worded as shifts rather than dates, with the date underneath.
+function ClockDayModal(props){
+  var choices=props.choices||[], onPick=props.onPick, onCancel=props.onCancel;
+  var when=props.when||Date.now();
+  var why = props.position==="before" ? "before your scheduled start"
+          : props.position==="after"  ? "after your scheduled finish"
+          : "on a day you are not scheduled to work";
+  var ask = props.stage==="ot"
+    ? "This day is not on your schedule, so there are no rostered hours to measure it against. How should it be paid?"
+    : "It is "+fmtTime(when)+", "+why+". Which shift should this time be logged against?";
+  return React.createElement(Modal, { title:props.title||"Which Shift?", onClose:onCancel, ownActions:true },
+    React.createElement("div", { style:{color:S.textDim,fontSize:"0.85rem",lineHeight:1.45,marginBottom:"0.9rem"} },
+      ask),
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.55rem"} },
+      choices.map(function(c){
+        return React.createElement("button", { key:c.key, onClick:function(){ haptic(12); onPick(c); },
+          style:{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:"0.1rem",
+                 width:"100%",textAlign:"left",background:S.bg1,border:"2px solid "+S.actionBdr,
+                 borderRadius:S.radius,padding:"0.8rem 0.9rem",cursor:"pointer",fontFamily:S.fontBody} },
+          React.createElement("span", { style:{color:S.actionText,fontWeight:700,fontSize:"0.95rem"} }, c.label),
+          React.createElement("span", { style:{color:S.textDim,fontSize:"0.78rem"} },
+            c.note!=null ? c.note
+              : new Date(c.when).toLocaleDateString([], {weekday:"long",month:"short",day:"numeric"})
+                + (c.unscheduled ? "  \u00B7  not on your schedule" : ""))
+        );
+      })
+    ),
+    React.createElement("button", { onClick:onCancel,
+      style:Object.assign({}, MODAL_CANCEL(), {width:"100%",marginTop:"0.9rem",flex:"none"}) },
+      props.cancelLabel||"Cancel")
+  );
+}
+
+// ---- DISRUPTION BADGE -------------------------------------------------------
+// Two data points, always in the same order and the same colours: the running
+// day first, bright, because that is the number you act on; the project's
+// lifetime total behind a divider, dimmed. The badge shows whenever the project
+// has ever been disrupted, so a clean day still carries its history instead of
+// vanishing at midnight and looking like nothing ever happened.
+// Counts and totals a list of disruptions against a set of project ids. Day
+// scoping is the caller's job - it hands in either today's list or all of them
+// - so there is exactly one place that decides what "today" means.
+function distStats(list, ids){
+  var n=0, ms=0;
+  (list||[]).forEach(function(d){
+    if(!d.endTime) return;
+    if(ids.indexOf(d.projectId)<0) return;
+    n++; ms+=d.duration;
+  });
+  return { n:n, ms:ms };
+}
+function DistBadge(props){
+  var today=props.today||{n:0,ms:0}, total=props.total||{n:0,ms:0};
+  if(!total.n) return null;
+  var live = today.n>0;
+  var fs = props.small ? "0.7rem" : "0.74rem";
+  return React.createElement("button", { onClick:props.onClick,
+    "aria-label":"Disruptions: "+today.n+" today, "+total.n+" in total",
+    style:{display:"flex",alignItems:"center",gap:"0.32rem",
+           background:live?S.dangerTint:S.bg1,
+           border:"2px solid "+(live?"#CC3030":S.border),
+           borderRadius:"8px",cursor:"pointer",padding:"0 0.5rem",
+           height:"30px",minHeight:"30px",flexShrink:0} },
+    React.createElement("span", { style:{fontSize:props.small?"0.8rem":"0.86rem",fontWeight:900,
+      color:live?S.distBadge:S.distDim,letterSpacing:"-0.05em",lineHeight:1} }, "!!"),
+    React.createElement(Mono, { style:{fontSize:fs,fontWeight:700,whiteSpace:"nowrap",
+      color:live?S.distBadge:S.textMuted,lineHeight:1} },
+      live ? today.n+" "+fmtDur(today.ms,true) : "0"),
+    React.createElement("span", { style:{width:"1px",height:"14px",flexShrink:0,
+      background:live?S.distEdge:S.border} }),
+    React.createElement(Mono, { style:{fontSize:fs,fontWeight:700,whiteSpace:"nowrap",
+      color:S.distDim,lineHeight:1} }, total.n+" "+fmtDur(total.ms,true))
+  );
+}
+
 // ---- DISRUPTION POPUP -------------------------------------------------------
 function DisruptionPopup(props){
   var disruptions=props.disruptions||[], projName=props.projName, onClose=props.onClose;
-  var done=disruptions.filter(function(d){ return d.endTime; });
-  var total=done.reduce(function(a,d){ return a+d.duration; }, 0);
+  var done=disruptions.filter(function(d){ return d.endTime; })
+                      .sort(function(a,b){ return b.startTime-a.startTime; });
+  var dayKey=todayStr();
+  var today=done.filter(function(d){ return sameWorkDay(d.startTime,dayKey); });
+  var earlier=done.filter(function(d){ return !sameWorkDay(d.startTime,dayKey); });
+  var sum=function(a){ return a.reduce(function(t,d){ return t+d.duration; },0); };
+
+  function head(label, list, bright){
+    return React.createElement("div", { style:{display:"flex",justifyContent:"space-between",
+        background:bright?S.dangerBg:S.bg2,border:"1px solid "+(bright?S.dangerText:S.border),
+        borderRadius:S.radius3,padding:"0.6rem 0.85rem",marginBottom:"0.25rem"} },
+      React.createElement("span", { style:{color:bright?S.dangerText:S.textDim,fontWeight:700,fontSize:"0.85rem"} },
+        label+" - "+list.length+" disruption"+(list.length!==1?"s":"")),
+      React.createElement(Mono, { style:{color:bright?S.dangerText:S.textDim,fontWeight:700,fontSize:"0.85rem"} },
+        fmtDur(sum(list),true)+" lost")
+    );
+  }
+  function row(d,i){
+    return React.createElement("div", { key:i, style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.6rem 0.85rem"} },
+      React.createElement("div", { style:{display:"flex",justifyContent:"space-between",gap:"0.5rem"} },
+        React.createElement("span", { style:{color:S.text,fontSize:"0.88rem",flex:1} }, d.note||"(no note)"),
+        React.createElement(Mono, { style:{color:S.dangerText,fontSize:"0.82rem",fontWeight:700,flexShrink:0} }, fmtDur(d.duration,true))
+      ),
+      React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted,marginTop:"0.2rem"} },
+        fmtDate(d.startTime)+"  "+fmtTime(d.startTime)+" to "+fmtTime(d.endTime)
+          +(d.projectName&&d.projectName!==projName?" - "+d.projectName:"")
+      )
+    );
+  }
+
   return (
     React.createElement(Modal, { title:"Disruptions - "+projName, onClose:onClose },
       done.length===0
         ? React.createElement("div", { style:{color:S.textMuted,textAlign:"center",padding:"1.5rem 0"} }, "No disruptions logged.")
         : React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.5rem"} },
-            React.createElement("div", { style:{display:"flex",justifyContent:"space-between",background:S.dangerBg,border:"1px solid "+S.dangerText,borderRadius:S.radius3,padding:"0.6rem 0.85rem",marginBottom:"0.25rem"} },
-              React.createElement("span", { style:{color:S.dangerText,fontWeight:700,fontSize:"0.85rem"} }, "!! "+done.length+" disruption"+(done.length!==1?"s":"")),
-              React.createElement(Mono, { style:{color:S.dangerText,fontWeight:700,fontSize:"0.85rem"} }, fmtDur(total,true)+" lost")
-            ),
-            done.map(function(d,i){
-              return React.createElement("div", { key:i, style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.6rem 0.85rem"} },
-                React.createElement("div", { style:{display:"flex",justifyContent:"space-between",gap:"0.5rem"} },
-                  React.createElement("span", { style:{color:S.text,fontSize:"0.88rem",flex:1} }, d.note||"(no note)"),
-                  React.createElement(Mono, { style:{color:S.dangerText,fontSize:"0.82rem",fontWeight:700,flexShrink:0} }, fmtDur(d.duration,true))
-                ),
-                React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted,marginTop:"0.2rem"} },
-                  fmtTime(d.startTime)+" to "+fmtTime(d.endTime)+(d.projectName&&d.projectName!==projName?" - "+d.projectName:"")
-                )
-              );
-            })
+            head("Today", today, true),
+            today.length===0
+              ? React.createElement("div", { style:{color:S.textMuted,fontSize:"0.8rem",padding:"0.1rem 0 0.35rem"} },
+                  "Nothing lost today.")
+              : today.map(row),
+            earlier.length>0 && React.createElement("div", { style:{marginTop:"0.5rem"} }, head("Earlier", earlier, false)),
+            earlier.map(row)
           )
     )
   );
@@ -18659,12 +19231,22 @@ function DEFAULT_SCHEDULE(){
   // hoisted, so the forward reference is safe)
   return normalizeSchedule(null);
 }
+// A shift as an offset and a length, in minutes. An end earlier than its start
+// means the shift runs past midnight: 21:00 to 05:30 is eight and a half hours
+// on the day it started, not an error and not a 15-hour negative. An end equal
+// to its start is still nothing, because 24-hour shifts are not a thing here.
+// Every other piece of schedule maths is built on this one function.
+function shiftSpan(day){
+  if(!day || !day.on) return null;
+  var s=toMin(day.start), e=toMin(day.end);
+  if(s==null || e==null) return null;
+  var len=e-s; if(len<0) len+=1440;
+  return len>0 ? { start:s, len:len, wraps:e<s } : null;
+}
+function schWraps(day){ var sp=shiftSpan(day); return !!(sp && sp.wraps); }
 function schMinutes(day){
-  // minutes worked on a day entry; 0 when off or when the times are invalid
-  if(!day || !day.on) return 0;
-  var a=day.start.split(":"), b=day.end.split(":");
-  var m = (+b[0]*60 + +b[1]) - (+a[0]*60 + +a[1]);
-  return m>0 ? m : 0;
+  var sp=shiftSpan(day);
+  return sp ? sp.len : 0;
 }
 function fmtHours(mins){
   if(TIME_INC==="tenths") return (mins/60).toFixed(2)+"h";
@@ -18680,6 +19262,25 @@ function hexBrighten(hex, amt){
   var n=parseInt(m[1],16), r=(n>>16)&255, g=(n>>8)&255, b=n&255;
   function ch(c){ return Math.round(c+(255-c)*amt); }
   return "#"+((1<<24)+(ch(r)<<16)+(ch(g)<<8)+ch(b)).toString(16).slice(1);
+}
+function hexDarken(hex, amt){
+  var m=/^#([0-9a-fA-F]{6})$/.exec(String(hex||""));
+  if(!m) return hex;
+  var n=parseInt(m[1],16), r=(n>>16)&255, g=(n>>8)&255, b=n&255;
+  function ch(c){ return Math.round(c*(1-amt)); }
+  return "#"+((1<<24)+(ch(r)<<16)+(ch(g)<<8)+ch(b)).toString(16).slice(1);
+}
+// A breathing halo behind text. The text colour itself never moves - only the
+// glow does - so the word stays legible and the motion reads as a soft bloom
+// rather than the letters changing colour.
+//
+// The halo has to move away from the page, not toward it. On a dark theme that
+// means a lighter tint spilling outward; on a light one a lighter tint is
+// invisible, so it goes darker instead and reads as a soft shadow. Same cue,
+// opposite direction, because contrast is what makes it discernible.
+function glowVars(col){
+  var tint = S.mode==="light" ? hexDarken(col,0.35) : hexBrighten(col,0.45);
+  return { "--glow-s1":tint+"55", "--glow-s2":tint+"E6", color:col };
 }
 // The vars a pulsing border needs: base color, brightened peak, and glow
 // colors that go transparent when the theme has glow turned off.
@@ -18752,14 +19353,27 @@ function dayBreaks(sch,k){
 // the end deducts only the part that fits. uptoMin limits the count to time
 // already gone by (for pace).
 function breakOverlapMins(day, br, uptoMin){
-  if(!day||!day.on) return 0;
-  var s=toMin(day.start), e=toMin(day.end);
-  if(s==null||e==null||e<=s) return 0;
-  var bs=toMin(br.start), d=Math.max(0, +br.mins||0);
+  var sp=shiftSpan(day); if(!sp) return 0;
+  var bs=toMin(br.start), d=Math.min(1440, Math.max(0, +br.mins||0));
   if(bs==null||d<=0) return 0;
-  var hi=Math.min(e, uptoMin==null ? e : Math.max(s, uptoMin));
-  var lo=Math.max(s,bs), top=Math.min(hi, bs+d);
-  return Math.max(0, top-lo);
+  // Work in minutes from the start of the shift rather than from midnight, so
+  // a 01:00 lunch on a 21:00 shift lands four hours in instead of twenty hours
+  // before. uptoMin is a wall-clock minute and gets the same treatment.
+  var hi=sp.len;
+  if(uptoMin!=null){
+    var rel=uptoMin-sp.start; if(rel<0) rel+=1440;
+    hi=Math.min(hi, Math.max(0, rel));
+  }
+  var off=((bs-sp.start)%1440+1440)%1440;
+  // Two candidate placements: this shift, and the same clock time one turn of
+  // the dial earlier - that second one is how a break starting just before the
+  // shift still deducts its tail.
+  var total=0;
+  [off, off-1440].forEach(function(o){
+    var lo=Math.max(0,o), top=Math.min(hi, o+d);
+    if(top>lo) total+=top-lo;
+  });
+  return total;
 }
 function schDayBreakMins(sch,k,uptoMin){
   var day=sch&&sch[k];
@@ -18779,7 +19393,7 @@ function TIME_FIELD_STYLE(col, bdrCol){
            background:S.inputBg, color:col, WebkitTextFillColor:col,
            border:"1.5px solid "+bdrCol, borderRadius:"10px",
            padding:"0.42rem 0.25rem", minHeight:"2.1rem", fontFamily:S.fontMono,
-           fontSize:"0.88rem", boxSizing:"border-box" };
+           fontSize:"16px", boxSizing:"border-box" };
 }
 
 // ---------------- Period math ----------------
@@ -18809,6 +19423,120 @@ function startOfYear(d){ var x=startOfDay(d); x.setMonth(0,1); return x; }
 
 // offset walks backwards through history: 0 is the current period, -1 the one
 // before it. Forward past 0 is never offered. weekStart only affects weeks.
+// ---- WHICH SHIFT DOES THIS MOMENT BELONG TO ---------------------------------
+// A work day is a shift, not a calendar square. Clock in at 21:40 on a Tuesday
+// and everything you log until you go home belongs to Tuesday's shift, midnight
+// or no midnight. The app never guesses which shift you meant: if you clock in
+// outside the scheduled window it asks, and the answer is stored on the session.
+//
+// shiftWindow(schedule, date) -> { start, end } in ms for that calendar date, or
+// null when that weekday is not worked.
+function shiftWindow(schedule, date){
+  if(!schedule) return null;
+  var d=startOfDay(date);
+  var sp=shiftSpan(schedule[dayKeyOf(d)]);
+  if(!sp) return null;
+  var start=d.getTime()+sp.start*60000;
+  // The end can land on the following date. The window still belongs to the
+  // day it started on - that is what makes a night shift one work day.
+  return { start:start, end:start+sp.len*60000, wraps:sp.wraps };
+}
+// Nearest worked day strictly before / after the given date. Bounded at 14 days
+// so a schedule with every day switched off terminates instead of spinning.
+function adjacentShiftDay(schedule, date, dir){
+  var d=startOfDay(date);
+  for(var i=1;i<=14;i++){
+    var cand=addDays(d, dir*i);
+    if(shiftWindow(schedule, cand)) return cand;
+  }
+  return null;
+}
+// What the clock-in prompt needs to know. `position` is where `ts` sits
+// relative to the scheduled shift on its own calendar date:
+//   "inside"  - within the window (grace included); no question to ask
+//   "before"  - earlier than start; the choice is previous shift vs this one
+//   "after"   - later than end;    the choice is this shift vs the next one
+//   "off"     - that weekday is not worked; previous shift vs next one
+function shiftContext(schedule, ts, graceMin){
+  var now=new Date(ts);
+  var grace=(typeof graceMin==="number" && graceMin>0 ? graceMin : 0)*60000;
+  var thisDay=startOfDay(now), yesterday=addDays(now,-1);
+
+  // Yesterday first. A shift that wraps past midnight is still running on this
+  // calendar date, and it owns the moment - 02:00 on Thursday is Wednesday's
+  // shift, not an early start on Thursday's. Checking today's window first
+  // would call that "before" and ask a question with an obvious answer.
+  var prevWin=shiftWindow(schedule, yesterday);
+  if(prevWin && prevWin.wraps && ts>=prevWin.start-grace && ts<=prevWin.end+grace)
+    return { position:"inside", inside:true, shift:prevWin, owner:yesterday,
+             thisDay:yesterday, prevDay:adjacentShiftDay(schedule, yesterday, -1),
+             nextDay:adjacentShiftDay(schedule, now, 1) };
+
+  var win=shiftWindow(schedule, now);
+  var prev=adjacentShiftDay(schedule, now, -1);
+  var next=adjacentShiftDay(schedule, now, 1);
+  // ownDay is this calendar day standing on its own: no roster, no shift, just
+  // the day you turned up. thisDay stays null because there is no shift here.
+  if(!win) return { position:"off", inside:false, shift:null, owner:null,
+                    thisDay:null, ownDay:thisDay, prevDay:prev, nextDay:next };
+  if(ts >= win.start-grace && ts <= win.end+grace)
+    return { position:"inside", inside:true, shift:win, owner:thisDay,
+             thisDay:thisDay, prevDay:prev, nextDay:next };
+  return { position: ts < win.start ? "before" : "after", inside:false, shift:win,
+           owner:null, thisDay:thisDay, prevDay:prev, nextDay:next };
+}
+// The two answers the prompt offers, in the order they are shown. Each is
+// { key, label, when, day } where `day` is the work-day stamp that answer sets.
+// Never more than two: the question is always "this shift or the neighbouring
+// one", which is the only thing a person standing at the clock can actually know.
+function shiftChoices(ctx){
+  function opt(key, label, date, unscheduled){
+    return date ? { key:key, label:label, when:date.getTime(),
+                    day:workDayOf(date.getTime()), unscheduled:!!unscheduled } : null;
+  }
+  var out;
+  if(ctx.position==="before")     out=[opt("prev","Previous shift",ctx.prevDay), opt("this","Upcoming shift",ctx.thisDay)];
+  else if(ctx.position==="after") out=[opt("this","This shift",ctx.thisDay),     opt("next","Next shift",ctx.nextDay)];
+  // On a day you are not rostered, the likeliest answer is that today is its
+  // own work day - a call-out, not a continuation of Friday. It leads, and the
+  // neighbouring shifts stay available for the times it really is a carry-over.
+  else if(ctx.position==="off")   out=[opt("own","This day",ctx.ownDay,true),
+                                       opt("prev","Previous shift",ctx.prevDay),
+                                       opt("next","Next shift",ctx.nextDay)];
+  else                            out=[opt("this","This shift",ctx.thisDay)];
+  return out.filter(Boolean);
+}
+// A day worked outside the roster has no scheduled hours to tell regular time
+// from overtime, and the otDays setting cannot know about a one-off Saturday.
+// So it is asked, and the answer is stored on the records rather than inferred.
+var OT_CHOICES = [
+  { key:"reg", label:"Regular time", note:"Paid at the normal rate", ot:false },
+  { key:"ot",  label:"Overtime",     note:"Paid at the overtime rate", ot:true }
+];
+// The work day a clock-in resolves to with no question asked. Inside the window
+// it is simply today; outside it there is no safe default, so this returns null
+// and the caller must ask.
+function autoWorkDay(schedule, ts, graceMin){
+  var ctx=shiftContext(schedule, ts, graceMin);
+  // The stamp is the day the shift started, which on a wrapped shift is not
+  // the day the clock says.
+  return (ctx.inside && ctx.owner) ? workDayOf(ctx.owner.getTime()) : null;
+}
+// Grace is minutes either side of the scheduled window in which the prompt is
+// skipped. Zero means always ask, which is the default: a wrong silent guess
+// costs a whole shift of misfiled time, a prompt costs one tap.
+function normalizeGrace(v){
+  var n = (typeof v==="number" && isFinite(v)) ? Math.floor(v) : 0;
+  if(!(n>0)) return 0;
+  return Math.min(n, 240);
+}
+// A record's work day: the stamp it was filed under, or - for anything logged
+// before stamping existed - the calendar day it started on, which is exactly
+// where the old code filed it. Backfill therefore moves nothing.
+function recordDay(r){
+  return (r && typeof r.day==="string" && r.day) ? r.day : workDayOf(r.startTime);
+}
+
 function periodRange(kind, offset, ref, weekStart){
   var now = ref ? new Date(ref) : new Date();
   var s, e;
@@ -18881,6 +19609,17 @@ function payCycleRange(payroll, offset, ref){
   }
   return { kind:"pay", period:period, offset:offset, start:s.getTime(), end:e.getTime(), startDate:s, endDate:e };
 }
+// Whether a log is overtime. An explicit answer given at clock-in wins: a
+// called-in Saturday is overtime even when Saturday is not an overtime day, and
+// a rostered-day-off shift covered as straight time is not overtime even when
+// it is. With no answer stored it falls back to the weekday rule, read off the
+// work day the log was filed under rather than the calendar date its clock
+// happened to land on - those differ on a night shift.
+function logIsOt(l, otSet){
+  if(l && typeof l.ot==="boolean") return l.ot;
+  if(!l) return false;
+  return !!otSet[dayKeyOf(new Date(recordDay(l)))];
+}
 // Overtime inside a range grouped by week (weekStart-aligned), for per-week
 // exclusion allowances. Same rules as the rollup: start-time assigns the day,
 // clocked-in time never counts.
@@ -18893,8 +19632,8 @@ function overtimeByWeek(logs, range, otDays, weekStart){
     var dur=l.duration||0;
     if(dur<=0) return;
     if(!(l.startTime>=range.start && l.startTime<range.end)) return;
+    if(!logIsOt(l, otSet)) return;
     var d=new Date(l.startTime);
-    if(!otSet[dayKeyOf(d)]) return;
     var wk=startOfWeek(d, weekStart).getTime();
     if(map[wk]===undefined){ map[wk]=0; keys.push(wk); }
     map[wk]+=dur;
@@ -19015,16 +19754,16 @@ function scheduledToDate(schedule, startMs, endMs, nowMs){
   if(nowMs<=startMs) return 0;
   var midnight=startOfDay(new Date(nowMs));
   var mins=scheduledMinutes(schedule, startMs, midnight.getTime());
-  var dk=dayKeyOf(midnight), day=schedule[dk];
-  if(day && day.on){
-    var s0=toMin(day.start), e0=toMin(day.end);
-    if(s0!=null && e0!=null && e0>s0){
-      var t=new Date(nowMs), cur=t.getHours()*60+t.getMinutes();
-      // gross shift time gone by, minus the part of each break already behind
-      // us - sitting inside the lunch window, pace holds still
-      var gross=Math.max(0, Math.min(cur,e0)-s0);
-      if(gross>0) mins += Math.max(0, gross - schDayBreakMins(schedule, dk, cur));
-    }
+  var dk=dayKeyOf(midnight), sp=shiftSpan(schedule[dk]);
+  if(sp){
+    var t=new Date(nowMs), cur=t.getHours()*60+t.getMinutes();
+    // Today's shift has not begun until its start time even when it wraps: at
+    // 03:00 on a 21:00 shift the hours behind you belong to yesterday's shift,
+    // which the whole-days sum above has already counted.
+    var gross = cur<=sp.start ? 0 : Math.min(cur-sp.start, sp.len);
+    // minus the part of each break already behind us - sitting inside the
+    // lunch window, pace holds still
+    if(gross>0) mins += Math.max(0, gross - schDayBreakMins(schedule, dk, cur));
   }
   return mins;
 }
@@ -19072,8 +19811,8 @@ function buildRollup(o){
     if(l.type==="atwork"){ clockedMs+=dur; return; }
     if(dur<=0) return;
     trackedMs+=dur;
-    if(otSet[dayKeyOf(new Date(l.startTime))]) otMs+=dur;
-    days[new Date(l.startTime).toDateString()]=1;
+    if(logIsOt(l, otSet)) otMs+=dur;
+    days[workDayOf(l.startTime)]=1;
     var rid=rootOf(projects, l.projectId);
     var rp=findProj(projects, rid);
     var b=bucket((rp&&rp.lane) || l.lane || null);
@@ -19353,6 +20092,10 @@ function WorkScheduleModal(props){
                fontWeight:600,fontSize:"0.82rem",whiteSpace:"nowrap"} },
         "Edit")
     ),
+    React.createElement("div", { style:{fontSize:"0.76rem",color:S.textMuted,lineHeight:1.4,
+      padding:"0.15rem 0 0.5rem"} },
+      "Set an end earlier than the start for an overnight shift - 21:00 to 05:30 is "+
+      "marked +1d and counts as one work day."),
     DAY_KEYS.map(function(k){
       var d=draft[k];
       var invalid = d.on && schMinutes(d)===0;
@@ -19376,6 +20119,14 @@ function WorkScheduleModal(props){
         ),
         timeInput(k,"start"),
         timeInput(k,"end"),
+        // An end earlier than its start is now a legitimate overnight shift
+        // rather than an error, so the wrap has to be visible - otherwise a
+        // fat-fingered 08:00 reads as a silent 23-hour day.
+        React.createElement("span", { "aria-label": schWraps(d) ? "ends the next day" : "",
+          style:{width:"22px",flexShrink:0,textAlign:"center",fontSize:"0.62rem",fontWeight:700,
+                 fontFamily:S.fontMono,letterSpacing:"-0.03em",
+                 color: schWraps(d) ? S.chromeSubTask : "transparent"} },
+          schWraps(d) ? "+1d" : ""),
         React.createElement("span", { style:{width:"46px",flexShrink:0,marginLeft:"auto",textAlign:"right",fontSize:"0.74rem",fontFamily:S.fontMono,
           color: invalid?S.dangerText:(d.on?S.textDim:S.textMuted)} },
           d.on ? (invalid?"end?":fmtHours(schNetMinutes(draft,k))) : "off")
@@ -19813,6 +20564,20 @@ function TrackingModal(props){
         onChange:function(v){ set("timeInc", v); }
       })
     ),
+    React.createElement("div", { style:sectionBox },
+      React.createElement("div", { style:sectionHead }, "Shift Boundary"),
+      React.createElement("div", { style:note },
+        "Clocking in outside your scheduled hours asks which shift the time belongs to, "+
+        "because there is no safe way to guess. Grace silences that question near the "+
+        "edges of the shift - at 15 minutes, arriving at 05:50 for a 06:00 start files "+
+        "under today without asking."),
+      React.createElement(Toggle, {
+        name:"shiftgrace", keys:["0","15","30","60"],
+        value:String(normalizeGrace(settings.shiftGrace)),
+        labelOf:function(k){ return k==="0" ? "Always ask" : k+" min"; },
+        onChange:function(v){ set("shiftGrace", parseInt(v,10)); }
+      })
+    ),
     // ---- notifications ----
     (function(){
       var cfg=normalizeNotifs(settings.notifs);
@@ -20125,7 +20890,10 @@ function DeleteProjectModal(props){
 function DaySummary(props){
   var logs=props.logs, disruptions=props.disruptions, breaks=props.breaks, onClose=props.onClose, testMode=props.testMode;
   var copiedS = useState(false); var setCopied=copiedS[1]; var copied=copiedS[0];
-  var today=new Date().toLocaleDateString([],{weekday:"long",month:"long",day:"numeric",year:"numeric"});
+  // The shift being summarised, not the wall-clock date: after midnight on a
+  // night shift those differ, and heading Wednesday's work "Thursday" is how
+  // a summary ends up pasted into the wrong row of the log.
+  var today=new Date(props.dayKey||Date.now()).toLocaleDateString([],{weekday:"long",month:"long",day:"numeric",year:"numeric"});
   var done=disruptions.filter(function(d){ return d.endTime; });
   var distTotal=done.reduce(function(a,d){ return a+d.duration; },0);
   var breakTotal=breaks.filter(function(b){ return b.endTime; }).reduce(function(a,b){ return a+b.duration; },0);
@@ -20479,9 +21247,19 @@ function SubRow(props){
   var sub=props.sub, idx=props.idx, onEdit=props.onEdit, onStages=props.onStages, onStageToggle=props.onStageToggle;
   var onToggle=props.onToggle, editMode=props.editMode, onDragStart=props.onDragStart;
   var isActive=props.isActive, isInterrupted=props.isInterrupted;
-  var todayMs=props.todayMs, distCount=props.distCount, todayDist=props.todayDist;
+  var todayMs=props.todayMs, todayDist=props.todayDist, allDist=props.allDist||[];
+  var onCloseOut=props.onCloseOut;
+  var distToday=props.distToday, distTotal=props.distTotal;
+  // A nested row is a project in its own right when something hangs off it.
+  // Nothing declares that; the structure does, so it stays true as work moves.
+  var kids=props.kids||[], depth=props.depth||1;
+  var isNest=kids.length>0;
+  var onAddSub=props.onAddSub;
+  // Room for one more level below this row, or not.
+  var canNest=depth < MAX_NEST_DEPTH-1;
 
   var hintS=useState(false); var setHint=hintS[1]; var hint=hintS[0];
+  var kidsOpenS=useState(true); var setKidsOpen=kidsOpenS[1]; var kidsOpen=kidsOpenS[0];
   var menuS=useState(false); var setMenu=menuS[1]; var menu=menuS[0];
   var distPopupS=useState(false); var setDistPopup=distPopupS[1]; var distPopup=distPopupS[0];
   var menuRef=useRef(null);
@@ -20559,7 +21337,7 @@ function SubRow(props){
   }
 
   return (
-    React.createElement("div", { "data-draggable":true, "data-surface":"panel", "data-menu-open":(menu||stagesMenu)?"1":undefined, style:{background:rowBg,border:"2.5px solid "+rowBdr,borderRadius:"10px",marginBottom:"0.35rem",position:"relative",zIndex:(menu||stagesMenu)?80:"auto",boxShadow:glow,transition:"all 0.15s"} },
+    React.createElement("div", { "data-draggable":true, "data-surface":"panel", "data-menu-open":(menu||stagesMenu)?"1":undefined, style:{background:rowBg,border:(isNest?"3px":"2.5px")+" solid "+rowBdr,borderRadius:isNest?"12px":"10px",marginBottom:"0.35rem",position:"relative",zIndex:(menu||stagesMenu)?80:"auto",boxShadow:glow,transition:"all 0.15s"} },
       React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.45rem",padding:"0.55rem 0.7rem 0.3rem"} },
         editMode&&React.createElement("span", { onMouseDown:function(e){ onDragStart(e,idx); }, onTouchStart:function(e){ onDragStart(e,idx); }, style:{cursor:"grab",color:S.dragGlyph,fontSize:"0.95rem",userSelect:"none",touchAction:"none",flexShrink:0} }, "\u283f"),
         React.createElement("div", { style:{width:"3px",alignSelf:"stretch",background:barBg,borderRadius:"2px",flexShrink:0,minHeight:"22px"} }),
@@ -20581,7 +21359,13 @@ function SubRow(props){
           hint && React.createElement("div", { style:{fontSize:"0.66rem",color:S.titleText,marginTop:"0.1rem"} }, "tap: menu / double-tap: edit"),
           menu && React.createElement("div", { ref:menuAutoScroll, "data-surface":"menu", style:{position:"absolute",top:"calc(100% + 4px)",left:UI.left?"auto":0,right:UI.left?0:"auto",background:S.menuBg,border:"1px solid "+S.border,borderRadius:S.radius,minWidth:"160px",boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:70,overflow:"hidden"} },
             React.createElement("button", { "data-flat":true, onClick:function(){ onEdit(sub); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.6rem 0.9rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.88rem"} }, "Edit Task"),
-            React.createElement("button", { "data-flat":true, onClick:function(){ onStages(sub); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",padding:"0.6rem 0.9rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.88rem"} }, hasStages?"View Stages":"Add Stages")
+            React.createElement("button", { "data-flat":true, onClick:function(){ onStages(sub); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.6rem 0.9rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.88rem"} }, hasStages?"View Stages":"Add Stages"),
+            canNest && onAddSub && React.createElement("button", { "data-flat":true, onClick:function(){ onAddSub(sub.id); setMenu(false); }, style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.6rem 0.9rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.88rem"} },
+              React.createElement("span", { style:{display:"inline-block",width:"7px",height:"7px",borderRadius:"50%",background:ACCENT} }),
+              "Nest Something Here"),
+            React.createElement("button", { "data-flat":true, onClick:function(){ onCloseOut(sub); setMenu(false); }, style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"0.6rem",width:"100%",textAlign:"left",background:readyToClose(sub)?S.successBg:"none",border:"none",padding:"0.6rem 0.9rem",color:readyToClose(sub)?S.successText:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.88rem"} },
+              "Close Out",
+              readyToClose(sub) ? React.createElement("span", { style:{fontSize:"0.64rem",fontWeight:800,letterSpacing:"0.05em"} }, "READY") : null)
           )
         ),
         // Start/Stop
@@ -20606,11 +21390,8 @@ function SubRow(props){
       React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.45rem",padding:"0 0.7rem 0.5rem 2.2rem",flexWrap:"wrap"} },
         sub.notes && !hint && React.createElement("span", { style:{fontSize:"0.76rem",color:S.textDim} }, sub.notes),
         todayMs>0 && React.createElement(Mono, { style:{fontSize:"0.76rem",color:timCol,fontWeight:700} }, fmtDur(todayMs,true)),
-        distCount>0 && React.createElement("button", { onClick:function(){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} setDistPopup(true); },
-          style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.25rem",background:S.dangerTint,border:"2px solid #CC3030",borderRadius:"8px",cursor:"pointer",padding:"0 0.55rem",height:"30px",minHeight:"30px",flexShrink:0} },
-          React.createElement("span", { style:{fontSize:"0.88rem",fontWeight:900,color:S.distBadge,letterSpacing:"-0.05em",lineHeight:1} }, "!!"),
-          React.createElement("span", { style:{fontSize:"0.76rem",color:S.distBadge,fontFamily:S.fontMono,fontWeight:700} }, distCount)
-        ),
+        React.createElement(DistBadge, { today:distToday, total:distTotal, small:true,
+          onClick:function(){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} setDistPopup(true); } }),
         hasStages && React.createElement("div", { ref:stagesRef, style:{position:"relative",flex:1,minWidth:"90px"} },
         React.createElement("button", { onClick:function(){ if(!stagesMenu){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setStagesMenu(function(x){ return !x; }); },
           style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.35rem",background:stagesAllDone?S.successBg:S.bg1,border:"2px solid "+(stagesAllDone?S.stageDoneBdr:S.chromeBdr),borderRadius:"8px",cursor:"pointer",padding:"0 0.55rem",height:"30px",minHeight:"30px",width:"100%"} },
@@ -20624,7 +21405,19 @@ function SubRow(props){
           stageMenuRows(sub.stages, function(id){ onStageToggle(sub.id,id); }, function(){ setStagesMenu(false); onStages(sub); })
         )
         ),
-        distPopup && React.createElement(DisruptionPopup, { disruptions:(todayDist||[]).filter(function(d){ return d.projectId===sub.id; }), projName:sub.name, onClose:function(){ setDistPopup(false); } })
+        distPopup && React.createElement(DisruptionPopup, { disruptions:allDist.filter(function(d){ return d.projectId===sub.id; }), projName:sub.name, onClose:function(){ setDistPopup(false); } })
+      ),
+      // The nested projects and tasks under this one. Same component all the
+      // way down, so a project three levels in behaves like one at the top.
+      isNest && React.createElement("div", { style:{padding:"0 0 0.1rem 0.9rem",marginTop:"-0.1rem",
+        borderLeft:"2px solid "+ACCENT+"55",marginLeft:"0.7rem"} },
+        React.createElement("button", { "data-flat":true,
+          onClick:function(){ haptic(6); setKidsOpen(function(x){ return !x; }); },
+          style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",
+                 padding:"0.3rem 0 0.35rem",cursor:"pointer",fontFamily:S.fontBody,
+                 fontSize:"0.72rem",fontWeight:700,color:S.chromeText,whiteSpace:"nowrap"} },
+          (kidsOpen?"\u2228 ":"\u203a ")+kids.length+" nested"),
+        kidsOpen && props.renderKids && props.renderKids(kids, depth+1)
       )
     )
   );
@@ -20633,12 +21426,19 @@ function SubRow(props){
 // ---- PROJECT CARD -----------------------------------------------------------
 function ProjectCard(props){
   var proj=props.proj, isActive=props.isActive, interrupting=props.interrupting;
-  var todayMs=props.todayMs, distCount=props.distCount, projDisruptions=props.projDisruptions;
+  var todayMs=props.todayMs, distToday=props.distToday, distTotal=props.distTotal;
+  var projDisruptions=props.projDisruptions;
   var onToggle=props.onToggle, onEdit=props.onEdit, onStages=props.onStages, onStageToggle=props.onStageToggle;
   var onAddSub=props.onAddSub, editMode=props.editMode, dragHandleProps=props.dragHandleProps;
   var subTasks=props.subTasks||[], activeId=props.activeId;
-  var todayLogs=props.todayLogs, todayDist=props.todayDist, allProjects=props.allProjects;
+  var todayLogs=props.todayLogs, todayDist=props.todayDist, allDist=props.allDist||[];
+  var allProjects=props.allProjects, onCloseOut=props.onCloseOut;
   var laneMeta=props.laneMeta, elapsed=props.elapsed;
+  var nestDepth=props.nestDepth||0;
+  var isNestedCard=nestDepth>0;
+  // The top card of a tree works the ranking out once and hands it down, so
+  // every card in the stack is ranked against the same walk.
+  var stackOrder=props.stackOrder || projectStackOrder(props.allProjects, props.proj.id);
 
   var expandedS=useState(true); var setExpanded=expandedS[1]; var expanded=expandedS[0];
   var hintS=useState(false); var setHint=hintS[1]; var hint=hintS[0];
@@ -20709,6 +21509,21 @@ function ProjectCard(props){
   var stageBdr = stagesAllDone ? S.stageDoneBdr : meta.accent;
   var stageCol = stagesAllDone ? S.stageDoneText : meta.accent;
 
+  // Two different things hang off a project and they are drawn differently: a
+  // task is a step inside it, a nested project is work in its own right that
+  // this one depends on.
+  //
+  // Declared above the collapsed early return, not below it: the collapsed pill
+  // reads childTasks and countLabel too, and `var` hoists the name without the
+  // value, so from down there they were plain undefined.
+  var childTasks=subTasks.filter(isTaskRole);
+  var childProjects=subTasks.filter(isProjectRole).slice().sort(function(a,b){ return (a.order||0)-(b.order||0); });
+  var deepCount=getDescendantIds(allProjects||[], proj.id).filter(function(id){
+    return isTaskRole(findProj(allProjects||[], id));
+  }).length;
+  var nested = deepCount > childTasks.length;
+  var countLabel = nested ? (deepCount+" nested") : (childTasks.length+" task"+(childTasks.length!==1?"s":""));
+
   if(cardCollapsed){
     // The pill keeps live control: a bare icon+text (no button chrome, per the
     // space budget) mirroring the big card's three start states. When a
@@ -20721,18 +21536,47 @@ function ProjectCard(props){
     var pillTarget = isActive ? proj.id : (subActive ? subActive.id : proj.id);
     var pillPulse = liveActive && !liveInterrupted;
     return (
-      React.createElement("div", { "data-draggable":true, style:{marginBottom:"0.45rem"} },
+      // Pulled up 12px, exactly the headroom the pill grew by, so what goes
+      // under the parent is empty space and the title stays clear.
+      React.createElement("div", { "data-draggable":true,
+        style:{ marginBottom:isNestedCard?0:"0.45rem",
+                marginTop:isNestedCard?"-12px":0 } },
         React.createElement("div", {
           "data-pulse": pillPulse ? "1" : undefined,
           onMouseDown:function(e){ swipeX.current=e.clientX; },
           onMouseUp:function(e){ if(swipeX.current!==null){ var dx=e.clientX-swipeX.current; if(dx>50){ haptic(8); setCardCollapsedPersist(false); } } swipeX.current=null; },
           onTouchStart:function(e){ if(e.touches&&e.touches.length) swipeX.current=e.touches[0].clientX; },
           onTouchEnd:function(e){ if(swipeX.current!==null&&e.changedTouches&&e.changedTouches.length){ var dx=e.changedTouches[0].clientX-swipeX.current; if(dx>50){ haptic(8); setCardCollapsedPersist(false); } } swipeX.current=null; },
-          style:Object.assign({height:"24px",border:"2.5px solid "+cardBdr,borderRadius:"999px",background:cardBg,cursor:"grab",opacity:0.92,display:"flex",alignItems:"center",gap:"0.6rem",overflow:"hidden",padding:"0 0.35rem 0 0.75rem",boxShadow:cardGlow,touchAction:"pan-y",WebkitUserSelect:"none",userSelect:"none"}, pulseVars(cardBdr)) },
+          // A nested pill is 12px taller and spends all of it above the text,
+          // so the text keeps its original position relative to the bottom and
+          // the extra 12px is what slides under the parent.
+          //
+          // The radius stays a flat 999px. Squaring the top corners is what
+          // turned this into a bucket last time - a lozenge only reads as a
+          // lozenge while every corner matches. border-box too, or the padding
+          // would be added to the height instead of taken out of it.
+          style:Object.assign({
+            height:isNestedCard?"36px":"24px",
+            boxSizing:"border-box",
+            border:"2.5px solid "+cardBdr,borderRadius:"999px",
+            // Opaque, not tinted: the pill overlaps the card tucked beneath it,
+            // and a translucent fill let that card's top border read straight
+            // through as a stray line. An opaque base with the themed tint
+            // painted over it keeps the colour and stops the bleed. The blanket
+            // 0.92 had to go too - no fill can fix a translucent element.
+            backgroundColor:isNestedCard?S.bg0:cardBg,
+            backgroundImage:isNestedCard?("linear-gradient("+cardBg+","+cardBg+")"):"none",
+            opacity:isNestedCard?1:0.92,
+            cursor:"grab",display:"flex",alignItems:"center",gap:"0.6rem",overflow:"hidden",
+            // Centred inside the padded box, which leaves the same 19px of
+            // content at the bottom the pill has always had.
+            padding:isNestedCard?"12px 0.35rem 0 0.75rem":"0 0.35rem 0 0.75rem",
+            boxShadow:cardGlow,touchAction:"pan-y",WebkitUserSelect:"none",userSelect:"none",
+            position:"relative",zIndex:stackZ(stackOrder, proj.id)}, pulseVars(cardBdr)) },
           // Title anchored left, control anchored right - the pill's Stop
           // lands on the same edge as every expanded card's Start button.
           React.createElement("span", { style:{flex:"1 1 auto",textAlign:"left",fontSize:"0.74rem",fontWeight:700,color:meta.accent,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,fontFamily:S.fontBody} }, proj.name),
-          subTasks.length>0 && React.createElement("span", { style:{fontSize:"0.66rem",color:meta.accent,opacity:0.7,whiteSpace:"nowrap",fontFamily:S.fontBody} }, subTasks.length+" tasks"),
+          childTasks.length>0 && React.createElement("span", { style:{fontSize:"0.66rem",color:meta.accent,opacity:0.7,whiteSpace:"nowrap",fontFamily:S.fontBody} }, countLabel),
           (liveActive||todayMs>0) && React.createElement(Mono, { style:{fontSize:"0.7rem",color:timCol,fontWeight:700,whiteSpace:"nowrap"} }, fmtDur(todayMs,true)),
           React.createElement("span", { "data-pillctl":true, role:"button", "aria-label":pillLbl,
             onClick:function(e){ e.stopPropagation(); haptic(10); onToggle(pillTarget); },
@@ -20753,19 +21597,96 @@ function ProjectCard(props){
                   ),
             React.createElement("span", { style:{fontSize:"0.68rem",fontWeight:700,color:pillLblCol,fontFamily:S.fontBody,lineHeight:1,whiteSpace:"nowrap"} }, pillLbl)
           )
-        )
+        ),
+        // Collapsing hides this project's own steps, which is the point of it.
+        // It must not hide the projects nested under it: those are separate
+        // work, and dropping them off the board would lose them entirely.
+        renderNestedProjects()
       )
     );
   }
 
+  // One renderer for every level below the card. A row's own children come from
+  // the same list it did, so nesting is a matter of who points at whom rather
+  // than of how deep the render happens to have got.
+  // "3 tasks" is a lie once one of them is a project with work under it, so the
+  // label counts everything below and changes word when the tree is deeper.
+  function renderKids(list, depth){
+    return list.slice().sort(function(a,b){ return (a.order||0)-(b.order||0); }).map(function(sub,idx){
+      var subIsActive=activeId===sub.id;
+      // A nested project's own time is its own; the roll-up of everything
+      // beneath it stays on the card at the top, which is where it belongs.
+      var subTodayMs=todayLogs.filter(function(l){ return l.projectId===sub.id; }).reduce(function(a,l){ return a+l.duration; },0)+(subIsActive?elapsed:0);
+      var subKids=(allProjects||[]).filter(function(p){ return p.parentId===sub.id && isOpen(p); });
+      var subIds=[sub.id].concat(getDescendantIds(allProjects||[], sub.id));
+      return React.createElement(SubRow, {
+        key:sub.id, sub:sub, idx:idx, kids:subKids, depth:depth, renderKids:renderKids,
+        onAddSub:onAddSub,
+        onEdit:onEdit, onStages:onStages, onStageToggle:onStageToggle, onToggle:onToggle,
+        onCloseOut:onCloseOut,
+        editMode:editMode, onDragStart:function(e,i){ /* drag placeholder */ },
+        isActive:subIsActive, isInterrupted:subIsActive&&interrupting,
+        elapsed:elapsed, todayMs:subTodayMs, todayDist:todayDist, allDist:allDist,
+        distToday:distStats(todayDist, subIds), distTotal:distStats(allDist, subIds),
+        accent:meta.accent
+      });
+    });
+  }
+
+  // A nested project is drawn as a card of its own, indented and pulled up so
+  // its top edge sits under the parent's bottom edge. No gap anywhere in the
+  // chain: the absence of open space is the thing that reads as "attached",
+  // which a connector line alone never quite does.
+  function renderNestedProjects(){
+    if(!childProjects.length) return null;
+    return React.createElement("div", { style:{marginLeft:"0.9rem"} },
+      childProjects.map(function(child){
+        var kidTasks=(allProjects||[]).filter(function(p){ return p.parentId===child.id && isOpen(p); });
+        var kidIds=[child.id].concat(getDescendantIds(allProjects||[], child.id));
+        var kidActive=activeId===child.id;
+        var kidToday=todayLogs.filter(function(l){ return kidIds.indexOf(l.projectId)>=0; })
+          .reduce(function(a,l){ return a+l.duration; },0)+(kidActive?elapsed:0);
+        return React.createElement(ProjectCard, {
+          key:child.id, proj:child, nestDepth:nestDepth+1, stackOrder:stackOrder,
+          isActive:kidActive, interrupting:interrupting, elapsed:elapsed,
+          todayMs:kidToday,
+          distToday:distStats(todayDist, kidIds), distTotal:distStats(allDist, kidIds),
+          projDisruptions:allDist.filter(function(d){ return kidIds.indexOf(d.projectId)>=0; }),
+          onToggle:onToggle, onEdit:onEdit, onStages:onStages, onStageToggle:onStageToggle,
+          onAddSub:onAddSub, onCloseOut:onCloseOut,
+          editMode:editMode, dragHandleProps:{},
+          subTasks:kidTasks, activeId:activeId,
+          todayLogs:todayLogs, todayDist:todayDist, allDist:allDist,
+          allProjects:allProjects, laneMeta:laneMeta
+        });
+      })
+    );
+  }
+
   return (
-    React.createElement("div", { "data-draggable":true, style:{marginBottom:"0.45rem"} },
+    React.createElement("div", { "data-draggable":true,
+      // The pull had a matching padding cancelling it out, so the tuck was
+      // only ever the absence of a gap. No compensation now: the top of a
+      // nested card really does slide up behind its parent's bottom edge.
+      // Deliberately no z-index here - a stacking context on this wrapper
+      // would trap the nested card's own menu underneath the parent.
+      style:{ marginBottom:isNestedCard?0:"0.45rem",
+              marginTop:isNestedCard?"-12px":0 } },
       // A themed card is its own stacking context (backdrop-filter or texture),
       // so a menu inside it cannot outrank a later sibling card. Lift the whole
       // card for as long as its menu is open.
       React.createElement("div", { "data-surface":"panel", "data-menu-open":(menu||stagesMenu)?"1":undefined,
         "data-pulse": ((isActive||!!subActive)&&!interrupting) ? "1" : undefined,
-        style:Object.assign({background:cardBg,border:"3px solid "+cardBdr,borderRadius:S.radius2,overflow:"visible",position:"relative",zIndex:(menu||stagesMenu)?80:"auto",transition:"all 0.15s",boxShadow:cardGlow}, pulseVars(cardBdr)) },
+        style:Object.assign({background:cardBg,border:"3px solid "+cardBdr,
+          borderRadius:S.radius2,
+          borderTopLeftRadius:isNestedCard?"4px":S.radius2,
+          borderTopRightRadius:isNestedCard?"4px":S.radius2,
+          overflow:"visible",position:"relative",
+          // Ranked by position down the stack, not by depth: siblings share a
+          // depth, and two cards with the same z-index fall back to DOM order,
+          // which puts the lower one on top. All below the lifted-row layer at
+          // 70; an open menu still lifts a card to 80.
+          zIndex:(menu||stagesMenu)?80:stackZ(stackOrder, proj.id),transition:"all 0.15s",boxShadow:cardGlow}, pulseVars(cardBdr)) },
         // Row 1: drag + title + gear + start
         React.createElement("div", { ref:menuRef, style:{display:"flex",alignItems:"center",gap:"0.5rem",padding:"0.75rem 0.75rem 0.4rem 1rem"} },
           editMode && React.createElement("span", { onMouseDown:dragHandleProps.onMouseDown, onTouchStart:dragHandleProps.onTouchStart, style:{cursor:"grab",color:S.mutedGlyph,fontSize:"1.3rem",userSelect:"none",touchAction:"none",flexShrink:0} }, "\u283f"),
@@ -20789,14 +21710,19 @@ function ProjectCard(props){
               ref:menuAutoScroll,
               "data-surface":"menu",
               style:{position:"absolute",top:"calc(100% + 4px)",left:UI.left?"auto":0,right:UI.left?0:"auto",background:S.menuBg,border:"1px solid "+S.border,borderRadius:S.radius,minWidth:"190px",boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:70,overflow:"hidden"} },
-              subTasks.length>0 && React.createElement("button", { "data-flat":true, onClick:function(){ setExpanded(function(x){ return !x; }); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.65rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} }, expanded?"Collapse Tasks":"Expand Tasks"),
+              childTasks.length>0 && React.createElement("button", { "data-flat":true, onClick:function(){ setExpanded(function(x){ return !x; }); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.65rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} }, (expanded?"Collapse ":"Expand ")+(nested?"Nested":"Tasks")),
               React.createElement("button", { "data-flat":true, onClick:function(){ onEdit(proj); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.65rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} }, "Edit Project"),
               // Lane identity rides on a dot: raw accents are border colours, and most of
               // them fail as text on the menu surface.
               React.createElement("button", { "data-flat":true, onClick:function(){ onAddSub(proj.id); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.65rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} },
                 React.createElement("span", { style:{display:"inline-block",width:"8px",height:"8px",borderRadius:"50%",background:meta.accent,marginRight:"0.55rem"} }),
                 "Add Task"),
-              React.createElement("button", { "data-flat":true, onClick:function(){ onStages(proj); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",padding:"0.65rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} }, hasStages?"View Stages":"Add Stages")
+              React.createElement("button", { "data-flat":true, onClick:function(){ onStages(proj); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.65rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} }, hasStages?"View Stages":"Add Stages"),
+              // Closing out is not deleting, so it sits with the ordinary rows
+              // and reads in the project's own colour, not the danger one.
+              React.createElement("button", { "data-flat":true, onClick:function(){ onCloseOut(proj); setMenu(false); }, style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"0.6rem",width:"100%",textAlign:"left",background:readyToClose(proj)?S.successBg:"none",border:"none",padding:"0.65rem 1rem",color:readyToClose(proj)?S.successText:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} },
+                "Close Out",
+                readyToClose(proj) ? React.createElement("span", { style:{fontSize:"0.66rem",fontWeight:800,letterSpacing:"0.05em"} }, "READY") : null)
             )
           ),
           // Start/Stop button
@@ -20821,16 +21747,13 @@ function ProjectCard(props){
         React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",padding:"0 1rem 0.75rem",flexWrap:"wrap"} },
           proj.notes && React.createElement("span", { style:{fontSize:"0.82rem",color:S.textDim} }, proj.notes),
           subActive&&!isActive && React.createElement("span", { style:{fontSize:"0.76rem",color:meta.accent,fontWeight:600} }, "> "+subActive.name),
-          subTasks.length>0 && React.createElement("button", { onClick:function(){ setExpanded(function(x){ return !x; }); },
+          childTasks.length>0 && React.createElement("button", { onClick:function(){ setExpanded(function(x){ return !x; }); },
             style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.3rem",background:S.bg0,border:"2px solid "+S.chromeBdr,borderRadius:"8px",cursor:"pointer",padding:"0 0.55rem",height:"30px",minHeight:"30px",flexShrink:0} },
-            React.createElement("span", { style:{fontSize:"0.76rem",color:S.chromeText,fontWeight:700} }, (expanded?"v ":"+ ")+subTasks.length+" task"+(subTasks.length!==1?"s":""))
+            React.createElement("span", { style:{fontSize:"0.76rem",color:S.chromeText,fontWeight:700} }, (expanded?"\u2228 ":"\u203a ")+countLabel)
           ),
           todayMs>0 && React.createElement(Mono, { style:{fontSize:"0.82rem",color:timCol,fontWeight:700} }, fmtDur(todayMs,true)),
-          distCount>0 && React.createElement("button", { onClick:function(){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} setDistPopup(true); },
-            style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.3rem",background:S.dangerTint,border:"2px solid #CC3030",borderRadius:"8px",cursor:"pointer",padding:"0 0.55rem",height:"30px",minHeight:"30px",flexShrink:0} },
-            React.createElement("span", { style:{fontSize:"0.88rem",fontWeight:900,color:S.distBadge,letterSpacing:"-0.05em",lineHeight:1} }, "!!"),
-            React.createElement("span", { style:{fontSize:"0.76rem",color:S.distBadge,fontFamily:S.fontMono,fontWeight:700} }, distCount)
-          ),
+          React.createElement(DistBadge, { today:distToday, total:distTotal,
+            onClick:function(){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} setDistPopup(true); } }),
           hasStages && React.createElement("div", { ref:stagesRef, style:{position:"relative",flex:1,minWidth:"110px"} },
           React.createElement("button", { onClick:function(){ if(!stagesMenu){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setStagesMenu(function(x){ return !x; }); },
             style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.38rem",background:stagesAllDone?S.successBg:S.bg1,border:"2px solid "+stageBdr,borderRadius:"8px",cursor:"pointer",padding:"0 0.55rem",height:"30px",minHeight:"30px",width:"100%"} },
@@ -20846,22 +21769,11 @@ function ProjectCard(props){
           )
         ),
         // Sub-tasks INSIDE the parent border
-        expanded && subTasks.length>0 && React.createElement("div", { style:{padding:"0.15rem 0.6rem 0.6rem 1.4rem",borderTop:"1px solid "+meta.dim,marginTop:"0.1rem",paddingTop:"0.55rem"} },
-          subTasks.sort(function(a,b){ return (a.order||0)-(b.order||0); }).map(function(sub,idx){
-            var subIsActive=activeId===sub.id;
-            var subTodayMs=todayLogs.filter(function(l){ return l.projectId===sub.id; }).reduce(function(a,l){ return a+l.duration; },0)+(subIsActive?elapsed:0);
-            var subDistCount=todayDist.filter(function(d){ return d.projectId===sub.id; }).length;
-            return React.createElement(SubRow, {
-              key:sub.id, sub:sub, idx:idx,
-              onEdit:onEdit, onStages:onStages, onStageToggle:onStageToggle, onToggle:onToggle,
-              editMode:editMode, onDragStart:function(e,i){ /* drag placeholder */ },
-              isActive:subIsActive, isInterrupted:subIsActive&&interrupting,
-              elapsed:elapsed, todayMs:subTodayMs, distCount:subDistCount, todayDist:todayDist,
-              accent:meta.accent
-            });
-          })
+        expanded && childTasks.length>0 && React.createElement("div", { style:{padding:"0.15rem 0.6rem 0.6rem 1.4rem",borderTop:"1px solid "+meta.dim,marginTop:"0.1rem",paddingTop:"0.55rem"} },
+          renderKids(childTasks, 1)
         )
       ),
+      renderNestedProjects(),
       distPopup && React.createElement(DisruptionPopup, { disruptions:projDisruptions||[], projName:proj.name, onClose:function(){ setDistPopup(false); } })
     )
   );
@@ -20871,10 +21783,10 @@ function ProjectCard(props){
 function LaneSection(props){
   var lane=props.lane, allProjects=props.allProjects, activeId=props.activeId;
   var interrupting=props.interrupting, elapsed=props.elapsed;
-  var todayLogs=props.todayLogs, todayDist=props.todayDist;
+  var todayLogs=props.todayLogs, todayDist=props.todayDist, allDist=props.allDist||[];
   var onToggle=props.onToggle, onEdit=props.onEdit, onStages=props.onStages, onStageToggle=props.onStageToggle;
   var editMode=props.editMode, laneHandle=props.laneHandle;
-  var laneMeta=props.laneMeta, onDeleteLane=props.onDeleteLane;
+  var laneMeta=props.laneMeta, onDeleteLane=props.onDeleteLane, onCloseOut=props.onCloseOut;
 
   var meta=getMeta(laneMeta,lane);
   var isBuiltin=DEFAULT_ORDER.indexOf(lane)>=0;
@@ -21005,15 +21917,21 @@ function LaneSection(props){
             var descendantIds=getDescendantIds(allProjects,proj.id);
             var allIds=[proj.id].concat(descendantIds);
             var todayMs=todayLogs.filter(function(l){ return allIds.indexOf(l.projectId)>=0; }).reduce(function(a,l){ return a+l.duration; },0)+(activeId===proj.id?elapsed:0);
-            var projDisruptions=todayDist.filter(function(d){ return allIds.indexOf(d.projectId)>=0; });
-            var distCount=projDisruptions.length;
+            // Two figures, from two different lists: today's comes from the
+            // day-scoped collection, the running total from every disruption
+            // ever logged against this project or anything beneath it.
+            var distToday=distStats(todayDist, allIds);
+            var distTotal=distStats(allDist, allIds);
+            var projDisruptions=allDist.filter(function(d){ return allIds.indexOf(d.projectId)>=0; });
             return React.createElement(ProjectCard, {
               key:proj.id, proj:proj, subTasks:subTasks,
               isActive:activeId===proj.id, interrupting:interrupting, elapsed:elapsed,
-              todayMs:todayMs, distCount:distCount, projDisruptions:projDisruptions,
+              todayMs:todayMs, distToday:distToday, distTotal:distTotal, projDisruptions:projDisruptions,
+              onCloseOut:onCloseOut,
               onToggle:onToggle, onEdit:onEdit, onStages:onStages, onStageToggle:props.onStageToggle,
               onAddSub:props.onAddSub,
-              activeId:activeId, todayLogs:todayLogs, todayDist:todayDist, allProjects:allProjects,
+              activeId:activeId, todayLogs:todayLogs, todayDist:todayDist, allDist:allDist, allProjects:allProjects,
+              onCloseOut:onCloseOut,
               editMode:editMode, laneMeta:laneMeta,
               dragHandleProps:{ onMouseDown:function(e){ props.onDragStart(e,idx); }, onTouchStart:function(e){ props.onDragStart(e,idx); } }
             });
@@ -21282,11 +22200,14 @@ function ttModuleContext(id, host){
 function ttSettingsPanels(storage){
   return ttEnabledModules(storage).filter(function(m){ return m.settingsPanel; });
 }
+// Reports hooks are handed the same context shape screens get - the report
+// window plus ctx.storage and ctx.api - so a module reads its own data the one
+// documented way instead of reaching for TT.storage() by hand.
 function ttReportSections(ctx, storage){
   var out=[];
   ttEnabledModules(storage).forEach(function(m){
     if(!m.reports || !m.reports.section) return;
-    try{ var el=m.reports.section(ctx); if(el) out.push({ id:m.id, el:el }); }catch(e){}
+    try{ var el=m.reports.section(ttModuleContext(m.id, ctx)); if(el) out.push({ id:m.id, el:el }); }catch(e){}
   });
   return out;
 }
@@ -21295,7 +22216,7 @@ function ttReportText(ctx, storage){
   ttEnabledModules(storage).forEach(function(m){
     if(!m.reports || !m.reports.text) return;
     try{
-      var lines=m.reports.text(ctx);
+      var lines=m.reports.text(ttModuleContext(m.id, ctx));
       if(typeof lines==="string") lines=[lines];
       if(Array.isArray(lines)) lines.forEach(function(l){ if(typeof l==="string") out.push(l); });
     }catch(e){}
@@ -21366,10 +22287,577 @@ var TT = {
     schNetMinutes: schNetMinutes
   },
 
-  data: { uid: uid, findProj: findProj, getChildren: getChildren, getDescendantIds: getDescendantIds }
+  data: { uid: uid, findProj: findProj, getChildren: getChildren, getDescendantIds: getDescendantIds,
+          getMeta: getMeta }
 };
 try{ window.TT = TT; }catch(e){}
 // ==== TT PLATFORM END ====
+
+// ==== TT MODULE tools BEGIN ====
+// Tool Tracker - the first module built entirely against contract v1. It adds
+// a new kind of record beside the timer (a tool, and a checkout of that tool)
+// without touching the timer at all: no core state, no core keys, nothing on
+// the board. Off until the user switches it on in Extensions.
+//
+//   tools     [{ id, name, tag, category, notes, createdAt }]
+//   checkouts [{ id, toolId, toolName, holder, projectId, projectName,
+//                note, out, in }]   - `in` is null while the tool is out
+//   prefs     { holder }            - remembers who checked the last one out
+//   schema    1
+//
+// The tool catalogue and the checkout log are kept apart on purpose. A checkout
+// snapshots the tool's name and the job's name, so deleting a tool or renaming
+// a project leaves the history readable instead of full of dangling ids.
+
+var TOOLS_ID = "tools";
+
+function toolsText(v, max){
+  return typeof v === "string" ? v.slice(0, max || 120) : "";
+}
+function toolsStamp(v){
+  return (typeof v === "number" && isFinite(v) && v > 0) ? v : 0;
+}
+
+// ---- normalizer -------------------------------------------------------------
+// Idempotent, never throws, runs before first paint whether the module is on or
+// off. Anything it cannot make sense of is dropped rather than left to blow up
+// a render three screens later.
+function toolsNormalize(store){
+  var raw = store.get("tools", []);
+  if(!Array.isArray(raw)) raw = [];
+  var seen = {}, tools = [];
+  raw.forEach(function(t){
+    if(!t || typeof t !== "object" || Array.isArray(t)) return;
+    var id = (typeof t.id === "string" && t.id) ? t.id : uid();
+    if(seen[id]) return;
+    var name = toolsText(t.name).trim();
+    if(!name) return;                       // a nameless tool cannot be picked
+    seen[id] = 1;
+    tools.push({ id:id, name:name,
+                 tag:toolsText(t.tag, 40).trim(),
+                 category:toolsText(t.category, 40).trim(),
+                 notes:toolsText(t.notes, 400),
+                 createdAt: toolsStamp(t.createdAt) || Date.now() });
+  });
+
+  var rawCos = store.get("checkouts", []);
+  if(!Array.isArray(rawCos)) rawCos = [];
+  var byId = {}; tools.forEach(function(t){ byId[t.id] = t; });
+  var seenCo = {}, cos = [];
+  rawCos.forEach(function(c){
+    if(!c || typeof c !== "object" || Array.isArray(c)) return;
+    var id = (typeof c.id === "string" && c.id) ? c.id : uid();
+    if(seenCo[id]) return;
+    var out = toolsStamp(c.out);
+    if(!out) return;                        // no start, no record
+    seenCo[id] = 1;
+    var toolId = typeof c.toolId === "string" ? c.toolId : "";
+    var back = (typeof c["in"] === "number" && isFinite(c["in"]) && c["in"] >= out) ? c["in"] : null;
+    cos.push({ id:id, toolId:toolId,
+               toolName: toolsText(c.toolName).trim() || (byId[toolId] ? byId[toolId].name : "Removed tool"),
+               holder: toolsText(c.holder, 60).trim(),
+               projectId: (c.projectId === undefined) ? null : c.projectId,
+               projectName: toolsText(c.projectName, 120).trim(),
+               note: toolsText(c.note, 200),
+               out: out, "in": back });
+  });
+  cos.sort(function(a, b){ return a.out - b.out; });
+
+  // A tool cannot be out twice. If a write was interrupted mid-checkout the
+  // older record is closed at the moment the newer one opened - the tool was
+  // evidently handed on - rather than deleted, which would lose the history.
+  var open = {};
+  cos.forEach(function(c){
+    if(c["in"] !== null) return;
+    var prev = open[c.toolId];
+    if(prev) prev["in"] = c.out;
+    open[c.toolId] = c;
+  });
+  // And a checkout whose tool is gone cannot stay open: nothing can check it in.
+  cos.forEach(function(c){ if(c["in"] === null && !byId[c.toolId]) c["in"] = c.out; });
+
+  var prefs = store.get("prefs", null);
+  if(!prefs || typeof prefs !== "object" || Array.isArray(prefs)) prefs = {};
+
+  store.set("tools", tools);
+  store.set("checkouts", cos);
+  store.set("prefs", { holder: toolsText(prefs.holder, 60) });
+  store.set("schema", 1);
+}
+
+// ---- shared queries ---------------------------------------------------------
+function toolsOpenMap(cos){
+  var m = {};
+  (cos || []).forEach(function(c){ if(c["in"] === null) m[c.toolId] = c; });
+  return m;
+}
+function toolsOpenList(cos){
+  return (cos || []).filter(function(c){ return c["in"] === null; })
+                    .sort(function(a, b){ return a.out - b.out; });
+}
+// How long a checkout sat inside a reporting window. An open record runs to now.
+function toolsSpan(c, range, now){
+  var a = c.out, b = (c["in"] === null ? (now || Date.now()) : c["in"]);
+  if(range && range.start != null) a = Math.max(a, range.start);
+  if(range && range.end != null)   b = Math.min(b, range.end);
+  return Math.max(0, b - a);
+}
+function toolsInWindow(c, range, now){
+  if(!range || range.start == null || range.end == null) return true;
+  var b = (c["in"] === null ? (now || Date.now()) : c["in"]);
+  return c.out < range.end && b > range.start;
+}
+// Depth-first project list for the picker, sorted the way the board is.
+function toolsProjectList(projects){
+  var out = [];
+  function walk(parentId, depth){
+    if(depth > 6) return;
+    (projects || []).filter(function(p){ return (p.parentId == null ? null : p.parentId) === parentId; })
+      .sort(function(a, b){ return (a.order || 0) - (b.order || 0); })
+      .forEach(function(p){ out.push({ p:p, depth:depth }); walk(p.id, depth + 1); });
+  }
+  walk(null, 0);
+  return out;
+}
+
+// ---- screen -----------------------------------------------------------------
+function ToolsScreen(ctx){
+  var api = ctx.api, store = ctx.storage, UIkit = api.ui;
+  var S = api.tokens();                       // live: read every render
+
+  var toolsS = useState(function(){ return store.get("tools", []); });
+  var tools = toolsS[0], setToolsState = toolsS[1];
+  var cosS = useState(function(){ return store.get("checkouts", []); });
+  var cos = cosS[0], setCosState = cosS[1];
+  var prefsS = useState(function(){ return store.get("prefs", {}); });
+  var prefs = prefsS[0], setPrefsState = prefsS[1];
+
+  var viewS = useState("out"); var view = viewS[0], setView = viewS[1];
+  var editorS = useState(null); var editor = editorS[0], setEditor = editorS[1];
+  var sheetS = useState(null); var sheet = sheetS[0], setSheet = sheetS[1];
+  var askS = useState(null); var ask = askS[0], setAsk = askS[1];
+  var nowS = useState(Date.now()); var now = nowS[0], setNow = nowS[1];
+
+  // Elapsed times tick while the screen is open, and only while it is open.
+  useEffect(function(){
+    var t = setInterval(function(){ setNow(Date.now()); }, 1000);
+    return function(){ clearInterval(t); };
+  }, []);
+
+  function putTools(next){ setToolsState(next); store.set("tools", next); }
+  function putCos(next){ setCosState(next); store.set("checkouts", next); }
+  function putPrefs(next){ setPrefsState(next); store.set("prefs", next); }
+
+  var openBy = toolsOpenMap(cos);
+  var outNow = toolsOpenList(cos);
+  var history = cos.filter(function(c){ return c["in"] !== null; })
+                   .sort(function(a, b){ return b["in"] - a["in"]; }).slice(0, 60);
+
+  // ---- actions ----
+  function checkOut(tool, holder, projectId, projectName, note){
+    api.haptic(12);
+    var at = Date.now();
+    var next = cos.map(function(c){
+      return (c["in"] === null && c.toolId === tool.id) ? Object.assign({}, c, { "in": at }) : c;
+    });
+    next.push({ id:api.data.uid(), toolId:tool.id, toolName:tool.name,
+                holder:holder, projectId:projectId, projectName:projectName,
+                note:note, out:at, "in":null });
+    putCos(next);
+    if(holder !== prefs.holder) putPrefs(Object.assign({}, prefs, { holder:holder }));
+    setSheet(null);
+    setView("out");
+  }
+  function checkIn(rec){
+    api.haptic(10);
+    var at = Date.now();
+    putCos(cos.map(function(c){ return c.id === rec.id ? Object.assign({}, c, { "in": at }) : c; }));
+  }
+  function saveTool(draft){
+    api.haptic(10);
+    var name = (draft.name || "").trim();
+    if(!name) return;
+    if(draft.id){
+      putTools(tools.map(function(t){ return t.id === draft.id ? Object.assign({}, t, {
+        name:name, tag:(draft.tag || "").trim(), category:(draft.category || "").trim(),
+        notes:draft.notes || "" }) : t; }));
+    } else {
+      putTools(tools.concat([{ id:api.data.uid(), name:name, tag:(draft.tag || "").trim(),
+        category:(draft.category || "").trim(), notes:draft.notes || "", createdAt:Date.now() }]));
+    }
+    setEditor(null);
+  }
+  // Removing a tool keeps its history - the records carry their own names -
+  // and closes anything still open, because nothing could check it back in.
+  function deleteTool(tool){
+    api.haptic([12, 40, 12]);
+    var at = Date.now();
+    putCos(cos.map(function(c){
+      return (c["in"] === null && c.toolId === tool.id) ? Object.assign({}, c, { "in": at }) : c;
+    }));
+    putTools(tools.filter(function(t){ return t.id !== tool.id; }));
+    setAsk(null); setEditor(null);
+  }
+
+  // ---- styles ----
+  var card = { background:S.bg1, border:"1px solid " + S.border, borderRadius:S.radius,
+               padding:"0.7rem 0.8rem", marginBottom:"0.55rem" };
+  var nameStyle = { flex:1, minWidth:0, color:S.text, fontWeight:700, fontSize:"0.93rem",
+                    overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" };
+  var subStyle = { fontSize:"0.74rem", color:S.textDim, marginTop:"0.15rem",
+                   overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" };
+  var headStyle = { fontSize:"0.7rem", textTransform:"uppercase", letterSpacing:"0.08em",
+                    color:S.textDim, fontWeight:700, fontFamily:S.fontBody, margin:"0.2rem 0 0.5rem" };
+  function chip(text, bg, fg){
+    return React.createElement("span", { style:{ background:bg, color:fg, borderRadius:S.radius3,
+      padding:"0.12rem 0.42rem", fontSize:"0.68rem", fontWeight:700, whiteSpace:"nowrap",
+      fontFamily:S.fontBody, flexShrink:0 } }, text);
+  }
+  function actionBtn(label, onClick, tone){
+    var fg = tone === "warn" ? S.warnText : S.actionText;
+    var bdr = tone === "warn" ? S.warnText : S.actionBdr;
+    return React.createElement("button", { onClick:onClick, "data-flat":true,
+      style:{ background:"none", border:"1.5px solid " + bdr, borderRadius:S.radius3,
+              padding:"0.42rem 0.7rem", color:fg, cursor:"pointer", fontWeight:700,
+              fontFamily:S.fontBody, fontSize:"0.78rem", whiteSpace:"nowrap", flexShrink:0 } },
+      label);
+  }
+  function jobChip(c){
+    if(!c.projectName) return chip("No job", S.bg3, S.textDim);
+    var proj = api.data.findProj(ctx.projects || [], c.projectId);
+    var meta = proj ? api.data.getMeta(ctx.laneMeta, proj.lane) : null;
+    return chip(c.projectName, meta ? meta.bg : S.bg3, meta ? meta.accent : S.textDim);
+  }
+
+  // ---- out view ----
+  var outBody = outNow.length === 0
+    ? React.createElement("div", { style:{ border:"2px dashed " + S.borderBright, borderRadius:S.radius,
+        padding:"1.1rem 0.9rem", textAlign:"center" } },
+        React.createElement("div", { style:{ color:S.text, fontWeight:700, fontSize:"0.92rem", marginBottom:"0.3rem" } },
+          "Everything is in the shop"),
+        React.createElement("div", { style:{ color:S.textDim, fontSize:"0.8rem", lineHeight:1.4 } },
+          tools.length ? "Check a tool out from the All tab." : "Add a tool on the All tab to get started."))
+    : React.createElement("div", null, outNow.map(function(c){
+        return React.createElement("div", { key:c.id, style:card },
+          React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.5rem" } },
+            React.createElement("span", { style:nameStyle }, c.toolName),
+            React.createElement(UIkit.Mono, { style:{ fontSize:"0.82rem", color:S.warnText, flexShrink:0 } },
+              api.fmt.dur(now - c.out, true))
+          ),
+          React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.4rem", marginTop:"0.4rem", flexWrap:"wrap" } },
+            jobChip(c),
+            c.holder ? chip(c.holder, S.bg3, S.textDim) : null
+          ),
+          c.note ? React.createElement("div", { style:subStyle }, c.note) : null,
+          React.createElement("div", { style:{ display:"flex", justifyContent:"space-between",
+              alignItems:"center", gap:"0.5rem", marginTop:"0.55rem" } },
+            React.createElement("span", { style:{ fontSize:"0.7rem", color:S.textMuted } },
+              "Out " + api.fmt.date(c.out) + " " + api.fmt.time(c.out)),
+            actionBtn("Check in", function(){ checkIn(c); })
+          )
+        );
+      }));
+
+  // ---- all view ----
+  var allBody = React.createElement("div", null,
+    React.createElement("button", { onClick:function(){ api.closeMenus(); api.haptic(8);
+        setEditor({ id:null, name:"", tag:"", category:"", notes:"" }); }, "data-flat":true,
+      style:{ width:"100%", background:S.bg1, border:"2px dashed " + S.actionBdr, borderRadius:S.radius,
+              padding:"0.7rem", color:S.actionText, cursor:"pointer", fontWeight:700,
+              fontFamily:S.fontBody, fontSize:"0.85rem", marginBottom:"0.7rem" } },
+      "+ Add tool"),
+    tools.length === 0
+      ? React.createElement("div", { style:{ color:S.textDim, fontSize:"0.82rem", textAlign:"center",
+          padding:"0.6rem 0", lineHeight:1.4 } },
+          "No tools yet. Everything you add here can be checked out against a job.")
+      : React.createElement("div", null, tools.slice().sort(function(a, b){
+          return a.name.localeCompare(b.name); }).map(function(t){
+          var openRec = openBy[t.id];
+          return React.createElement("div", { key:t.id, style:card },
+            React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.5rem" } },
+              React.createElement("span", { style:nameStyle }, t.name),
+              openRec ? chip("Out", S.warnBg, S.warnText) : chip("In", S.successBg, S.successText)
+            ),
+            (t.tag || t.category) && React.createElement("div", { style:subStyle },
+              [t.tag, t.category].filter(Boolean).join("  \u00B7  ")),
+            openRec && React.createElement("div", { style:{ display:"flex", alignItems:"center",
+                gap:"0.4rem", marginTop:"0.4rem", flexWrap:"wrap" } },
+              jobChip(openRec),
+              React.createElement(UIkit.Mono, { style:{ fontSize:"0.74rem", color:S.textDim } },
+                api.fmt.dur(now - openRec.out, true))
+            ),
+            React.createElement("div", { style:{ display:"flex", justifyContent:"space-between",
+                alignItems:"center", gap:"0.5rem", marginTop:"0.55rem" } },
+              React.createElement("button", { "data-flat":true,
+                onClick:function(){ api.haptic(8); setEditor(Object.assign({}, t)); },
+                style:{ background:"none", border:"none", padding:"0.2rem 0.1rem", color:S.textDim,
+                        cursor:"pointer", fontFamily:S.fontBody, fontWeight:600, fontSize:"0.75rem" } },
+                "Edit"),
+              openRec
+                ? actionBtn("Check in", function(){ checkIn(openRec); })
+                : actionBtn("Check out", function(){
+                    api.closeMenus(); api.haptic(8);
+                    setSheet({ tool:t, holder:prefs.holder || "",
+                               projectId: ctx.activeId == null ? null : ctx.activeId,
+                               note:"" });
+                  }, "warn")
+            )
+          );
+        }))
+  );
+
+  // ---- log view ----
+  var logBody = history.length === 0
+    ? React.createElement("div", { style:{ color:S.textDim, fontSize:"0.82rem", textAlign:"center",
+        padding:"0.8rem 0", lineHeight:1.4 } }, "No completed checkouts yet.")
+    : React.createElement("div", null, history.map(function(c){
+        return React.createElement("div", { key:c.id, style:card },
+          React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.5rem" } },
+            React.createElement("span", { style:nameStyle }, c.toolName),
+            React.createElement(UIkit.Mono, { style:{ fontSize:"0.8rem", color:S.textDim, flexShrink:0 } },
+              api.fmt.dur(c["in"] - c.out, true))
+          ),
+          React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.4rem",
+              marginTop:"0.35rem", flexWrap:"wrap" } },
+            jobChip(c),
+            c.holder ? chip(c.holder, S.bg3, S.textDim) : null
+          ),
+          React.createElement("div", { style:{ fontSize:"0.7rem", color:S.textMuted, marginTop:"0.35rem" } },
+            api.fmt.date(c.out) + " " + api.fmt.time(c.out) + " \u2192 " + api.fmt.time(c["in"]))
+        );
+      }));
+
+  var summary = React.createElement("div", { style:{ display:"flex", gap:"0.4rem",
+      marginBottom:"0.7rem", flexWrap:"wrap" } },
+    chip(outNow.length + (outNow.length === 1 ? " tool out" : " tools out"),
+         outNow.length ? S.warnBg : S.successBg, outNow.length ? S.warnText : S.successText),
+    chip(tools.length + (tools.length === 1 ? " tool" : " tools") + " tracked", S.bg3, S.textDim)
+  );
+
+  var main = React.createElement(UIkit.Modal, { title:"Tools", onClose:ctx.onClose, cancelLabel:"Close" },
+    summary,
+    React.createElement(UIkit.Toggle, { name:"Tool view", keys:["out", "all", "log"], value:view,
+      labelOf:function(k){ return k === "out" ? "Out" : k === "all" ? "All" : "History"; },
+      onChange:function(v){ setView(v); } }),
+    React.createElement("div", { style:{ marginTop:"0.9rem" } },
+      view === "out" ? outBody : view === "all" ? allBody : logBody)
+  );
+
+  // Sheets are siblings of the main modal, never children of it: nesting inside
+  // a backdrop-filter surface is what breaks the glass themes.
+  return React.createElement(React.Fragment, null,
+    main,
+    sheet && React.createElement(ToolsCheckoutSheet, { ctx:ctx, draft:sheet, projects:ctx.projects || [],
+      onChange:setSheet, onCancel:function(){ setSheet(null); },
+      onSave:function(d){
+        var proj = api.data.findProj(ctx.projects || [], d.projectId);
+        checkOut(d.tool, (d.holder || "").trim(), proj ? proj.id : null, proj ? proj.name : "",
+                 (d.note || "").trim());
+      } }),
+    editor && React.createElement(ToolsEditorSheet, { ctx:ctx, draft:editor, onChange:setEditor,
+      onCancel:function(){ setEditor(null); }, onSave:saveTool,
+      onDelete:editor.id ? function(){ setAsk(editor.id); } : null }),
+    ask && React.createElement(ToolsConfirmSheet, { ctx:ctx,
+      tool:tools.filter(function(t){ return t.id === ask; })[0] || null,
+      onCancel:function(){ setAsk(null); },
+      onConfirm:function(){
+        var t = tools.filter(function(x){ return x.id === ask; })[0];
+        if(t) deleteTool(t);
+      } })
+  );
+}
+
+// ---- checkout sheet ---------------------------------------------------------
+function ToolsCheckoutSheet(props){
+  var ctx = props.ctx, api = ctx.api, UIkit = api.ui, S = api.tokens();
+  var d = props.draft;
+  var list = toolsProjectList(props.projects);
+
+  function edit(field, value){
+    var next = Object.assign({}, d); next[field] = value; props.onChange(next);
+  }
+  var input = Object.assign({}, UIkit.inputStyle());
+  var label = Object.assign({}, UIkit.labelStyle());
+
+  function projRow(entry){
+    var p = entry.p;
+    var on = d.projectId === p.id;
+    var meta = api.data.getMeta(ctx.laneMeta, p.lane);
+    return React.createElement("button", { key:p.id, "data-flat":true,
+      onClick:function(){ api.haptic(8); edit("projectId", p.id); },
+      style:{ display:"block", width:"100%", textAlign:"left", background:on ? meta.bg : "none",
+              border:"none", borderBottom:"1px solid " + S.border,
+              padding:"0.6rem 0.7rem", paddingLeft:(0.7 + entry.depth * 0.8) + "rem",
+              color:on ? meta.accent : S.text, cursor:"pointer", fontFamily:S.fontBody,
+              fontWeight:on ? 700 : 600, fontSize:"0.86rem",
+              overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" } },
+      p.name);
+  }
+
+  return React.createElement(UIkit.Modal, {
+      title:"Check Out \u00B7 " + d.tool.name, onClose:props.onCancel,
+      onSave:function(){ props.onSave(d); }, saveLabel:"Check Out" },
+    React.createElement("div", { style:{ marginBottom:"0.8rem" } },
+      React.createElement("label", { style:label }, "Who has it"),
+      React.createElement("input", { type:"text", value:d.holder, placeholder:"Name",
+        onChange:function(e){ edit("holder", e.target.value); }, style:input })
+    ),
+    React.createElement("div", { style:{ marginBottom:"0.8rem" } },
+      React.createElement("label", { style:label }, "Against which job"),
+      React.createElement("div", { style:{ border:"2px solid " + S.border, borderRadius:S.radius3,
+          maxHeight:"190px", overflowY:"auto", background:S.bg2 } },
+        React.createElement("button", { "data-flat":true,
+          onClick:function(){ api.haptic(8); edit("projectId", null); },
+          style:{ display:"block", width:"100%", textAlign:"left",
+                  background:d.projectId == null ? S.bg3 : "none", border:"none",
+                  borderBottom:"1px solid " + S.border, padding:"0.6rem 0.7rem",
+                  color:d.projectId == null ? S.text : S.textDim, cursor:"pointer",
+                  fontFamily:S.fontBody, fontWeight:d.projectId == null ? 700 : 600,
+                  fontSize:"0.86rem" } },
+          "No job"),
+        list.map(projRow)
+      )
+    ),
+    React.createElement("div", { style:{ marginBottom:"0.4rem" } },
+      React.createElement("label", { style:label }, "Note"),
+      React.createElement("input", { type:"text", value:d.note, placeholder:"Optional",
+        onChange:function(e){ edit("note", e.target.value); }, style:input })
+    )
+  );
+}
+
+// ---- tool editor sheet ------------------------------------------------------
+function ToolsEditorSheet(props){
+  var ctx = props.ctx, api = ctx.api, UIkit = api.ui, S = api.tokens();
+  var d = props.draft;
+  function edit(field, value){
+    var next = Object.assign({}, d); next[field] = value; props.onChange(next);
+  }
+  var input = Object.assign({}, UIkit.inputStyle());
+  var label = Object.assign({}, UIkit.labelStyle());
+  var field = { marginBottom:"0.8rem" };
+
+  return React.createElement(UIkit.Modal, {
+      title:d.id ? "Edit Tool" : "Add Tool", onClose:props.onCancel,
+      onSave:function(){ props.onSave(d); }, saveLabel:"Save" },
+    React.createElement("div", { style:field },
+      React.createElement("label", { style:label }, "Name"),
+      React.createElement("input", { type:"text", value:d.name, placeholder:"Torque wrench",
+        onChange:function(e){ edit("name", e.target.value); }, style:input })
+    ),
+    React.createElement("div", { style:field },
+      React.createElement("label", { style:label }, "Asset tag"),
+      React.createElement("input", { type:"text", value:d.tag, placeholder:"Optional",
+        onChange:function(e){ edit("tag", e.target.value); }, style:input })
+    ),
+    React.createElement("div", { style:field },
+      React.createElement("label", { style:label }, "Category"),
+      React.createElement("input", { type:"text", value:d.category, placeholder:"Optional",
+        onChange:function(e){ edit("category", e.target.value); }, style:input })
+    ),
+    React.createElement("div", { style:field },
+      React.createElement("label", { style:label }, "Notes"),
+      React.createElement("input", { type:"text", value:d.notes, placeholder:"Optional",
+        onChange:function(e){ edit("notes", e.target.value); }, style:input })
+    ),
+    props.onDelete && React.createElement("button", { "data-flat":true, onClick:props.onDelete,
+      style:{ width:"100%", background:"none", border:"1px solid " + S.dangerTint,
+              borderRadius:S.radius3, padding:"0.55rem", color:S.dangerText, cursor:"pointer",
+              fontFamily:S.fontBody, fontWeight:600, fontSize:"0.8rem" } },
+      "Remove this tool")
+  );
+}
+
+// ---- delete confirmation ----------------------------------------------------
+function ToolsConfirmSheet(props){
+  var ctx = props.ctx, api = ctx.api, UIkit = api.ui, S = api.tokens();
+  var name = props.tool ? props.tool.name : "this tool";
+  return React.createElement(UIkit.Modal, { title:"Remove Tool", onClose:props.onCancel, ownActions:true },
+    React.createElement("p", { style:{ color:S.textDim, fontSize:"0.85rem", lineHeight:1.4,
+        marginBottom:"1rem" } },
+      "Remove " + name + " from the list? Its checkout history stays in the log, and anything "
+      + "still out is checked back in now."),
+    React.createElement("div", { style:{ display:"flex", gap:"0.5rem" } },
+      React.createElement("button", { onClick:props.onConfirm,
+        style:{ flex:1, background:S.dangerBg, border:"1px solid " + S.dangerBright,
+                borderRadius:S.radius, padding:"0.85rem", color:S.dangerText, cursor:"pointer",
+                fontWeight:700, fontFamily:S.fontBody } }, "Remove"),
+      React.createElement("button", { onClick:props.onCancel, style:UIkit.cancelStyle() }, "Keep")
+    )
+  );
+}
+
+// ---- reports ----------------------------------------------------------------
+// Measured against the window the user is already looking at, so the numbers
+// line up with the core rollup beside them instead of telling a second story.
+function toolsReportStats(ctx){
+  var store = ctx.storage || TT.storage(TOOLS_ID);
+  var cos = store.get("checkouts", []);
+  if(!Array.isArray(cos)) cos = [];
+  var range = ctx.range, now = ctx.now || Date.now();
+  var window_ = cos.filter(function(c){ return toolsInWindow(c, range, now); });
+  var ms = window_.reduce(function(a, c){ return a + toolsSpan(c, range, now); }, 0);
+  var still = cos.filter(function(c){ return c["in"] === null; });
+  var byTool = {};
+  window_.forEach(function(c){
+    var k = c.toolName || "Tool";
+    byTool[k] = (byTool[k] || 0) + toolsSpan(c, range, now);
+  });
+  var top = Object.keys(byTool).map(function(k){ return { name:k, ms:byTool[k] }; })
+    .sort(function(a, b){ return b.ms - a.ms; }).slice(0, 5);
+  return { count:window_.length, ms:ms, still:still, top:top };
+}
+function toolsReportText(ctx){
+  var st = toolsReportStats(ctx);
+  if(!st.count && !st.still.length) return [];
+  var out = ["Tool checkouts: " + st.count];
+  if(st.ms > 0) out.push("Tool time out: " + fmtDur(st.ms, true));
+  if(st.still.length) out.push("Still out: " + st.still.length + " ("
+    + st.still.slice(0, 4).map(function(c){ return c.toolName; }).join(", ")
+    + (st.still.length > 4 ? ", ..." : "") + ")");
+  return out;
+}
+function toolsReportSection(ctx){
+  var st = toolsReportStats(ctx);
+  if(!st.count && !st.still.length) return null;
+  var S = TT.tokens();
+  return React.createElement("div", { style:{ background:S.bg1, border:"1px solid " + S.border,
+      borderRadius:S.radius, padding:"0.75rem 0.85rem" } },
+    React.createElement("div", { style:{ fontSize:"0.7rem", textTransform:"uppercase",
+      letterSpacing:"0.08em", color:S.textDim, fontWeight:700, marginBottom:"0.5rem" } }, "Tools"),
+    React.createElement("div", { style:{ display:"flex", justifyContent:"space-between",
+        alignItems:"baseline", gap:"0.5rem" } },
+      React.createElement("span", { style:{ color:S.text, fontSize:"0.85rem", fontWeight:600 } },
+        st.count + (st.count === 1 ? " checkout" : " checkouts")),
+      React.createElement(Mono, { style:{ fontSize:"0.82rem", color:S.textDim } },
+        fmtDur(st.ms, true))
+    ),
+    st.still.length > 0 && React.createElement("div", { style:{ color:S.warnText,
+      fontSize:"0.78rem", marginTop:"0.35rem", fontWeight:600 } },
+      st.still.length + " still out"),
+    st.top.map(function(row){
+      return React.createElement("div", { key:row.name, style:{ display:"flex",
+          justifyContent:"space-between", gap:"0.5rem", marginTop:"0.3rem" } },
+        React.createElement("span", { style:{ flex:1, minWidth:0, color:S.textDim, fontSize:"0.78rem",
+          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" } }, row.name),
+        React.createElement(Mono, { style:{ fontSize:"0.76rem", color:S.textMuted, flexShrink:0 } },
+          fmtDur(row.ms, true))
+      );
+    })
+  );
+}
+
+TT.define({
+  id: TOOLS_ID,
+  title: "Tool Tracker",
+  version: 1,
+  summary: "Check tools out against a job, see what is still on the floor, and keep the history.",
+  nav: { label: "Tools", screen: "main" },
+  screens: { main: ToolsScreen },
+  storage: { keys: ["tools", "checkouts", "prefs", "schema"], normalize: toolsNormalize },
+  reports: { section: toolsReportSection, text: toolsReportText }
+});
+// ==== TT MODULE tools END ====
 
 // ---- MAIN APP ---------------------------------------------------------------
 function App(){
@@ -21393,6 +22881,10 @@ function App(){
   var tBreaksS=useState(function(){ return load("tt_test_breaks",[]); }); var setTestBreaks=tBreaksS[1]; var testBreaks=tBreaksS[0];
 
   var projects=testMode?testProjects:realProjects;
+  // The board, the pickers and everything that offers a project to start work
+  // against see only what is open. Reports, logs and the Archive keep the lot,
+  // which is what makes closing out non-destructive.
+  var liveProjects=openProjects(projects);
   var setProjects=testMode?setTestProjects:setRealProjects;
   var logs=testMode?testLogs:realLogs;
   var setLogs=testMode?setTestLogs:setRealLogs;
@@ -21412,9 +22904,11 @@ function App(){
   // correct time rather than losing the interval.
   var bootS=useState(function(){
     var s=load("tt_session",{});
-    // A session from an earlier day is stale: a timer left running overnight
-    // should not come back showing a 14-hour count.
-    if(s.savedAt && new Date(s.savedAt).toDateString()!==todayStr()) return {};
+    // A session is stale when it has been sitting for longer than any shift
+    // could run, not when the calendar date changed. The old rule threw away a
+    // live night shift at 00:00; this one keeps it and still refuses to resume
+    // a timer somebody left running since last week.
+    if(s.savedAt && Date.now()-s.savedAt > 20*3600000) return {};
     // Drop a restored project timer whose project is gone - deleted since, or
     // belonging to the other data set if Test Mode was toggled in between.
     if(s.activeId==null || !s.activeStart || !projects.some(function(p){ return p.id===s.activeId; })){
@@ -21424,6 +22918,28 @@ function App(){
   });
   var boot=bootS[0];
   var bootNow=Date.now();
+  // The work day this session is filed under. Set once when the clock starts -
+  // by the schedule if the answer is obvious, by the person if it is not - and
+  // inherited by every record made until the next clock-in. A ref shadows the
+  // state so a record created in the same tick as the answer still gets it.
+  var workDayS=useState(function(){ return (typeof boot.workDay==="string" && boot.workDay) ? boot.workDay : null; });
+  var setWorkDayState=workDayS[1]; var workDay=workDayS[0];
+  var workDayRef=useRef(workDay);
+  // Whether this session was declared overtime at the clock. Only set for a day
+  // that is not on the roster; null everywhere else, which leaves the otDays
+  // setting in charge exactly as before.
+  var workDayOtS=useState(function(){ return typeof boot.workDayOt==="boolean" ? boot.workDayOt : null; });
+  var setWorkDayOtState=workDayOtS[1]; var workDayOt=workDayOtS[0];
+  var workDayOtRef=useRef(workDayOt);
+  function setWorkDay(v, ot){
+    workDayRef.current=v||null; setWorkDayState(v||null);
+    var o = typeof ot==="boolean" ? ot : null;
+    workDayOtRef.current=o; setWorkDayOtState(o);
+  }
+  function curOt(){ return workDayOtRef.current; }
+  // What every day-scoped surface means by "today": the shift being worked if
+  // there is one, otherwise the calendar day.
+  function curDay(){ return workDayRef.current || todayStr(); }
   function since(t){ return t ? bootNow-t : 0; }
 
   // Timer state
@@ -21449,11 +22965,11 @@ function App(){
 
   // UI state
   var menuOpenS=useState(false); var setMenuOpen=menuOpenS[1]; var menuOpen=menuOpenS[0];
-  var addMenuOpenS=useState(false); var setAddMenuOpen=addMenuOpenS[1]; var addMenuOpen=addMenuOpenS[0];
   var showAddS=useState(null); var setShowAdd=showAddS[1]; var showAdd=showAddS[0];
   var editProjS=useState(null); var setEditProj=editProjS[1]; var editProj=editProjS[0];
   var stagesProjS=useState(null); var setStagesProj=stagesProjS[1]; var stagesProj=stagesProjS[0];
   var showDisruptS=useState(false); var setShowDisrupt=showDisruptS[1]; var showDisrupt=showDisruptS[0];
+  var dayAskS=useState(null); var setDayAsk=dayAskS[1]; var dayAsk=dayAskS[0];
   var disruptTargetS=useState(null); var setDisruptTarget=disruptTargetS[1]; var disruptTarget=disruptTargetS[0];
   var showBreakS=useState(false); var setShowBreak=showBreakS[1]; var showBreak=showBreakS[0];
   var showDayS=useState(false); var setShowDay=showDayS[1]; var showDay=showDayS[0];
@@ -21469,6 +22985,10 @@ function App(){
   var showNewLaneS=useState(false); var setShowNewLane=showNewLaneS[1]; var showNewLane=showNewLaneS[0];
   var showEditLanesS=useState(false); var setShowEditLanes=showEditLanesS[1]; var showEditLanes=showEditLanesS[0];
   var confirmDeleteS=useState(null); var setConfirmDelete=confirmDeleteS[1]; var confirmDelete=confirmDeleteS[0];
+  var closeOutS=useState(null); var setCloseOut=closeOutS[1]; var closeOut=closeOutS[0];
+  var matchAskS=useState(null); var setMatchAsk=matchAskS[1]; var matchAsk=matchAskS[0];
+  var addNewS=useState(null); var setAddNew=addNewS[1]; var addNew=addNewS[0];
+  var showArchiveS=useState(false); var setShowArchive=showArchiveS[1]; var showArchive=showArchiveS[0];
   var settingsS=useState(function(){
     var st = load("tt_settings",{ layout:"comfortable", tracking:"timer", colorScheme:"bright-pastels", theme:"neon-dream", schemes:{}, fonts:{}, mode:"dark", handedness:"right", headerPos:"top" });
     // Settings saved before the schedule existed get the default merged in, so
@@ -21495,7 +23015,6 @@ function App(){
   var showEditPresetsS=useState(false); var setShowEditPresets=showEditPresetsS[1]; var showEditPresets=showEditPresetsS[0];
   var distMenuRef=useRef(null);
   var showTestConfirmS=useState(false); var setShowTestConfirm=showTestConfirmS[1]; var showTestConfirm=showTestConfirmS[0];
-  var addMenuRef=useRef(null);
   var menuRef=useRef(null);
   var interval=useRef(null);
 
@@ -21518,8 +23037,8 @@ function App(){
   useEffect(function(){
     save("tt_session",{ savedAt:Date.now(), activeId:activeId, activeStart:activeStart,
       atWorkStart:atWorkStart, breakStart:breakStart, breakLabel:breakLabel,
-      interrupting:interrupting, intStart:intStart });
-  },[activeId,activeStart,atWorkStart,breakStart,breakLabel,interrupting,intStart]);
+      interrupting:interrupting, intStart:intStart, workDay:workDay, workDayOt:workDayOt });
+  },[activeId,activeStart,atWorkStart,breakStart,breakLabel,interrupting,intStart,workDay,workDayOt]);
 
   // Timer tick
   useEffect(function(){
@@ -21534,13 +23053,6 @@ function App(){
     return function(){ clearInterval(interval.current); };
   },[activeStart,atWorkStart,breakStart,intStart]);
 
-  // Close add menu on outside click
-  useEffect(function(){
-    if(!addMenuOpen) return;
-    function h(e){ if(addMenuRef.current&&!addMenuRef.current.contains(e.target)) setAddMenuOpen(false); }
-    document.addEventListener("mousedown",h); document.addEventListener("touchstart",h);
-    return function(){ document.removeEventListener("mousedown",h); document.removeEventListener("touchstart",h); };
-  },[addMenuOpen]);
   // Track scrolling globally and swallow clicks while scrolling
   useEffect(function(){
     function blockClick(e){ if(SCROLL_STATE.scrolling){ e.stopPropagation(); e.preventDefault(); } }
@@ -21569,10 +23081,12 @@ function App(){
   },[menuOpen]);
 
   // Derived
-  var todayStr2=todayStr();
-  var todayLogs=logs.filter(function(l){ return new Date(l.startTime).toDateString()===todayStr2; });
-  var todayDist=disruptions.filter(function(d){ return d.endTime&&new Date(d.startTime).toDateString()===todayStr2; });
-  var todayBreaks=breaks.filter(function(b){ return new Date(b.startTime).toDateString()===todayStr2; });
+  // The active work day, not the calendar day: on a night shift these differ
+  // after midnight, and the board has to keep showing the shift you are on.
+  var todayStr2=workDay||todayStr();
+  var todayLogs=logs.filter(function(l){ return recordDay(l)===todayStr2; });
+  var todayDist=disruptions.filter(function(d){ return d.endTime&&recordDay(d)===todayStr2; });
+  var todayBreaks=breaks.filter(function(b){ return recordDay(b)===todayStr2; });
   var openDist=disruptions.find(function(d){ return !d.endTime; });
   var activeProj=projects.find(function(p){ return p.id===activeId; });
   var todayDistMs=todayDist.reduce(function(a,d){ return a+d.duration; },0);
@@ -21631,7 +23145,7 @@ function App(){
     setShowBreak(false); setShowDay(false); setShowNewLane(false); setShowEditLanes(false);
     setShowReports(false); setShowBackup(false); setShowExtensions(false); setModScreen(null);
     setConfirmDelete(null); setShowTestConfirm(false);
-    setMenuOpen(false); setAddMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowSettings(false); setShowSchedule(false); setShowTracking(false); setTimeMenuOpen(false);
+    setMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowSettings(false); setShowSchedule(false); setShowTracking(false); setTimeMenuOpen(false);
     try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){}
   }
   // ---- Module nav ----
@@ -21648,17 +23162,52 @@ function App(){
   function openModule(entry){ closeAllPopups(); setModScreen({ id:entry.id, screen:entry.screen }); }
 
   useEffect(function(){
-    function closeHeaderMenus(){ setMenuOpen(false); setAddMenuOpen(false); setDistMenuOpen(false); setTimeMenuOpen(false); }
+    function closeHeaderMenus(){ setMenuOpen(false); setDistMenuOpen(false); setTimeMenuOpen(false); }
     window.addEventListener("ttCloseMenus",closeHeaderMenus);
     return function(){ window.removeEventListener("ttCloseMenus",closeHeaderMenus); };
   },[]);
 
   // Actions
+  // Starting the clock is the one moment the work day is decided. Inside the
+  // scheduled window it is obvious and nothing is asked; outside it the prompt
+  // opens and clockIn does nothing at all until an answer comes back, so a
+  // half-started session can never exist.
   function clockIn(){
-    haptic(20);
     var now=Date.now();
+    var auto=autoWorkDay(settings.workSchedule, now, normalizeGrace(settings.shiftGrace));
+    if(auto===null){ askWorkDay(now, function(day, ot){ commitClockIn(now, day, ot); }); return false; }
+    commitClockIn(now, auto, null);
+    return true;
+  }
+  function commitClockIn(now, day, ot){
+    haptic(20);
+    setWorkDay(day, ot);
     setAtWorkStart(now); setAtWorkElapsed(0);
-    setLogs(function(prev){ return prev.concat([{id:uid(),projectId:null,projectName:"At Work",lane:null,type:"atwork",startTime:now,endTime:null,duration:0,parentId:null,parentName:null}]); });
+    setLogs(function(prev){ return prev.concat([{id:uid(),day:day,projectId:null,projectName:"At Work",lane:null,type:"atwork",startTime:now,endTime:null,duration:0,parentId:null,parentName:null}]); });
+  }
+  // Opens the prompt and hands the chosen day to `then`. Kept separate from
+  // clockIn so the same question can be re-asked to correct a mis-tap.
+  function askWorkDay(now, then, opts){
+    var ctx=shiftContext(settings.workSchedule, now, normalizeGrace(settings.shiftGrace));
+    var choices=shiftChoices(ctx);
+    // Picking a day that is not on the roster raises a second question, because
+    // there is no schedule to say whether it is regular time or overtime.
+    function resolve(c){
+      if(!c.unscheduled){ then(c.day, null); return; }
+      closeAllPopups();
+      setDayAsk({ when:now, stage:"ot", choices:OT_CHOICES, title:"Regular or Overtime?",
+                  then:function(_,ot){ then(c.day, ot); } });
+    }
+    if(choices.length<2){
+      // Only one answer is reachable - a schedule with a single working day, or
+      // none at all. Nothing to choose between, but an unscheduled day still
+      // has to be classified.
+      resolve(choices.length ? choices[0] : { day:workDayOf(now), unscheduled:false });
+      return;
+    }
+    closeAllPopups();
+    setDayAsk({ when:now, stage:"day", position:ctx.position, choices:choices, then:then,
+                resolve:resolve, title:(opts&&opts.title)||"Which Shift?" });
   }
   function finalizeProject(now){
     if(!activeId||!activeStart) return;
@@ -21666,12 +23215,14 @@ function App(){
     if(!proj) return;
     var dur=now-activeStart;
     var parent=proj.parentId?projects.find(function(p){ return p.id===proj.parentId; }):null;
-    setLogs(function(prev){ return prev.concat([{id:uid(),projectId:proj.id,projectName:proj.name,lane:proj.lane,type:"project",startTime:activeStart,endTime:now,duration:dur,parentId:proj.parentId||null,parentName:parent?parent.name:null}]); });
+    setLogs(function(prev){ return prev.concat([{id:uid(),day:curDay(),ot:curOt(),projectId:proj.id,projectName:proj.name,lane:proj.lane,type:"project",startTime:activeStart,endTime:now,duration:dur,parentId:proj.parentId||null,parentName:parent?parent.name:null}]); });
     setActiveId(null); setActiveStart(null); setElapsed(0);
   }
   function toggleProject(id){
     haptic(12);
-    if(!atWorkStart) clockIn();
+    // If clocking in opened the prompt, stop here: the project would otherwise
+    // start against a work day nobody has chosen yet.
+    if(!atWorkStart && !clockIn()) return;
     var now=Date.now();
     if(activeId===id){
       if(interrupting){ resumeProject(); return; }
@@ -21701,7 +23252,7 @@ function App(){
     haptic([15,40,15]);
     var now=Date.now();
     setShowDisrupt(false);
-    setDisruptions(function(prev){ return prev.concat([{id:uid(),projectId:tgt?tgt.id:null,projectName:tgt?tgt.name:null,lane:tgt?tgt.lane:null,note:note,startTime:now,endTime:null,duration:0}]); });
+    setDisruptions(function(prev){ return prev.concat([{id:uid(),day:curDay(),projectId:tgt?tgt.id:null,projectName:tgt?tgt.name:null,lane:tgt?tgt.lane:null,note:note,startTime:now,endTime:null,duration:0}]); });
     if(tgt){ setInterrupting(true); setIntStart(now); setIntElapsed(0); }
   }
   function startDisruption(note){ startDisruptionWith(note, disruptTarget); }
@@ -21719,7 +23270,7 @@ function App(){
     var now=Date.now();
     setShowBreak(false);
     if(activeId) finalizeProject(now);
-    setBreaks(function(prev){ return prev.concat([{id:uid(),label:label,startTime:now,endTime:null,duration:0}]); });
+    setBreaks(function(prev){ return prev.concat([{id:uid(),day:curDay(),label:label,startTime:now,endTime:null,duration:0}]); });
     setOnBreak(true); setBreakStart(now); setBreakElapsed(0); setBreakLabel(label);
   }
   function endBreak(){
@@ -21735,8 +23286,27 @@ function App(){
     setShowAdd(null);
   }
   function saveEdit(data){
-    setProjects(function(prev){ return prev.map(function(p){ return p.id===editProj.id?Object.assign({},p,data):p; }); });
+    var target=editProj;
+    var next=projects.map(function(p){ return p.id===target.id?Object.assign({},p,data):p; });
+    setProjects(next);
     setEditProj(null);
+    // Changing a project's type leaves its tasks behind. They are independently
+    // settable, so this is a question rather than a cascade.
+    if(projKind(data)!==projKind(target)){
+      var stale=mismatchedTasks(next, findProj(next, target.id));
+      if(stale.length) setMatchAsk({ proj:findProj(next, target.id), tasks:stale });
+    }
+  }
+  function doMatchTasks(proj, tasks){
+    // An empty selection is a valid answer: leave every task as it is.
+    if(!tasks || !tasks.length){ setMatchAsk(null); return; }
+    var ids={}; tasks.forEach(function(t){ ids[t.id]=1; });
+    var want=projKind(proj);
+    setProjects(function(prev){ return prev.map(function(p){
+      return ids[p.id] ? Object.assign({},p,{ kind:want }) : p;
+    }); });
+    haptic(10);
+    setMatchAsk(null);
   }
   function deleteProject(){
     var target=editProj;
@@ -21748,6 +23318,37 @@ function App(){
     if(activeId!==null&&ids.indexOf(activeId)>=0){ var now=Date.now(); finalizeProject(now); }
     setProjects(function(prev){ return prev.filter(function(p){ return ids.indexOf(p.id)<0; }); });
     setConfirmDelete(null);
+  }
+  // ---- close out and reopen ----
+  // Closing stops the clock if the project being closed is the one running,
+  // then stamps it. Nothing is removed and no log is rewritten.
+  function askCloseOut(proj){
+    closeAllPopups();
+    setCloseOut({ proj:proj, blockers:closeBlockers(projects, proj) });
+  }
+  function doCloseOut(proj, note){
+    var ids=getDescendantIds(projects,proj.id).concat([proj.id]);
+    if(activeId!==null&&ids.indexOf(activeId)>=0){ finalizeProject(Date.now()); }
+    var at=Date.now();
+    setProjects(function(prev){ return prev.map(function(p){
+      return p.id===proj.id ? Object.assign({},p,{ closedAt:at, closedNote:note||"" }) : p;
+    }); });
+    haptic(14);
+    setCloseOut(null);
+  }
+  // Reopening a task whose parent is closed would put it on a board its parent
+  // has left, so the parent comes back with it.
+  function doReopen(proj){
+    var ids={}; ids[proj.id]=1;
+    var cur=proj;
+    for(var i=0;i<8 && cur && cur.parentId!=null;i++){
+      cur=findProj(projects, cur.parentId);
+      if(cur && isClosed(cur)) ids[cur.id]=1; else break;
+    }
+    setProjects(function(prev){ return prev.map(function(p){
+      return ids[p.id] ? Object.assign({},p,{ closedAt:null, closedNote:"" }) : p;
+    }); });
+    haptic(10);
   }
   function doMoveTasks(proj, targetParentId){
     if(activeId===proj.id){ var now=Date.now(); finalizeProject(now); }
@@ -21764,14 +23365,24 @@ function App(){
   }
   // Quick toggle from the stage dropdown: flip one stage, keep the menu open.
   function toggleStageInline(projId, stageId){
+    var next=null;
     setProjects(function(prev){ return prev.map(function(p){
       if(p.id!==projId) return p;
-      return Object.assign({},p,{stages:(p.stages||[]).map(function(st){
+      var updated=Object.assign({},p,{stages:(p.stages||[]).map(function(st){
         if(st.id!==stageId) return st;
         return st.done ? Object.assign({},st,{done:false,doneAt:null,note:""})
                        : Object.assign({},st,{done:true,doneAt:Date.now()});
       })});
+      next=updated;
+      return updated;
     }); });
+    // Ticking the last stage of a finite project is the moment to offer to
+    // close it. An offer, not an action: the modal still has to be confirmed,
+    // and unticking a stage never asks anything. Ongoing projects never ask,
+    // however many stages they have - that is what makes them ongoing.
+    if(next && readyToClose(next) && closeBlockers(projects, next).length===0){
+      setCloseOut({ proj:next, blockers:[] });
+    }
   }
   function addLane(label, col){
     var key="custom_"+uid();
@@ -21864,10 +23475,18 @@ function App(){
   // ---- Screen ticker: date/time + live status ----
   var tickerStatus = null;
   if(interrupting && activeProj){
+    // No flashing labels. The disrupted project's own name breathes red on the
+    // same slow cycle a running project's border uses, so the cue reads as the
+    // counterpart of the green one rather than as an alarm.
     tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem",minWidth:0} },
-      React.createElement("span", { style:{color:S.dangerBright,fontWeight:800,fontSize:"0.74rem",letterSpacing:"0.06em",animation:"ttBlink 1s linear infinite",whiteSpace:"nowrap"} }, "DISRUPTED"),
-      React.createElement("span", { style:{color:S.dangerText,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, activeProj.name),
-      React.createElement("span", { style:{color:S.dangerBright,fontWeight:800,fontSize:"0.74rem",letterSpacing:"0.06em",animation:"ttBlink 1s linear infinite",whiteSpace:"nowrap"} }, "DISRUPTED")
+      React.createElement("span", { "data-glow":"1",
+        style:Object.assign(glowVars(S.dangerText),
+          {fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}) },
+        activeProj.name),
+      React.createElement(Mono, { "data-glow":"1",
+        style:Object.assign(glowVars(S.dangerText),
+          {fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap",flexShrink:0}) },
+        fmtDur(intElapsed,true))
     );
   } else if(activeProj){
     tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem",minWidth:0} },
@@ -21880,32 +23499,37 @@ function App(){
       React.createElement(Mono, { style:{color:S.warnText,fontWeight:500,fontSize:"0.8rem",whiteSpace:"nowrap"} }, fmtDur(breakElapsed,true))
     );
   } else if(clocked){
+    // Clocked in with nothing running. The day clock keeps its green because
+    // the day really is running; the label says what is not.
     tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem"} },
-      React.createElement("span", { style:{color:S.successText,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, "Day Started"),
+      React.createElement("span", { style:{color:S.textDim,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, "No Activity"),
       React.createElement(Mono, { style:{color:S.successDim,fontWeight:500,fontSize:"0.8rem",whiteSpace:"nowrap"} }, fmtDur(atWorkElapsed,true))
+    );
+  } else {
+    tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem"} },
+      React.createElement("span", { style:{color:S.textMuted,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, "No Activity")
     );
   }
   var tickerDate = React.createElement("span", { style:{color:S.titleText,fontWeight:700,fontSize:"0.88rem",fontFamily:S.fontBody,whiteSpace:"nowrap"} },
     new Date(nowTick).toLocaleDateString([],{weekday:"short",month:"short",day:"numeric"})
   );
   var tickerTime = React.createElement(Mono, { style:{color:S.text,fontSize:"0.88rem",fontWeight:700,whiteSpace:"nowrap"} }, fmtTime(nowTick));
-  function tickerUnit(k){
-    return React.createElement("span", { key:"tk"+k, style:{display:"inline-flex",alignItems:"center",gap:"0.75rem",paddingRight:"3.5rem",whiteSpace:"nowrap",minWidth:"100vw"} },
-      tickerDate, tickerTime, tickerStatus
-    );
-  }
-  var tickerEl = React.createElement("div", { dir:"ltr", style:{display:"flex",alignItems:"center",padding:"0.25rem 0.85rem",minHeight:"28px",background:S.bg2,borderBottom:hdrBottom?"none":"1px solid "+S.border,boxShadow:hdrBottom?"inset 0 1px 0 "+S.border:"none",overflow:"hidden",whiteSpace:"nowrap"} },
-    React.createElement("div", { style:{display:"inline-flex",alignItems:"center",whiteSpace:"nowrap",animation:"ttScroll 14s linear infinite",willChange:"transform"} },
-      [0,1,2,3,4,5].map(function(k){ return tickerUnit(k); })
-    )
+  // Static, not scrolling. The date and time are fixed on the left where the
+  // eye can find them without waiting for them to come round again; the status
+  // takes the rest of the bar and truncates rather than moving.
+  var tickerEl = React.createElement("div", { dir:"ltr", style:{display:"flex",alignItems:"center",gap:"0.75rem",padding:"0.25rem 0.85rem",minHeight:"28px",background:S.bg2,borderBottom:hdrBottom?"none":"1px solid "+S.border,boxShadow:hdrBottom?"inset 0 1px 0 "+S.border:"none",overflow:"hidden",whiteSpace:"nowrap"} },
+    tickerDate, tickerTime,
+    tickerStatus && React.createElement("span", { style:{display:"flex",alignItems:"center",flex:1,minWidth:0,overflow:"hidden"} }, tickerStatus)
   );
 
   return (
     React.createElement("div", { dir:isLeft?"rtl":"ltr", style:{minHeight:"100vh",background:S.bg0,color:S.text,fontFamily:S.fontBody,paddingBottom:rootPadBottom,paddingLeft:FW,paddingRight:FW} },
       React.createElement("style", null,
         "@import url('"+S.fontImport+"'); "+
-        "@keyframes ttBlink { 0%,55% { opacity:1; } 56%,100% { opacity:0.12; } } "+
-        "@keyframes ttScroll { 0% { transform:translateX(0); } 100% { transform:translateX(-16.6667%); } } "+
+        // A disrupted project breathes rather than blinks: same 2.4s cycle as
+        // the running-project border, so the two cues feel like one language.
+        "@keyframes ttGlow { 0%,100% { text-shadow:0 0 6px var(--glow-s1); } 50% { text-shadow:0 0 22px var(--glow-s2), 0 0 10px var(--glow-s2), 0 0 3px var(--glow-s2); } } "+
+        "[data-glow='1']{ animation: ttGlow 2.4s ease-in-out infinite; } "+
         // Running projects breathe: border color and glow ease between the
         // lane accent and a brightened peak. Driven by CSS vars so one rule
         // serves every lane color.
@@ -21914,6 +23538,10 @@ function App(){
         // iOS renders a time input's value inside shadow parts with their own
         // UA background and color. Make every part transparent and force it to
         // carry the input's color; -webkit-text-fill-color outranks UA color.
+        // The zoom guard. Inline styles beat ordinary CSS, so this has to
+        // outrank them: one field left under 16px is enough to zoom the app
+        // and strand it there.
+        "input,select,textarea{ font-size:16px !important; } "+
         "input[type='time'],input[type='date']{ -webkit-appearance:none; appearance:none; } "+
         "input[type='time']::-webkit-date-and-time-value,input[type='date']::-webkit-date-and-time-value{ text-align:center; min-height:1.15em; margin:0; background:transparent; color:inherit; -webkit-text-fill-color:currentColor; } "+
         "input[type='time']::-webkit-datetime-edit,input[type='date']::-webkit-datetime-edit,"+
@@ -21948,42 +23576,30 @@ function App(){
         React.createElement("div", { style:{display:"flex",alignItems:"stretch",background:S.bg1,borderBottom:"2px solid "+S.border,padding:"0.5rem 0.75rem",gap:"0.5rem"} },
           // SETTINGS MENU button (gear) + stacked dropdown
           React.createElement("div", { ref:menuRef, style:{position:"relative",flex:"0 0 64px"} },
-            React.createElement("button", { onClick:function(){ if(!menuOpen){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setMenuOpen(function(x){ return !x; }); setAddMenuOpen(false); },
+            React.createElement("button", { onClick:function(){ if(!menuOpen){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setMenuOpen(function(x){ return !x; }); },
               style:{width:"100%",minHeight:"56px",display:"flex",alignItems:"center",justifyContent:"center",background:menuOpen?S.bg3:S.bg0,border:"2.5px solid "+(menuOpen?S.chromeBdrOn:S.chromeBdr),borderRadius:S.radius2,cursor:"pointer"} },
               React.createElement(GearSVG, { size:30, col:mnIcon })
             ),
             menuOpen && React.createElement("div", { dir:"ltr", "data-surface":"menu", "data-menu-open":"1", style:{position:"absolute",top:ddTop,bottom:ddBottom,left:isLeft?"auto":0,right:isLeft?0:"auto",minWidth:"290px",maxWidth:"94vw",maxHeight:"72vh",overflowY:"auto",background:S.menuBg,border:"1px solid "+S.border,borderRadius:S.radius2,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:200} },
-              // Add New Item (accordion)
-              React.createElement("button", { "data-flat":true, onClick:function(){ if(!addMenuOpen){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setAddMenuOpen(function(x){ return !x; }); },
-                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:addMenuOpen?S.successBg2:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.successMid,cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+              // Add New: one entry point that asks what, then where. This used
+              // to be a nested accordion that only ever offered lanes, so there
+              // was no way to add a task from here at all.
+              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setAddNew({stage:"what"}); },
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.successMid,cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:"0.95rem",whiteSpace:"nowrap"} },
                 React.createElement("svg", { width:14, height:14, viewBox:"0 0 14 14", fill:"none" },
                   React.createElement("path", { d:"M7 2 L7 12 M2 7 L12 7", stroke:S.successMid, strokeWidth:"2.5", strokeLinecap:"round" })
                 ),
-                React.createElement("span", { style:{flex:1} }, "Add New Item"),
-                React.createElement("span", { style:{fontSize:"0.8rem",color:S.successDim} }, addMenuOpen?"v":">")
+                React.createElement("span", { style:{flex:1} }, "Add New\u2026")
               ),
-              addMenuOpen && React.createElement("div", { style:{background:rgba(S.bg0,0.5),borderBottom:"1px solid "+S.border} },
-                laneOrder.map(function(laneKey){
-                  var m=getMeta(laneMeta,laneKey);
-                  return React.createElement("button", { "data-flat":true, key:laneKey, onClick:function(){ closeAllPopups(); setShowAdd({lane:laneKey,parentId:null}); },
-                    style:{display:"flex",alignItems:"center",gap:"0.65rem",width:"100%",background:"none",border:"none",padding:"0.7rem 1rem 0.7rem 2rem",cursor:"pointer",fontFamily:S.fontBody,textAlign:"left"} },
-                    React.createElement("div", { style:{width:"10px",height:"10px",borderRadius:"50%",background:m.accent,flexShrink:0} }),
-                    React.createElement("span", { style:{fontSize:"0.92rem",fontWeight:600,color:S.text,whiteSpace:"nowrap"} }, m.label)
-                  );
-                }),
-                React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowNewLane(true); },
-                  style:{display:"flex",alignItems:"center",gap:"0.65rem",width:"100%",background:"none",border:"none",padding:"0.7rem 1rem 0.7rem 2rem",cursor:"pointer",fontFamily:S.fontBody,textAlign:"left"} },
-                  React.createElement("div", { style:{width:"10px",height:"10px",borderRadius:"2px",border:"2px dashed #444",flexShrink:0} }),
-                  React.createElement("span", { style:{fontSize:"0.92rem",fontWeight:600,color:S.mutedGlyph,whiteSpace:"nowrap"} }, "+ New Lane")
-                ),
-                React.createElement("button", { onClick:function(){ closeAllPopups(); setShowEditLanes(true); },
-                  style:{display:"flex",alignItems:"center",gap:"0.65rem",width:"100%",background:"none",border:"none",padding:"0.7rem 1rem 0.7rem 2rem",cursor:"pointer",fontFamily:S.fontBody,textAlign:"left"} },
-                  React.createElement(GearSVG, { size:12, col:S.mutedGlyph }),
-                  React.createElement("span", { style:{fontSize:"0.92rem",fontWeight:600,color:S.mutedGlyph,whiteSpace:"nowrap"} }, "Edit Lanes")
-                )
+              // Edit Lanes lived inside that accordion. It is not an "add", so
+              // it stands on its own rather than hiding under one.
+              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowEditLanes(true); },
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+                React.createElement(GearSVG, { size:14, col:S.chromeText }),
+                React.createElement("span", { style:{flex:1} }, "Edit Lanes")
               ),
               // Time Settings (accordion): the schedule and how time is captured
-              React.createElement("button", { "data-flat":true, onClick:function(){ setTimeMenuOpen(function(x){ return !x; }); setAddMenuOpen(false); },
+              React.createElement("button", { "data-flat":true, onClick:function(){ setTimeMenuOpen(function(x){ return !x; }); },
                 style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:timeMenuOpen?rgba(S.bg0,0.5):"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
                 React.createElement("svg", { width:14, height:14, viewBox:"0 0 28 28", fill:"none" },
                   React.createElement("circle", { cx:"14", cy:"14", r:"11", stroke:S.chromeText, strokeWidth:"2.5" }),
@@ -22017,6 +23633,15 @@ function App(){
               React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowReports(true); },
                 style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
                 "Reports"
+              ),
+              // Archive: everything closed out, with its history intact.
+              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowArchive(true); },
+                style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"0.75rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+                "Archive",
+                (function(){
+                  var n=projects.filter(isClosed).length;
+                  return n ? React.createElement(Mono, { style:{color:S.textDim,fontSize:"0.8rem",fontWeight:700} }, String(n)) : null;
+                })()
               ),
               // Backup & Restore
               React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowBackup(true); },
@@ -22060,6 +23685,26 @@ function App(){
                   ),
                   React.createElement(Mono, { style:{fontSize:"1.15rem",fontWeight:500,color:wsTimCol,lineHeight:1,flexShrink:0} }, wsElapsed)
                 ),
+                // Which shift everything is being filed under, and a way back
+                // if the wrong button got tapped at the clock.
+                React.createElement("button", { "data-flat":true,
+                  onClick:function(){ setMenuOpen(false); askWorkDay(Date.now(), function(day,ot){ setWorkDay(day,ot); },
+                    { title:"Change Shift" }); },
+                  style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"0.75rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.6rem 1rem",cursor:"pointer",fontFamily:S.fontBody,whiteSpace:"nowrap"} },
+                  React.createElement("span", { style:{fontSize:"0.66rem",textTransform:"uppercase",letterSpacing:"0.09em",fontWeight:700,color:S.textDim} }, "Logging to"),
+                  React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.4rem",minWidth:0} },
+                    React.createElement("span", { style:{fontSize:"0.82rem",fontWeight:700,color:S.actionText,overflow:"hidden",textOverflow:"ellipsis"} },
+                      new Date(todayStr2).toLocaleDateString([], {weekday:"short",month:"short",day:"numeric"})),
+                    // An off-roster day was classified by hand at the clock, so
+                    // say which way it went - a mis-tap here is worth real money.
+                    typeof workDayOt==="boolean" && React.createElement("span", {
+                      style:{fontSize:"0.62rem",fontWeight:800,letterSpacing:"0.04em",flexShrink:0,
+                             borderRadius:"5px",padding:"0.1rem 0.3rem",
+                             background:workDayOt?S.dangerTint:S.bg3,
+                             color:workDayOt?S.dangerText:S.textDim} },
+                      workDayOt?"OT":"REG")
+                  )
+                ),
                 onBreak
                   ? React.createElement("button", { "data-flat":true, onClick:function(){ endBreak(); },
                       style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.successText,cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:"0.95rem",whiteSpace:"nowrap"} },
@@ -22074,7 +23719,7 @@ function App(){
             )
           ),
           // CLOCK button
-          React.createElement("button", { onClick:function(){ if(clocked){ clockOut(); } else { clockIn(); } setMenuOpen(false); setAddMenuOpen(false); },
+          React.createElement("button", { onClick:function(){ if(clocked){ clockOut(); } else { clockIn(); } setMenuOpen(false); },
             style:{flex:1,minHeight:"56px",display:"flex",alignItems:"center",justifyContent:"center",gap:"0.55rem",background:ckBg,border:"2.5px solid "+ckBdr,borderRadius:S.radius2,cursor:"pointer"} },
             React.createElement("svg", { width:28, height:28, viewBox:"0 0 28 28", fill:"none" },
               React.createElement("circle", { cx:"14", cy:"14", r:"11", stroke:ckIcon, strokeWidth:"2.5" }),
@@ -22133,9 +23778,10 @@ function App(){
       React.createElement("div", { style:{padding:"1rem 0.85rem 0"} },
         laneOrder.map(function(lane, laneIdx){
           return React.createElement(LaneSection, {
-            key:lane, lane:lane, allProjects:projects, activeId:activeId,
+            key:lane, lane:lane, allProjects:liveProjects, activeId:activeId,
+            onCloseOut:askCloseOut,
             interrupting:interrupting, elapsed:elapsed,
-            todayLogs:todayLogs, todayDist:disruptions,
+            todayLogs:todayLogs, todayDist:todayDist, allDist:disruptions,
             onToggle:toggleProject,
             onEdit:function(p){ closeAllPopups(); setEditProj(p); },
             onStages:function(p){ closeAllPopups(); setStagesProj(p); },
@@ -22154,15 +23800,22 @@ function App(){
 
       // ---- MODALS ----
       showAdd && React.createElement(Modal, { title:showAdd.parentId?"Add Task":"Add to "+(getMeta(laneMeta,showAdd.lane).label), onClose:function(){ setShowAdd(null); } , ownActions:true },
-        React.createElement(ProjectForm, { onSave:addProject, onCancel:function(){ setShowAdd(null); }, defaultLane:showAdd.lane, defaultParentId:showAdd.parentId, parents:projects, laneMeta:laneMeta, laneOrder:laneOrder })
+        React.createElement(ProjectForm, { onSave:addProject, onCancel:function(){ setShowAdd(null); }, defaultLane:showAdd.lane, defaultParentId:showAdd.parentId, parents:liveProjects, laneMeta:laneMeta, laneOrder:laneOrder })
       ),
       editProj && React.createElement(Modal, { title:editProj.parentId?"Edit Task":"Edit Project", onClose:function(){ setEditProj(null); } , ownActions:true },
-        React.createElement(ProjectForm, { project:editProj, onSave:saveEdit, onCancel:function(){ setEditProj(null); }, onDelete:deleteProject, parents:projects, laneMeta:laneMeta, laneOrder:laneOrder })
+        React.createElement(ProjectForm, { project:editProj, onSave:saveEdit, onCancel:function(){ setEditProj(null); }, onDelete:deleteProject, parents:liveProjects, laneMeta:laneMeta, laneOrder:laneOrder })
       ),
       stagesProj && React.createElement(StagesModal, { proj:stagesProj, onClose:function(){ setStagesProj(null); }, onUpdate:updateStages }),
+      dayAsk && React.createElement(ClockDayModal, { when:dayAsk.when, position:dayAsk.position,
+        choices:dayAsk.choices, title:dayAsk.title, stage:dayAsk.stage,
+        onPick:function(c){
+          var f=dayAsk.then, r=dayAsk.resolve; setDayAsk(null);
+          if(r) r(c); else f(c.day, typeof c.ot==="boolean" ? c.ot : null);
+        },
+        onCancel:function(){ setDayAsk(null); } }),
       showDisrupt && React.createElement(DisruptionModal, { projName:disruptTarget?disruptTarget.name:null, onStart:startDisruption, onCancel:function(){ setShowDisrupt(false); } }),
       showBreak && React.createElement(BreakModal, { onStart:startBreak, onCancel:function(){ setShowBreak(false); } }),
-      showDay && React.createElement(DaySummary, { logs:todayLogs, disruptions:disruptions, breaks:todayBreaks, onClose:function(){ setShowDay(false); }, testMode:testMode }),
+      showDay && React.createElement(DaySummary, { logs:todayLogs, disruptions:todayDist, breaks:todayBreaks, dayKey:todayStr2, onClose:function(){ setShowDay(false); }, testMode:testMode }),
       notifToast && React.createElement("div", { "data-surface":"panel", role:"status",
         onClick:function(){ setNotifToast(null); },
         style:{position:"fixed",left:"50%",transform:"translateX(-50%)",
@@ -22181,8 +23834,11 @@ function App(){
       modScreen && ttModuleScreen(modScreen.id, modScreen.screen) &&
         React.createElement(ttModuleScreen(modScreen.id, modScreen.screen),
           ttModuleContext(modScreen.id, {
-            settings:settings, projects:projects, logs:logs, laneMeta:laneMeta,
+            settings:settings, projects:liveProjects, logs:logs, laneMeta:laneMeta,
             laneOrder:laneOrder, testMode:testMode, schedule:settings.workSchedule,
+            // What is running right now, so a module can default to it rather
+            // than making the user pick the job they are already standing in.
+            activeId:activeId, activeName:activeProj?activeProj.name:null,
             onClose:function(){ setModScreen(null); }
           })),
       showReports && React.createElement(ReportsModal, { logs:logs, projects:projects, disruptions:disruptions,
@@ -22190,6 +23846,24 @@ function App(){
         liveLogs:liveLogs(), onClose:function(){ setShowReports(false); } }),
       showNewLane && React.createElement(NewLaneModal, { onSave:function(label,col){ addLane(label,col); setShowNewLane(false); }, onCancel:function(){ setShowNewLane(false); } }),
       showEditLanes && React.createElement(EditLanesModal, { laneOrder:laneOrder, laneMeta:laneMeta, projects:projects, onDeleteLane:deleteLaneWithProjects, onSave:saveLaneEdits, onCancel:function(){ setShowEditLanes(false); } }),
+      addNew && React.createElement(AddNewModal, { stage:addNew.stage, laneOrder:laneOrder,
+        laneMeta:laneMeta, projects:liveProjects,
+        onClose:function(){ setAddNew(null); },
+        onPick:function(pick){
+          if(pick.what==="chooseLane"){ setAddNew({stage:"lane"}); return; }
+          if(pick.what==="chooseProject"){ setAddNew({stage:"project"}); return; }
+          setAddNew(null);
+          if(pick.what==="lane"){ setShowNewLane(true); return; }
+          setShowAdd({ lane:pick.lane, parentId:pick.parentId||null });
+        } }),
+      matchAsk && React.createElement(MatchTasksModal, { proj:matchAsk.proj, tasks:matchAsk.tasks,
+        onMatch:function(chosen){ doMatchTasks(matchAsk.proj, chosen); },
+        onLeave:function(){ setMatchAsk(null); } }),
+      closeOut && React.createElement(CloseProjectModal, { proj:closeOut.proj, blockers:closeOut.blockers,
+        onConfirm:function(note){ doCloseOut(closeOut.proj, note); },
+        onClose:function(){ setCloseOut(null); } }),
+      showArchive && React.createElement(ArchiveModal, { projects:projects, logs:logs, laneMeta:laneMeta,
+        onReopen:doReopen, onClose:function(){ setShowArchive(false); } }),
       confirmDelete && React.createElement(DeleteProjectModal, { proj:confirmDelete, allProjects:projects, laneMeta:laneMeta, onMoveTasks:doMoveTasks, onDeleteAll:doDeleteAll, onCancel:function(){ setConfirmDelete(null); } }),
       showSettings && React.createElement(SettingsModal, { settings:settings, onChange:setSettings, onClose:function(){ setShowSettings(false); } }),
       showSchedule && React.createElement(WorkScheduleModal, { schedule:settings.workSchedule,
