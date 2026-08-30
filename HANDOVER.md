@@ -1,12 +1,12 @@
 # Time Tracker — session handover
 
-Current build: **`08-22 nested pill tuck`**
+Current build: **`08-26 scheduled starts`**
 
 ```
 tt-tests.js   821 assertions   146 cases   (static, no browser)
 boot.js        71 checks                    (renders the built file)
 shift.js       46 checks                    (work days, shifts, overtime)
-lifecycle.js  130 checks                    (projects, nesting, archive)
+lifecycle.js  236 checks                    (projects, nesting, archive, scheduling)
 ```
 
 ## Start of every session
@@ -50,7 +50,7 @@ a wall clock and a stale comparison will differ on that alone.
 | `tt-tests.js` | Static suite. Contract, reference module, host wiring, Extensions, Tool Tracker. |
 | `boot.js` | Evaluates the built file with real React and a stub DOM. |
 | `shift.js` | Work-day resolution, overnight shifts, overtime. |
-| `lifecycle.js` | Project types, closing out, nesting, the archive. |
+| `lifecycle.js` | Project types, closing out, nesting, the archive, scheduled starts. |
 | `MODULES.md` | Module platform contract and Tool Tracker. |
 
 ## Architecture in one paragraph
@@ -77,9 +77,20 @@ which is what makes Backup & Restore whole.
   `undefined` up there.
 - **Select values are strings; project ids are numbers.** Every child lookup is a
   strict `===`. Resolve a picked id back to the real one or the record is orphaned.
+- **A harness must assert against the payload it was handed**, never against
+  `time-tracker.jsx` on disk. Source-level checks that read the file pass no
+  matter what was actually built. `lifecycle.js` had this bug; it is fixed, but
+  the same shape is worth watching for anywhere else.
+- **Absent fields mean the old behaviour.** `kind`, `role`, `closedAt`, `startAt`
+  and `endAt` are all read through functions so projects that predate them keep
+  behaving exactly as they did. Nothing migrates.
 
 ## Recent work, newest first
 
+- Scheduled starts: `startAt`/`endAt` on a project, Now-or-pick on the form, an
+  end input for finite projects, dates on the card, the row and the Archive,
+  a greyed Start on anything not due yet, and the three-answer prompt behind it
+  (`startAction` holds the rule, out of the component so it is testable)
 - Nested projects: explicit `role` field (project vs task), tucked cards, stack
   ordering by depth-first position, collapsed-pill geometry
 - Project lifecycle: ongoing vs finite, close-out, Archive, task type inheritance
@@ -100,6 +111,11 @@ which is what makes Backup & Restore whole.
   Same cause, deliberately not changed yet.
 - **The pay answer is per session, not per log.** A Saturday that is part regular
   and part overtime needs a clock-out and back in.
+- **An end date is recorded but inert.** Nothing warns as it approaches, and
+  `readyToClose` still keys off stages alone rather than the date.
+- **Only the two full-size Start buttons grey out.** The collapsed pill and the
+  lane pill still go through the gate, so pressing them asks correctly — they
+  just don't look scheduled first.
 - **Roadmap:** Materials Tracker is the cheap next module (same shape as Tool
   Tracker, quantities instead of a check-in). Project Builder last — it extends
   the core project entity rather than sitting beside it.

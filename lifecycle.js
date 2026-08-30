@@ -20,7 +20,10 @@ const out = new Function("React", "window", "localStorage", "navigator", "docume
         " ArchiveModal, CloseProjectModal, ProjectForm, inheritedKind," +
         " mismatchedTasks, MatchTasksModal, findProj, AddNewModal," +
         " projDepth, subtreeDepth, canNestUnder, nestTargets, MAX_NEST_DEPTH," +
-        " projRole, isTaskRole, isProjectRole, projectStackOrder, stackZ };")(
+        " projRole, isTaskRole, isProjectRole, projectStackOrder, stackZ," +
+        " projStart, projEnd, joinDateTime, tsDateStr, tsTimeStr," +
+        " isPending, isOverdue, schedText, SchedChip, StartAheadModal, ProjectCard," +
+        " startAction };")(
   React, win, localStorage, navigator, document, function (t){ return { type: t }; });
 
 const ok = [];
@@ -359,6 +362,386 @@ t("and the ranking closes up behind it", ord2[83] === 1);
 const wide = {}; for (let i = 0; i < 200; i++) wide["w" + i] = i;
 t("past the range the tail ties instead of falling behind the lane",
   out.stackZ(wide, "w199") === 2 && out.stackZ(wide, "w0") === 60);
+
+// ---- when a project starts, and when it ends ----
+// Same rule as kind and closedAt: every project on the board today has neither
+// field, and absent has to read as "not recorded" rather than as the epoch.
+t("a project with no startAt has no start", out.projStart(legacy) === null);
+t("and no end", out.projEnd(legacy) === null);
+t("a real timestamp reads back", out.projStart({ startAt: 1755000000000 }) === 1755000000000);
+t("zero is not a start", out.projStart({ startAt: 0 }) === null);
+t("nor is a string that looks like one", out.projStart({ startAt: "1755000000000" }) === null);
+t("nor NaN", out.projStart({ startAt: NaN }) === null);
+t("a missing project does not throw", out.projStart(null) === null && out.projEnd(null) === null);
+t("the end reads the same way", out.projEnd({ endAt: 1755000000000 }) === 1755000000000);
+
+// ---- a date field and a time field make one moment ----
+const jdt = out.joinDateTime;
+const mk = (y, mo, d, h, mi) => new Date(y, mo - 1, d, h, mi, 0, 0).getTime();
+t("a date and a time join into local wall-clock time",
+  jdt("2026-08-26", "14:30") === mk(2026, 8, 26, 14, 30));
+t("a date on its own is midnight that morning",
+  jdt("2026-08-26", "") === mk(2026, 8, 26, 0, 0));
+t("no date is no moment, whatever the time says", jdt("", "14:30") === null);
+t("and neither is nothing at all", jdt(null, null) === null);
+t("a date the calendar does not have is refused, not rolled into March",
+  jdt("2026-02-31", "09:00") === null);
+t("February the 29th is fine in a leap year", jdt("2024-02-29", "09:00") === mk(2024, 2, 29, 9, 0));
+t("but not in this one", jdt("2026-02-29", "09:00") === null);
+t("a malformed date is refused", jdt("26/08/2026", "09:00") === null && jdt("2026-08", "09:00") === null);
+t("an out-of-range time falls back to midnight rather than spilling into tomorrow",
+  jdt("2026-08-26", "25:00") === mk(2026, 8, 26, 0, 0));
+t("and so does a malformed one", jdt("2026-08-26", "banana") === mk(2026, 8, 26, 0, 0));
+t("midnight is a real answer, not a missing one", jdt("2026-08-26", "00:00") === mk(2026, 8, 26, 0, 0));
+
+// The round trip the form relies on: a stored moment splits into the two
+// fields and joins back to the same moment.
+const moment = mk(2026, 8, 26, 6, 5);
+t("a stored moment splits into a date string", out.tsDateStr(moment) === "2026-08-26");
+t("and a time string, zero-padded", out.tsTimeStr(moment) === "06:05");
+t("and joins back to exactly where it started",
+  jdt(out.tsDateStr(moment), out.tsTimeStr(moment)) === moment);
+t("nothing splits into empty fields", out.tsDateStr(null) === "" && out.tsTimeStr(null) === "");
+
+// ---- the form offers both, and only offers an end when there is one ----
+function renderForm(props) {
+  try {
+    return renderToStaticMarkup(React.createElement(out.ProjectForm,
+      Object.assign({ parents: [], laneMeta: null, defaultLane: "Projects",
+                      onSave(){}, onCancel(){} }, props)));
+  } catch (e) { return "ERR:" + e.message; }
+}
+const fresh = renderForm({});
+t("a new project's form renders", fresh.indexOf("ERR:") !== 0);
+if (fresh.indexOf("ERR:") === 0) console.log("   " + fresh);
+has(fresh, "Starts", "it asks when the project starts");
+has(fresh, "Now", "offering now");
+has(fresh, "Pick a date", "or a date picked by hand");
+has(fresh, "moment you add it", "and says what Now will stamp");
+t("a new project defaults to Now, so no date fields are showing",
+  !/type="date"/.test(fresh));
+t("and an ongoing project is offered no end at all", fresh.indexOf(">Ends<") < 0);
+
+const finite = renderForm({
+  project: { id: 90, name: "Line 4 Rebuild", lane: "Projects", notes: "", parentId: null,
+             kind: "finite", role: "project", stages: [],
+             startAt: mk(2026, 8, 24, 6, 0), endAt: mk(2026, 9, 4, 14, 30) } });
+t("a finite project's form renders", finite.indexOf("ERR:") !== 0);
+if (finite.indexOf("ERR:") === 0) console.log("   " + finite);
+has(finite, ">Ends<", "a project with an end is asked when");
+t("an existing project opens on Pick, never silently restamped",
+  (finite.match(/type="date"/g) || []).length === 2);
+has(finite, 'value="2026-08-24"', "prefilled with the start it already had");
+has(finite, 'value="06:00"', "down to the time");
+has(finite, 'value="2026-09-04"', "and with the end it already had");
+has(finite, 'value="14:30"', "down to that time too");
+t("both fields are pinned at 16px, or iOS zooms and stays zoomed",
+  (finite.match(/font-size:16px/g) || []).length >= 4);
+
+// An existing project with nothing recorded must open empty, not on today.
+const bare = renderForm({
+  project: { id: 91, name: "Daily Walk", lane: "Projects", notes: "", parentId: null,
+             kind: "finite", role: "project", stages: [] } });
+t("a project with no start on record opens with empty fields",
+  bare.indexOf("ERR:") !== 0 && (bare.match(/type="date"[^>]*value=""/g) || []).length === 2);
+
+// ---- what the form hands back ----
+// Rendering to markup throws the handlers away, and calling the component bare
+// against real React is an invalid hook call. So the payload is evaluated a
+// second time against a stub React whose useState just hands back the initial
+// value - enough to invoke the component for real and press its own button.
+// Rendering to markup throws the handlers away, and calling the component bare
+// against real React is an invalid hook call. So the payload is evaluated a
+// second time against a stub React with hook cells that survive a re-render -
+// enough to type into the form, render it again and press its own button.
+let HOOKS = null;
+const stubReact = {
+  Fragment: "FRAGMENT",
+  createElement: function (type, props) {
+    const kids = Array.prototype.slice.call(arguments, 2);
+    if (typeof type === "function") {
+      const p = Object.assign({}, props || {});
+      if (kids.length) p.children = kids.length === 1 ? kids[0] : kids;
+      return type(p);
+    }
+    return { type: type, props: props || {}, children: kids };
+  },
+  useState: (init) => HOOKS.useState(init),
+  useEffect: function () {},
+  useRef: (v) => HOOKS.useRef(v)
+};
+// The payload binds useState/useRef once at the top, so the delegating stubs
+// above have to exist before it is evaluated, not after.
+const stubOut = new Function("React", "window", "localStorage", "navigator", "document", "Event",
+  src + "\nreturn { ProjectForm, StartAheadModal };")(
+  stubReact, win, localStorage, navigator, document, function (t){ return { type: t }; });
+
+function mount(props) {
+  const cells = [], refs = [];
+  let si = 0, ri = 0, got = null;
+  HOOKS = {
+    useState(init) {
+      const k = si++;
+      if (cells.length <= k) cells[k] = typeof init === "function" ? init() : init;
+      return [cells[k], (v) => { cells[k] = typeof v === "function" ? v(cells[k]) : v; }];
+    },
+    useRef(v) {
+      const k = ri++;
+      if (refs.length <= k) refs[k] = { current: v === undefined ? null : v };
+      return refs[k];
+    }
+  };
+  const base = Object.assign({ parents: [], laneMeta: null, defaultLane: "Projects",
+    onSave(d){ got = d; }, onCancel(){} }, props);
+  function render() {
+    si = 0; ri = 0;
+    const flat = [];
+    (function walk(n){
+      if (!n || typeof n !== "object") return;
+      if (Array.isArray(n)) return n.forEach(walk);
+      flat.push(n);
+      walk(n.children);
+      walk(n.props && n.props.children);
+    })(stubOut.ProjectForm(base));
+    return flat;
+  }
+  return {
+    render,
+    saved: () => got,
+    submit() {
+      const btn = render().filter((n) => n.type === "button" && n.props && n.props.onClick &&
+        n.children && /^(Add|Save)/.test(String(n.children[0])))[0];
+      if (btn) btn.props.onClick();
+      return got;
+    }
+  };
+}
+function saved(props) { return mount(props).submit(); }
+const before = Date.now();
+// A brand new project: type a name, leave Starts on its default, add it.
+const fresh2 = mount({});
+const nameIn = fresh2.render().filter((n) => n.type === "input" &&
+  n.props && /Name$/.test(String(n.props.placeholder)))[0];
+t("the form has a name field to type into", !!nameIn);
+if (nameIn) nameIn.props.onChange({ target: { value: "Line 4 Rebuild" } });
+const nowSave = fresh2.submit();
+t("a new project saves with the name typed", nowSave && nowSave.name === "Line 4 Rebuild");
+t("and with a startAt, because Now is the default",
+  nowSave && typeof nowSave.startAt === "number");
+t("an ongoing project is saved with no end", nowSave && nowSave.endAt === null);
+const withStart = saved({ project: { id: 93, name: "Rebuild", lane: "Projects", notes: "",
+  parentId: null, kind: "finite", role: "project", stages: [],
+  startAt: mk(2026, 8, 24, 6, 0), endAt: mk(2026, 9, 4, 14, 30) } });
+t("a finite project keeps the start it was opened with",
+  withStart && withStart.startAt === mk(2026, 8, 24, 6, 0));
+t("and the end", withStart && withStart.endAt === mk(2026, 9, 4, 14, 30));
+// The end belongs to the type. Switching to ongoing must not leave it behind
+// to reappear the next time someone flips the toggle back.
+const dropped = saved({ project: { id: 94, name: "Rebuild", lane: "Projects", notes: "",
+  parentId: null, kind: "ongoing", role: "project", stages: [],
+  startAt: mk(2026, 8, 24, 6, 0), endAt: mk(2026, 9, 4, 14, 30) } });
+t("an end left over from when it was finite is cleared, not carried",
+  dropped && dropped.endAt === null);
+t("while the start survives the type change", dropped && dropped.startAt === mk(2026, 8, 24, 6, 0));
+t("Now is read off the clock at save, not at open",
+  nowSave && nowSave.startAt >= before && nowSave.startAt <= Date.now());
+
+// ---- a start in the future means the project has not begun ----
+const HOUR = 3600000;
+const NOW = Date.now();
+t("a project with no start is never pending", out.isPending({ id: 1 }, NOW) === false);
+t("a start an hour out is pending", out.isPending({ startAt: NOW + HOUR }, NOW) === true);
+t("a start an hour ago is not", out.isPending({ startAt: NOW - HOUR }, NOW) === false);
+t("the moment itself is not pending - it has arrived",
+  out.isPending({ startAt: NOW }, NOW) === false);
+t("an end in the future is not overdue", out.isOverdue({ endAt: NOW + HOUR }, NOW) === false);
+t("an end in the past on an open project is", out.isOverdue({ endAt: NOW - HOUR }, NOW) === true);
+t("but a closed project is history, never overdue",
+  out.isOverdue({ endAt: NOW - HOUR, closedAt: NOW }, NOW) === false);
+t("and a project with no end never is", out.isOverdue({ id: 1 }, NOW) === false);
+
+// ---- the dates, in words ----
+t("a project with no dates says nothing at all", out.schedText({ id: 1 }, NOW).length === 0);
+const future = out.schedText({ startAt: NOW + HOUR }, NOW);
+t("a start ahead reads as Starts", future.length === 1 && /^Starts /.test(future[0]));
+t("and carries the time, because that is the bit that decides", / at /.test(future[0]));
+const past = out.schedText({ startAt: NOW - HOUR }, NOW);
+t("a start behind reads as Started", past.length === 1 && /^Started /.test(past[0]));
+const due = out.schedText({ startAt: NOW - HOUR, endAt: NOW + HOUR }, NOW);
+t("both dates show when both are set", due.length === 2 && /^Due /.test(due[1]));
+t("an end gone by reads as Overdue",
+  /^Overdue /.test(out.schedText({ endAt: NOW - HOUR }, NOW)[1 - 1]));
+t("unless it is closed",
+  /^Due /.test(out.schedText({ endAt: NOW - HOUR, closedAt: NOW }, NOW)[0]));
+
+// ---- the chip renders, and renders nothing when there is nothing ----
+const chip = (p) => { try {
+  return renderToStaticMarkup(React.createElement(out.SchedChip, { proj: p })) || "";
+} catch (e) { return "ERR:" + e.message; } };
+t("a project with no dates paints no chip", chip({ id: 1 }) === "");
+has(chip({ startAt: NOW + HOUR }), "Starts", "a scheduled project paints one");
+has(chip({ endAt: NOW + HOUR }), "Due", "and so does one with an end");
+
+// ---- the Start button greys out, and stays pressable ----
+function card(proj, extra) {
+  try {
+    return renderToStaticMarkup(React.createElement(out.ProjectCard, Object.assign({
+      proj, isActive: false, interrupting: false, todayMs: 0, distToday: 0, distTotal: 0,
+      projDisruptions: [], subTasks: [], allProjects: [proj], allDist: [], todayLogs: [],
+      todayDist: [], laneMeta: null, elapsed: 0, activeId: null,
+      onToggle(){}, onEdit(){}, onStages(){}, onStageToggle(){}, onCloseOut(){}
+    }, extra)));
+  } catch (e) { return "ERR:" + e.message; }
+}
+const SP = (over) => Object.assign({ id: 70, name: "Line 4 Rebuild", lane: "Projects",
+  notes: "", order: 0, parentId: null, role: "project", kind: "finite", stages: [] }, over);
+
+const ready = card(SP({ startAt: NOW - HOUR }));
+t("a started project's card renders", ready.indexOf("ERR:") !== 0);
+if (ready.indexOf("ERR:") === 0) console.log("   " + ready);
+t("and its Start button is not marked disabled", !/aria-disabled="true"/.test(ready));
+has(ready, "Started", "the card shows when it started");
+
+const later = card(SP({ startAt: NOW + 48 * HOUR }));
+t("a scheduled project's card renders", later.indexOf("ERR:") !== 0);
+if (later.indexOf("ERR:") === 0) console.log("   " + later);
+t("its Start button reads as disabled", /aria-disabled="true"/.test(later));
+has(later, ">Start<", "but still says Start, and is still a button to press");
+has(later, "Starts", "with the date it is waiting for on the card");
+
+// Greyed is about starting, never about stopping: a project somehow running
+// with a future start must still offer Stop.
+const runningEarly = card(SP({ startAt: NOW + 48 * HOUR }), { isActive: true });
+t("a running project is never greyed, whatever its start says",
+  !/aria-disabled="true"/.test(runningEarly));
+has(runningEarly, ">Stop<", "and it still offers Stop");
+
+// ---- the prompt ----
+const sched = SP({ startAt: NOW + 48 * HOUR });
+let ask = "";
+try {
+  ask = renderToStaticMarkup(React.createElement(out.StartAheadModal, {
+    proj: sched, onStartNow(){}, onReschedule(){}, onWait(){} }));
+} catch (e) { ask = "ERR:" + e.message; }
+t("the prompt renders", ask.indexOf("ERR:") !== 0);
+if (ask.indexOf("ERR:") === 0) console.log("   " + ask);
+has(ask, "Line 4 Rebuild", "it names the project");
+has(ask, "isn\u2019t scheduled to start till", "and says it is not due yet");
+has(ask, "Start It Now", "offering to start it anyway");
+has(ask, "Pick a New Date &amp; Time", "or to move the date");
+has(ask, "Wait Till Then", "or to leave it alone");
+t("all three answers are offered and no more",
+  (ask.match(/<button/g) || []).length === 3);
+
+// The three answers, driven for real.
+function askMount(props) {
+  const cells = [], refs = [];
+  let si = 0, ri = 0;
+  HOOKS = {
+    useState(init) {
+      const k = si++;
+      if (cells.length <= k) cells[k] = typeof init === "function" ? init() : init;
+      return [cells[k], (v) => { cells[k] = typeof v === "function" ? v(cells[k]) : v; }];
+    },
+    useRef(v) { const k = ri++; if (refs.length <= k) refs[k] = { current: v === undefined ? null : v }; return refs[k]; }
+  };
+  function render() {
+    si = 0; ri = 0;
+    const flat = [];
+    (function walk(n){
+      if (!n || typeof n !== "object") return;
+      if (Array.isArray(n)) return n.forEach(walk);
+      flat.push(n);
+      walk(n.children);
+      walk(n.props && n.props.children);
+    })(stubOut.StartAheadModal(props));
+    return flat;
+  }
+  return render;
+}
+let startedNow = false, rescheduledTo = null, waited = false;
+const askProps = { proj: sched, onStartNow(){ startedNow = true; },
+  onReschedule(ts){ rescheduledTo = ts; }, onWait(){ waited = true; } };
+const askRender = askMount(askProps);
+const findBtn = (flat, label) => flat.filter((n) => n.type === "button" &&
+  n.children && String(n.children[0]) === label)[0];
+
+findBtn(askRender(), "Wait Till Then").props.onClick();
+t("Wait leaves the project alone", waited && !startedNow && rescheduledTo === null);
+findBtn(askRender(), "Start It Now").props.onClick();
+t("Start It Now starts it", startedNow);
+
+// Pick a new date: the second stage, prefilled with the schedule it has now.
+findBtn(askRender(), "Pick a New Date & Time").props.onClick();
+const stage2 = askRender();
+const dateIn = stage2.filter((n) => n.type === "input" && n.props.type === "date")[0];
+const timeIn = stage2.filter((n) => n.type === "input" && n.props.type === "time")[0];
+t("the second stage offers a date and a time", !!dateIn && !!timeIn);
+t("prefilled with the start it is moving away from",
+  dateIn && dateIn.props.value === out.tsDateStr(sched.startAt));
+dateIn.props.onChange({ target: { value: "2026-09-04" } });
+timeIn.props.onChange({ target: { value: "07:15" } });
+findBtn(askRender(), "Save Start Time").props.onClick();
+t("saving hands back the new moment",
+  rescheduledTo === out.joinDateTime("2026-09-04", "07:15"));
+t("and starts nothing", startedNow === true && rescheduledTo !== null);
+
+// An impossible date cannot be saved. The sentinel is deliberately not null -
+// null is what a cleared date legitimately hands back, so using it here would
+// pass whether the guard fired or not.
+let called = false;
+const askRender2 = askMount({ proj: sched, onStartNow(){},
+  onReschedule(){ called = true; }, onWait(){} });
+findBtn(askRender2(), "Pick a New Date & Time").props.onClick();
+askRender2().filter((n) => n.type === "input" && n.props.type === "date")[0]
+  .props.onChange({ target: { value: "2026-02-31" } });
+findBtn(askRender2(), "Save Start Time").props.onClick();
+t("a date the calendar does not have is refused rather than saved", called === false);
+// and a good one still gets through, so the guard is not just off
+askRender2().filter((n) => n.type === "input" && n.props.type === "date")[0]
+  .props.onChange({ target: { value: "2026-09-04" } });
+findBtn(askRender2(), "Save Start Time").props.onClick();
+t("while a real one still saves", called === true);
+
+// ---- the rule a press follows ----
+const board = [SP({ id: 70, startAt: NOW + 48 * HOUR }), SP({ id: 71, startAt: NOW - HOUR }),
+               SP({ id: 72 })];
+const act = (id, active, force) => out.startAction(board, active, id, force, NOW);
+t("pressing a project not due yet asks", act(70, null, false) === "ask");
+t("pressing one already started just runs", act(71, null, false) === "run");
+t("and one with no start at all runs", act(72, null, false) === "run");
+t("stopping the running project is never gated, even if it is not due",
+  act(70, 70, false) === "run");
+t("the force flag runs past the gate - it is how Start It Now gets through",
+  act(70, null, true) === "run");
+t("a project that is not on the board runs rather than wedging",
+  act(999, null, false) === "run");
+t("and no board at all does not throw",
+  out.startAction(null, null, 70, false, NOW) === "run");
+
+// ---- and it is wired into the one place that starts anything ----
+// Read from the payload under test, not from the source on disk - reading the
+// file would mean these assertions pass no matter what was actually built.
+const wiring = src;
+function body(name, n) {
+  const i = wiring.indexOf("function " + name + "(");
+  return i < 0 ? "" : wiring.slice(i, i + (n || 900));
+}
+const tog = body("toggleProject");
+t("toggleProject exists and takes a force flag", /^function toggleProject\(id, force\)/.test(tog));
+t("it consults the rule", tog.indexOf('startAction(projects, activeId, id, force)==="ask"') >= 0);
+t("and opens the prompt when told to", tog.indexOf("setStartAsk(findProj(projects, id))") >= 0);
+t("the gate runs before the clock-in prompt, so an early tap does not drag the work day in",
+  tog.indexOf("startAction(") >= 0 &&
+  tog.indexOf("startAction(") < tog.indexOf("!clockIn()"));
+const early = body("startPendingNow");
+t("starting early rewrites the start on record", /startAt:now/.test(early));
+t("and then starts it past the gate", /toggleProject\(p\.id, true\)/.test(early));
+const resched = body("reschedulePending");
+t("rescheduling writes the new moment", /startAt:ts/.test(resched));
+t("and starts nothing", !/toggleProject/.test(resched));
+t("closing the popups clears the prompt too",
+  /setStartAsk\(null\);/.test(body("closeAllPopups", 700)));
 
 let bad = 0;
 ok.forEach(([label, pass]) => { if (!pass) { bad++; console.log("   x " + label); } });

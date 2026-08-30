@@ -219,7 +219,87 @@ function projKind(p){ return (p && p.kind==="finite") ? "finite" : "ongoing"; }
 function isFinite_(p){ return projKind(p)==="finite"; }
 function isClosed(p){ return !!(p && typeof p.closedAt==="number" && p.closedAt>0); }
 function isOpen(p){ return !isClosed(p); }
-// Stages are the existing checklist. A finite project with every stage ticked
+// When a project began, and - if it has an end - when that end falls. Read
+// through functions for the same reason as kind and role: every project
+// written before these existed has neither, and absent has to mean "not
+// recorded" rather than the epoch. So there is no migration and nothing moves.
+// An end only belongs to a finite project; an ongoing one having a due date
+// would be a contradiction, so the form clears it when the type changes.
+function projStart(p){
+  var t = p && p.startAt;
+  return (typeof t==="number" && !isNaN(t) && t>0) ? t : null;
+}
+function projEnd(p){
+  var t = p && p.endAt;
+  return (typeof t==="number" && !isNaN(t) && t>0) ? t : null;
+}
+// A moment split across a date field and a time field. iOS renders those two
+// reliably and TIME_FIELD_STYLE already carries the appearance reset that keeps
+// their values visible; datetime-local has neither behind it here.
+function tsDateStr(ts){ return ts==null ? "" : isoDate(new Date(ts)); }
+function tsTimeStr(ts){ if(ts==null) return ""; var d=new Date(ts); return pad(d.getHours())+":"+pad(d.getMinutes()); }
+// No date means no moment - an empty pair of fields is "not recorded", not
+// midnight today. A date the calendar does not have is refused rather than
+// rolled forward, which is what `new Date(2026,1,31)` would quietly do. The
+// time is applied with setHours so a moment on a DST changeover day lands on
+// the wall clock the user typed.
+function joinDateTime(dateStr, timeStr){
+  var a=String(dateStr||"").split("-");
+  if(a.length!==3) return null;
+  var y=+a[0], mo=+a[1], da=+a[2];
+  if(isNaN(y) || isNaN(mo) || isNaN(da)) return null;
+  var d=new Date(y, mo-1, da, 0, 0, 0, 0);
+  if(d.getFullYear()!==y || d.getMonth()!==mo-1 || d.getDate()!==da) return null;
+  var mins=toMin(timeStr);
+  if(mins==null || mins<0 || mins>1439) mins=0;
+  d.setHours(Math.floor(mins/60), mins%60, 0, 0);
+  return d.getTime();
+}
+// A start still in the future means the project has not begun. Its Start
+// button greys out rather than disappearing: pressing it is how you get the
+// question about starting early, and a greyed control that does nothing at all
+// would just look broken.
+function isPending(p, now){
+  var s=projStart(p);
+  return s!=null && s > (now==null ? Date.now() : now);
+}
+// An end that has passed on a project still open. Closed projects are history,
+// so they are never overdue however long ago the date was.
+function isOverdue(p, now){
+  var e=projEnd(p);
+  return e!=null && isOpen(p) && e < (now==null ? Date.now() : now);
+}
+// The one place a project's dates are put into words, so the card, the row and
+// the Archive all read the same. Nothing renders for a project with no dates,
+// which is every project that predates the fields.
+function schedText(p, now){
+  var t=now==null ? Date.now() : now;
+  var s=projStart(p), e=projEnd(p), out=[];
+  if(s!=null) out.push((s>t ? "Starts " : "Started ")+fmtDate(s)+(s>t ? " at "+fmtTime(s) : ""));
+  if(e!=null) out.push((e<t && isOpen(p) ? "Overdue " : "Due ")+fmtDate(e));
+  return out;
+}
+// What a press on a project's Start should do. Kept out of the component and
+// returning the decision rather than acting on it, so the rule is testable
+// without mounting the board. Stopping and resuming are never gated - only
+// starting something that has not reached its scheduled time.
+function startAction(projects, activeId, id, force, now){
+  if(force) return "run";
+  if(activeId===id) return "run";
+  return isPending(findProj(projects||[], id), now) ? "ask" : "run";
+}
+function SchedChip(props){
+  var p=props.proj, small=props.small;
+  var parts=schedText(p);
+  if(!parts.length) return null;
+  var pend=isPending(p), late=isOverdue(p);
+  return React.createElement("span", { "data-sched":true,
+    style:{fontSize:small?"0.7rem":"0.74rem", fontWeight:pend||late?700:600,
+           color: late ? S.dangerText : (pend ? S.textDim : S.textMuted),
+           fontFamily:S.fontBody, whiteSpace:"nowrap"} },
+    parts.join("  \u00B7  "));
+}
+
 // is the one moment worth offering to close, so that is what "done" means here.
 function stagesAllDone(p){
   var st = (p && Array.isArray(p.stages)) ? p.stages : [];
@@ -1174,6 +1254,20 @@ function ProjectForm(props){
     return project ? projRole(project) : ((defaultParentId||null)!=null ? "task" : "project");
   });
   var setRole=roleS[1]; var role=roleS[0];
+  // When it starts. A new project starts the moment it is added unless told
+  // otherwise. An existing one opens on whatever it already has and is never
+  // silently stamped - so it lands on Pick, with the fields empty if it has no
+  // start on record, and empty stays empty.
+  var startModeS = useState(function(){ return project ? "pick" : "now"; });
+  var startMode=startModeS[0]; var setStartMode=startModeS[1];
+  var startDateS = useState(function(){ return tsDateStr(projStart(project)); });
+  var startDate=startDateS[0]; var setStartDate=startDateS[1];
+  var startTimeS = useState(function(){ return tsTimeStr(projStart(project)); });
+  var startTime=startTimeS[0]; var setStartTime=startTimeS[1];
+  var endDateS = useState(function(){ return tsDateStr(projEnd(project)); });
+  var endDate=endDateS[0]; var setEndDate=endDateS[1];
+  var endTimeS = useState(function(){ return tsTimeStr(projEnd(project)); });
+  var endTime=endTimeS[0]; var setEndTime=endTimeS[1];
   // A select hands back a string; project ids are numbers, and every child
   // lookup in the app is a strict ===. Storing the raw value here would file
   // the project under a parent nothing can match, so it is resolved back to the
@@ -1198,11 +1292,43 @@ function ProjectForm(props){
   var noun = (parentId!=null && role==="task") ? "Task" : "Project";
   var laneKeys = laneOrder.filter(function(k){ return getMeta(laneMeta,k); });
 
+  // The picked start, and the end, as they stand right now. "Now" is not
+  // resolved here - it is read off the clock at submit, so a form left open
+  // for ten minutes stamps the moment you pressed the button, not the moment
+  // you opened it.
+  var pickedStart = joinDateTime(startDate, startTime);
+  var pickedEnd   = kind==="finite" ? joinDateTime(endDate, endTime) : null;
+  var startBad = startMode==="pick" && startDate!=="" && pickedStart==null;
+  var endBad   = endDate!=="" && kind==="finite" && pickedEnd==null;
+  // Against the clock while the start is Now, so the warning is honest either
+  // way rather than only appearing once a start has been picked by hand.
+  var startRef = startMode==="now" ? Date.now() : pickedStart;
+  var endBackwards = !endBad && pickedEnd!=null && startRef!=null && pickedEnd < startRef;
+
   function submit(){
     if(!name.trim()) return;
     var pid=resolveParentId(parentId);
+    // An ongoing project has no end by definition, so switching the type away
+    // from finite clears one rather than leaving it behind to reappear later.
     onSave({ name:name.trim(), lane:lane, notes:notes.trim(), parentId:pid, kind:kind,
-             role: pid==null ? "project" : role });
+             role: pid==null ? "project" : role,
+             startAt: startMode==="now" ? Date.now() : joinDateTime(startDate, startTime),
+             endAt: kind==="finite" ? joinDateTime(endDate, endTime) : null });
+  }
+
+  var hintStyle = { fontSize:"0.74rem", color:S.textMuted, lineHeight:1.4, marginTop:"0.35rem" };
+  function dtRow(key, dateVal, timeVal, setDate, setTime, bad){
+    var col = bad ? S.dangerText : S.text;
+    var bdr = bad ? S.dangerText : S.border;
+    return React.createElement("div", { key:key,
+      style:{display:"flex",alignItems:"center",gap:"0.5rem",marginTop:"0.5rem"} },
+      React.createElement("input", { type:"date", value:dateVal,
+        onChange:function(e){ setDate(e.target.value); },
+        style:Object.assign(TIME_FIELD_STYLE(col, bdr), { flex:"1 1 auto", minWidth:"130px" }) }),
+      React.createElement("input", { type:"time", value:timeVal,
+        onChange:function(e){ setTime(e.target.value); },
+        style:Object.assign(TIME_FIELD_STYLE(col, bdr), { flex:"0 1 94px", minWidth:"80px" }) })
+    );
   }
 
   return (
@@ -1257,6 +1383,39 @@ function ProjectForm(props){
           kind==="ongoing"
             ? "Repeats and never finishes. You can still close it out whenever you want."
             : "Has a beginning and an end. Tick off every stage and it will offer to close itself out.")
+      ),
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Starts"),
+        React.createElement(Toggle, { name:"projstart", keys:["now","pick"], value:startMode,
+          labelOf:function(k){ return k==="now" ? "Now" : "Pick a date"; },
+          onChange:function(v){
+            // Moving to Pick with nothing filled in lands on today rather than
+            // on two empty boxes to fight with on a phone.
+            if(v==="pick" && !startDate){
+              var d=new Date();
+              setStartDate(isoDate(d));
+              setStartTime(pad(d.getHours())+":"+pad(d.getMinutes()));
+            }
+            setStartMode(v);
+          } }),
+        startMode==="pick" ? dtRow("start", startDate, startTime, setStartDate, setStartTime, startBad) : null,
+        React.createElement("div", { style:Object.assign({}, hintStyle, startBad?{color:S.dangerText}:null) },
+          startMode==="now"
+            ? (project ? "Stamped with the moment you save." : "Stamped with the moment you add it.")
+            : (startBad ? "That is not a date on the calendar."
+              : (pickedStart!=null ? "Starts "+fmtDate(pickedStart)+" at "+fmtTime(pickedStart)
+                                   : "Clear the date to record no start at all.")))
+      ),
+      // Only a finite project has an end to set. Switching back to Ongoing
+      // takes the fields away and clears the value on save.
+      kind==="finite" && React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Ends"),
+        dtRow("end", endDate, endTime, setEndDate, setEndTime, endBad||endBackwards),
+        React.createElement("div", { style:Object.assign({}, hintStyle, (endBad||endBackwards)?{color:S.dangerText}:null) },
+          endBad ? "That is not a date on the calendar."
+            : (endBackwards ? "That is before it starts."
+              : (pickedEnd!=null ? "Ends "+fmtDate(pickedEnd)+" at "+fmtTime(pickedEnd)
+                                 : "Optional. Leave it empty if the end is not fixed yet.")))
       ),
       React.createElement("div", null,
         React.createElement("label", { style:LABEL_STYLE }, "Notes"),
@@ -1316,6 +1475,69 @@ function CloseProjectModal(props){
                padding:"0.85rem",color:S.successText,cursor:"pointer",fontWeight:700,fontFamily:S.fontBody} },
         "Close Out"),
       React.createElement("button", { onClick:onClose, style:MODAL_CANCEL() }, "Cancel")
+    )
+  );
+}
+
+// ---- STARTING AHEAD OF SCHEDULE ---------------------------------------------
+// Raised when the greyed Start on a project scheduled for later is pressed.
+// Three answers, because all three are things people actually mean: the job
+// came forward, the plan was wrong, or the press was a mistake. Waiting is the
+// quiet one, so it is the plain button rather than the loud one.
+function StartAheadModal(props){
+  var proj=props.proj, onStartNow=props.onStartNow, onReschedule=props.onReschedule, onWait=props.onWait;
+  var when=projStart(proj);
+  var stageS=useState(null); var stage=stageS[0]; var setStage=stageS[1];
+  var dateS=useState(function(){ return tsDateStr(when); }); var date=dateS[0]; var setDate=dateS[1];
+  var timeS=useState(function(){ return tsTimeStr(when); }); var time=timeS[0]; var setTime=timeS[1];
+  var picked=joinDateTime(date, time);
+  var bad = date!=="" && picked==null;
+
+  if(stage==="when"){
+    return React.createElement(Modal, { title:"New Start Time", onClose:onWait, ownActions:true },
+      React.createElement("p", { style:{color:S.textDim,fontSize:"0.88rem",lineHeight:1.5,marginBottom:"0.8rem"} },
+        "When should "+proj.name+" start instead?"),
+      React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.5rem"} },
+        React.createElement("input", { type:"date", value:date,
+          onChange:function(e){ setDate(e.target.value); },
+          style:Object.assign(TIME_FIELD_STYLE(bad?S.dangerText:S.text, bad?S.dangerText:S.border),
+            { flex:"1 1 auto", minWidth:"130px" }) }),
+        React.createElement("input", { type:"time", value:time,
+          onChange:function(e){ setTime(e.target.value); },
+          style:Object.assign(TIME_FIELD_STYLE(bad?S.dangerText:S.text, bad?S.dangerText:S.border),
+            { flex:"0 1 94px", minWidth:"80px" }) })
+      ),
+      React.createElement("div", { style:{fontSize:"0.74rem",color:bad?S.dangerText:S.textMuted,lineHeight:1.4,marginBottom:"1rem"} },
+        bad ? "That is not a date on the calendar."
+          : (picked==null ? "Clear the date to leave it with no scheduled start."
+            : (picked>Date.now() ? "It will stay greyed out until then."
+                                 : "That is in the past, so it will be startable straight away."))),
+      React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
+        React.createElement("button", { onClick:function(){ if(!bad) onReschedule(picked); },
+          style:{flex:1,background:bad?S.bg2:S.infoBg,border:"2px solid "+(bad?S.border:S.actionBdr),
+                 borderRadius:S.radius,padding:"0.85rem",color:bad?S.textMuted:S.infoText,
+                 cursor:bad?"default":"pointer",fontWeight:700,fontFamily:S.fontBody} }, "Save Start Time"),
+        React.createElement("button", { onClick:function(){ setStage(null); }, style:MODAL_CANCEL() }, "Back")
+      )
+    );
+  }
+
+  return React.createElement(Modal, { title:"Not Started Yet", onClose:onWait, ownActions:true },
+    React.createElement("p", { style:{color:S.textDim,fontSize:"0.88rem",lineHeight:1.5,marginBottom:"0.9rem"} },
+      proj.name+" isn\u2019t scheduled to start till "+fmtDate(when)+" at "+fmtTime(when)+"."),
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.5rem"} },
+      React.createElement("button", { onClick:onStartNow,
+        style:{width:"100%",background:S.successBg2,border:"2px solid "+S.successBorder,borderRadius:S.radius,
+               padding:"0.85rem",color:S.successText,cursor:"pointer",fontWeight:700,fontFamily:S.fontBody} },
+        "Start It Now"),
+      React.createElement("div", { style:{fontSize:"0.74rem",color:S.textMuted,lineHeight:1.4,marginTop:"-0.2rem"} },
+        "The start on record moves to now, so it stops reading as scheduled."),
+      React.createElement("button", { onClick:function(){ setStage("when"); },
+        style:{width:"100%",background:S.infoBg,border:"2px solid "+S.actionBdr,borderRadius:S.radius,
+               padding:"0.85rem",color:S.infoText,cursor:"pointer",fontWeight:700,fontFamily:S.fontBody} },
+        "Pick a New Date & Time"),
+      React.createElement("button", { onClick:onWait, style:Object.assign({}, MODAL_CANCEL(), {width:"100%",flex:"none"}) },
+        "Wait Till Then")
     )
   );
 }
@@ -1517,7 +1739,9 @@ function ArchiveModal(props){
                 meta.label+"  \u00B7  "+(isFinite_(p)?"Has an end":"Ongoing")
                   +(p.parentId?"  \u00B7  task":"")
                   +(kids.length?"  \u00B7  "+kids.length+" task"+(kids.length!==1?"s":""):"")
-                  +"  \u00B7  closed "+fmtDate(p.closedAt)),
+                  +"  \u00B7  closed "+fmtDate(p.closedAt)
+                  +(projStart(p)!=null ? "  \u00B7  started "+fmtDate(projStart(p)) : "")
+                  +(projEnd(p)!=null ? "  \u00B7  due "+fmtDate(projEnd(p)) : "")),
               p.closedNote ? React.createElement("div", { style:{fontSize:"0.78rem",color:S.textDim,marginTop:"0.3rem",lineHeight:1.35} }, p.closedNote) : null,
               React.createElement("div", { style:{display:"flex",justifyContent:"flex-end",marginTop:"0.5rem"} },
                 React.createElement("button", { "data-flat":true, onClick:function(){ onReopen(p); },
@@ -4095,9 +4319,13 @@ function SubRow(props){
   // The press affordance dims the title, but never below readable: textMuted
   // vanished against the glass card tint the moment it was touched.
   var titleCol = hint ? S.textDim : S.titleText;
-  var startBg = isActive ? (isInterrupted ? S.dangerBg2 : activeTint) : S.bg1;
-  var startBdr = isActive ? (isInterrupted ? S.distStartBdr : ACCENT) : S.chromeBdr;
-  var startIconCol = isActive ? (isInterrupted ? S.distIcon : ACCENT) : S.chromeIcon;
+  // Scheduled for later: greyed, but still pressable - the press is what opens
+  // the question. Stopping is never gated, only starting.
+  var pending = !isActive && isPending(sub);
+  var startBg = pending ? S.bg0 : (isActive ? (isInterrupted ? S.dangerBg2 : activeTint) : S.bg1);
+  var startBdr = pending ? S.border : (isActive ? (isInterrupted ? S.distStartBdr : ACCENT) : S.chromeBdr);
+  var startIconCol = pending ? S.textMuted : (isActive ? (isInterrupted ? S.distIcon : ACCENT) : S.chromeIcon);
+  var startPlay = pending ? S.mutedGlyph : S.chromeIcon;
   var startLbl = isActive ? (isInterrupted ? "Paused" : "Stop") : "Start";
   var timCol = isActive ? (isInterrupted ? S.distDim : ACCENT) : S.chromeTime;
 
@@ -4149,6 +4377,7 @@ function SubRow(props){
         ),
         // Start/Stop
         React.createElement("button", { onClick:function(){ onToggle(sub.id); },
+          "aria-disabled": pending ? "true" : undefined,
           style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.3rem",background:startBg,border:"2px solid "+startBdr,borderRadius:"8px",cursor:"pointer",padding:"0.28rem 0.55rem",minHeight:"32px",flexShrink:0,transition:"all 0.15s"} },
           isInterrupted
             ? React.createElement("svg", { width:14,height:14,viewBox:"0 0 18 18",fill:"none" },
@@ -4160,7 +4389,7 @@ function SubRow(props){
                   React.createElement("rect", { x:"3",y:"3",width:"12",height:"12",rx:"1.5",fill:ACCENT })
                 )
               : React.createElement("svg", { width:14,height:14,viewBox:"0 0 18 18",fill:"none" },
-                  React.createElement("path", { d:"M4 3 L15 9 L4 15 Z", fill:S.chromeIcon })
+                  React.createElement("path", { d:"M4 3 L15 9 L4 15 Z", fill:startPlay })
                 ),
           React.createElement("span", { style:{fontSize:"0.73rem",fontWeight:700,color:startIconCol,fontFamily:S.fontBody,lineHeight:1} }, startLbl)
         )
@@ -4168,6 +4397,7 @@ function SubRow(props){
       // Row 2: meta
       React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.45rem",padding:"0 0.7rem 0.5rem 2.2rem",flexWrap:"wrap"} },
         sub.notes && !hint && React.createElement("span", { style:{fontSize:"0.76rem",color:S.textDim} }, sub.notes),
+        React.createElement(SchedChip, { proj:sub, small:true }),
         todayMs>0 && React.createElement(Mono, { style:{fontSize:"0.76rem",color:timCol,fontWeight:700} }, fmtDur(todayMs,true)),
         React.createElement(DistBadge, { today:distToday, total:distTotal, small:true,
           onClick:function(){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} setDistPopup(true); } }),
@@ -4275,11 +4505,13 @@ function ProjectCard(props){
   var cardBg = isActive ? (isInterrupted ? S.dangerBg2 : laneTint) : (subActive ? laneTint : cardIdle);
   var cardBdr = isInterrupted ? S.distEdge : meta.accent;
   var cardGlow = (isActive && S.glow) ? ("0 0 14px "+(isInterrupted?S.distGlow:meta.accent)+"22") : "none";
-  var startBg = isActive ? (isInterrupted ? S.dangerBg2 : laneTint) : S.bg1;
-  var startBdr = isActive ? (isInterrupted ? S.distStartBdr : meta.accent) : S.chromeBdr;
+  var pending = !isActive && isPending(proj);
+  var startBg = pending ? S.bg0 : (isActive ? (isInterrupted ? S.dangerBg2 : laneTint) : S.bg1);
+  var startBdr = pending ? S.border : (isActive ? (isInterrupted ? S.distStartBdr : meta.accent) : S.chromeBdr);
   var startGlow = (isActive && S.glow) ? ("0 0 10px "+(isInterrupted?S.distGlow:meta.accent)+"44") : "none";
-  var startIconCol = isActive ? (isInterrupted ? S.distIcon : meta.accent) : S.chromeIcon;
-  var startLblCol = isActive ? (isInterrupted ? S.distLbl : meta.accent) : S.chromeText;
+  var startIconCol = pending ? S.textMuted : (isActive ? (isInterrupted ? S.distIcon : meta.accent) : S.chromeIcon);
+  var startLblCol = pending ? S.textMuted : (isActive ? (isInterrupted ? S.distLbl : meta.accent) : S.chromeText);
+  var startPlay = pending ? S.mutedGlyph : S.chromeIcon;
   var startLbl = isActive ? (isInterrupted ? "Paused" : "Stop") : "Start";
   var timCol = isActive ? (isInterrupted ? S.distDim : meta.accent) : S.chromeTime;
   // The press affordance dims the title, but never below readable: textMuted
@@ -4506,6 +4738,7 @@ function ProjectCard(props){
           ),
           // Start/Stop button
           React.createElement("button", { onClick:function(){ onToggle(proj.id); },
+            "aria-disabled": pending ? "true" : undefined,
             style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.38rem",background:startBg,border:"2px solid "+startBdr,borderRadius:S.radius,cursor:"pointer",padding:"0.38rem 0.65rem",minHeight:"44px",flexShrink:0,transition:"all 0.15s",boxShadow:startGlow} },
             isInterrupted
               ? React.createElement("svg", { width:18,height:18,viewBox:"0 0 22 22",fill:"none" },
@@ -4517,7 +4750,7 @@ function ProjectCard(props){
                     React.createElement("rect", { x:"3",y:"3",width:"16",height:"16",rx:"2",fill:meta.accent })
                   )
                 : React.createElement("svg", { width:18,height:18,viewBox:"0 0 22 22",fill:"none" },
-                    React.createElement("path", { d:"M6 4 L18 11 L6 18 Z", fill:S.chromeIcon })
+                    React.createElement("path", { d:"M6 4 L18 11 L6 18 Z", fill:startPlay })
                   ),
             React.createElement("span", { style:{fontSize:"0.82rem",fontWeight:700,color:startLblCol,fontFamily:S.fontBody,lineHeight:1} }, startLbl)
           )
@@ -4525,6 +4758,7 @@ function ProjectCard(props){
         // Row 2: notes + meta + stages
         React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",padding:"0 1rem 0.75rem",flexWrap:"wrap"} },
           proj.notes && React.createElement("span", { style:{fontSize:"0.82rem",color:S.textDim} }, proj.notes),
+          React.createElement(SchedChip, { proj:proj }),
           subActive&&!isActive && React.createElement("span", { style:{fontSize:"0.76rem",color:meta.accent,fontWeight:600} }, "> "+subActive.name),
           childTasks.length>0 && React.createElement("button", { onClick:function(){ setExpanded(function(x){ return !x; }); },
             style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.3rem",background:S.bg0,border:"2px solid "+S.chromeBdr,borderRadius:"8px",cursor:"pointer",padding:"0 0.55rem",height:"30px",minHeight:"30px",flexShrink:0} },
@@ -5766,6 +6000,7 @@ export default function App(){
   var confirmDeleteS=useState(null); var setConfirmDelete=confirmDeleteS[1]; var confirmDelete=confirmDeleteS[0];
   var closeOutS=useState(null); var setCloseOut=closeOutS[1]; var closeOut=closeOutS[0];
   var matchAskS=useState(null); var setMatchAsk=matchAskS[1]; var matchAsk=matchAskS[0];
+  var startAskS=useState(null); var setStartAsk=startAskS[1]; var startAsk=startAskS[0];
   var addNewS=useState(null); var setAddNew=addNewS[1]; var addNew=addNewS[0];
   var showArchiveS=useState(false); var setShowArchive=showArchiveS[1]; var showArchive=showArchiveS[0];
   var settingsS=useState(function(){
@@ -5923,7 +6158,7 @@ export default function App(){
     setShowAdd(null); setEditProj(null); setStagesProj(null); setShowDisrupt(false);
     setShowBreak(false); setShowDay(false); setShowNewLane(false); setShowEditLanes(false);
     setShowReports(false); setShowBackup(false); setShowExtensions(false); setModScreen(null);
-    setConfirmDelete(null); setShowTestConfirm(false);
+    setConfirmDelete(null); setShowTestConfirm(false); setStartAsk(null);
     setMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowSettings(false); setShowSchedule(false); setShowTracking(false); setTimeMenuOpen(false);
     try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){}
   }
@@ -5997,8 +6232,15 @@ export default function App(){
     setLogs(function(prev){ return prev.concat([{id:uid(),day:curDay(),ot:curOt(),projectId:proj.id,projectName:proj.name,lane:proj.lane,type:"project",startTime:activeStart,endTime:now,duration:dur,parentId:proj.parentId||null,parentName:parent?parent.name:null}]); });
     setActiveId(null); setActiveStart(null); setElapsed(0);
   }
-  function toggleProject(id){
+  function toggleProject(id, force){
     haptic(12);
+    // A project scheduled to start later is not startable by tapping - the
+    // press opens the question instead. Checked before the clock-in prompt so
+    // an early tap does not also drag the work day into it. Only starting is
+    // gated: whatever is already running can always be stopped.
+    if(startAction(projects, activeId, id, force)==="ask"){
+      setStartAsk(findProj(projects, id)); return;
+    }
     // If clocking in opened the prompt, stop here: the project would otherwise
     // start against a work day nobody has chosen yet.
     if(!atWorkStart && !clockIn()) return;
@@ -6010,6 +6252,23 @@ export default function App(){
       if(activeId) finalizeProject(now);
       setActiveId(id); setActiveStart(now); setElapsed(0); setInterrupting(false);
     }
+  }
+  // Started early. The start on record moves to now, or the card would go on
+  // reading as scheduled while its timer runs, and the button would grey again
+  // the moment it was stopped.
+  function startPendingNow(p){
+    var now=Date.now();
+    setProjects(function(prev){ return prev.map(function(x){
+      return x.id===p.id ? Object.assign({},x,{ startAt:now }) : x; }); });
+    setStartAsk(null);
+    toggleProject(p.id, true);
+  }
+  // The plan was wrong rather than the timing. Nothing starts.
+  function reschedulePending(p, ts){
+    setProjects(function(prev){ return prev.map(function(x){
+      return x.id===p.id ? Object.assign({},x,{ startAt:ts }) : x; }); });
+    setStartAsk(null);
+    haptic(10);
   }
   function clockOut(){
     haptic([20,50,20]);
@@ -6638,6 +6897,10 @@ export default function App(){
       matchAsk && React.createElement(MatchTasksModal, { proj:matchAsk.proj, tasks:matchAsk.tasks,
         onMatch:function(chosen){ doMatchTasks(matchAsk.proj, chosen); },
         onLeave:function(){ setMatchAsk(null); } }),
+      startAsk && React.createElement(StartAheadModal, { proj:startAsk,
+        onStartNow:function(){ startPendingNow(startAsk); },
+        onReschedule:function(ts){ reschedulePending(startAsk, ts); },
+        onWait:function(){ setStartAsk(null); } }),
       closeOut && React.createElement(CloseProjectModal, { proj:closeOut.proj, blockers:closeOut.blockers,
         onConfirm:function(note){ doCloseOut(closeOut.proj, note); },
         onClose:function(){ setCloseOut(null); } }),
