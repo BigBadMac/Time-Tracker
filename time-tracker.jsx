@@ -7,9 +7,15 @@ var LANES = {
   SIDE:     "Side Projects"
 };
 var DEFAULT_META = {
-  "Daily Activity":  { label:"Daily Activities", accent:"#4A9C6B", bg:"#0A1A0A", dim:"#1A3A1A" },
-  "Projects":        { label:"Projects",          accent:"#4B8EC8", bg:"#0A141F", dim:"#1A3050" },
-  "Side Projects":   { label:"Side Projects",     accent:"#9B6DD6", bg:"#140A1F", dim:"#3A1A5C" }
+  "Daily Activity":  { label:"First Lane",  accent:"#4A9C6B", bg:"#0A1A0A", dim:"#1A3A1A" },
+  "Projects":        { label:"Second Lane", accent:"#4B8EC8", bg:"#0A141F", dim:"#1A3050" }
+};
+// Working names for the tutorial: generic enough for a shop floor, an office
+// or a workshop to recognise, and specific enough to read as real work.
+var TEST_META = {
+  "Daily Activity":  { label:"Daily Routine",    accent:"#4A9C6B", bg:"#0A1A0A", dim:"#1A3A1A" },
+  "Projects":        { label:"Current Jobs",     accent:"#4B8EC8", bg:"#0A141F", dim:"#1A3050" },
+  "Side Projects":   { label:"When Time Allows", accent:"#9B6DD6", bg:"#140A1F", dim:"#3A1A5C" }
 };
 var LANE_COLORS = [
   { accent:"#4A9C6B", bg:"#0A1A0A", dim:"#1A3A1A", label:"Green"  },
@@ -21,7 +27,11 @@ var LANE_COLORS = [
   { accent:"#4BC8C4", bg:"#051A1A", dim:"#104A4A", label:"Teal"   },
   { accent:"#C84B4B", bg:"#1A0505", dim:"#4A1010", label:"Red"    }
 ];
-var DEFAULT_ORDER = ["Daily Activity","Projects","Side Projects"];
+// First run: two lanes, named after what they are. A new board arrives almost
+// empty, and the names teach the vocabulary before any examples do.
+var DEFAULT_ORDER = ["Daily Activity","Projects"];
+// The tutorial has its own lanes, so learning in it cannot touch a real board.
+var TEST_ORDER = ["Daily Activity","Projects","Side Projects"];
 var PRESET_BREAKS = ["Morning Break","Lunch","Afternoon Break","End of Day"];
 var DEFAULT_DIST_PRESETS = ["Phone Call","Walk-in Visitor","Crew Question","Machine Issue"];
 
@@ -346,30 +356,117 @@ function getDescendantIds(projects, id){
 }
 
 // ---- SAMPLE DATA -------------------------------------------------------------
+// Two baselines, with different jobs.
+//
+// FIRST RUN is deliberately almost empty, and its records are named after
+// WHAT THEY ARE. A new board should not arrive full of someone else's work to
+// delete, and a first-time user needs the vocabulary before the examples:
+// seeing "First Stage" sitting under "First Project" inside "First Lane"
+// teaches the nesting in one glance. Two lanes, so a lane reads as one of
+// several rather than as the whole screen.
 var REAL_PROJECTS = [
-  { id:1, name:"Label Printing", lane:"Daily Activity", notes:"", order:0, parentId:null, stages:[] },
-  { id:2, name:"Laminating",     lane:"Daily Activity", notes:"", order:1, parentId:null, stages:[] },
-  { id:3, name:"Crew Training",  lane:"Projects",       notes:"", order:0, parentId:null, stages:[] }
+  { id:1, name:"First Project",  lane:"Daily Activity", notes:"", order:0, parentId:null,
+    role:"project", kind:"ongoing",
+    stages:[ {id:"fs1", label:"First Stage", done:false, doneAt:null, note:""} ] },
+  { id:2, name:"Second Project", lane:"Projects", notes:"", order:0, parentId:null,
+    role:"project", kind:"ongoing",
+    stages:[ {id:"ss1", label:"Second Stage", done:false, doneAt:null, note:""} ] },
+  { id:3, name:"Second Task",    lane:"Projects", notes:"", order:0, parentId:2,
+    role:"task", kind:"ongoing", stages:[] }
 ];
+
+// THE TUTORIAL is the full demonstration: one clear example of every feature
+// and nothing duplicated. Names are generic on purpose - a shop floor, an
+// office and a workshop should all recognise them.
+//
+// Times are relative to now, so the tutorial always looks current whoever
+// opens it and whenever. That means help pages must not quote specific
+// figures, because the numbers move with the day.
+var DAY_MS = 86400000;
+function tutAt(daysAgo, hour, min){
+  var d=new Date(); d.setDate(d.getDate()-daysAgo); d.setHours(hour, min||0, 0, 0);
+  return d.getTime();
+}
+// Bumped whenever the tutorial baseline changes: the tutorial's stores are
+// only seeded when empty, so without a version a device that ran the tutorial
+// once would keep its first copy forever.
+var TUTORIAL_SEED = "2026-09-milestones";
 var TEST_PROJECTS = [
-  { id:101, name:"Morning Standup",     lane:"Daily Activity", notes:"Daily sync",    order:0, parentId:null, stages:[] },
-  { id:102, name:"Equipment Check",     lane:"Daily Activity", notes:"Floor walk",    order:1, parentId:null, stages:[] },
-  { id:103, name:"Safety Report Q3",    lane:"Projects",       notes:"Quarterly doc", order:0, parentId:null,
+  // The simplest thing there is: no stages, no end, just work you start.
+  { id:101, name:"Start-of-day checks", lane:"Daily Activity", notes:"Walk the floor before anything else",
+    order:0, parentId:null, role:"project", kind:"ongoing", stages:[] },
+  // Scheduled later today, so the greyed Start and the "Starts at" chip show.
+  { id:102, name:"Shift handover", lane:"Daily Activity", notes:"Hand the board to the next shift",
+    order:1, parentId:null, role:"project", kind:"ongoing",
+    startAt:(function(){ var d=new Date(); d.setHours(23,30,0,0); return d.getTime(); })(), stages:[] },
+  // Finite, with an end date and a part-finished run of stages.
+  { id:103, name:"Install new workbench", lane:"Projects", notes:"Bay 2, replacing the old one",
+    order:0, parentId:null, role:"project", kind:"finite",
+    startAt:tutAt(4, 8, 0), endAt:tutAt(-6, 17, 0),
+    // A milestone tracker, so the tutorial shows one in every state at once:
+    // met early, met late, missed, and still to come - and one step that is
+    // met automatically because its target (Clear the old bench) is closed.
+    milestones:[
+      { id:"tm1", label:"Bay cleared",  dueAt:tutAt(3, 12, 0), targets:[{kind:"project", id:105}], doneAt:null, note:"Old bench out and the floor swept" },
+      { id:"tm2", label:"Parts arrive", dueAt:tutAt(2, 9, 0),  targets:[], doneAt:tutAt(1, 15, 30), note:"" },
+      { id:"tm3", label:"Frame up",     dueAt:tutAt(1, 17, 0), targets:[], doneAt:null, note:"Needs the sparky on site" },
+      { id:"tm4", label:"Fit and level",dueAt:tutAt(-4, 17, 0),targets:[], doneAt:null, note:"" },
+      { id:"tm5", label:"Sign-off",     dueAt:tutAt(-9, 12, 0),targets:[], doneAt:null, note:"" }
+    ],
     stages:[
-      {id:"s1",label:"Gather incident data",   done:true,  doneAt:Date.now()-86400000*3, note:"Pulled from logs"},
-      {id:"s2",label:"Risk assessment",         done:true,  doneAt:Date.now()-86400000,   note:""},
-      {id:"s3",label:"Management review",       done:false, doneAt:null, note:""},
-      {id:"s4",label:"Submit to compliance",    done:false, doneAt:null, note:""}
+      {id:"t1", label:"Measure up",  done:true,  doneAt:tutAt(4, 9, 30), note:"2.4m x 900"},
+      {id:"t2", label:"Order parts", done:true,  doneAt:tutAt(3, 11, 0), note:""},
+      {id:"t3", label:"Build",       done:false, doneAt:null, note:""},
+      {id:"t4", label:"Fit and level", done:false, doneAt:null, note:""}
     ]},
-  { id:104, name:"Risk Assessment",     lane:"Projects", notes:"Section 2",    order:0, parentId:103, stages:[] },
-  { id:105, name:"Incident Log Review", lane:"Projects", notes:"Last 90 days", order:1, parentId:103, stages:[] },
-  { id:106, name:"New Hire Onboarding", lane:"Projects", notes:"3 new hires",  order:1, parentId:null,
-    stages:[
-      {id:"s5",label:"Paperwork",     done:false,doneAt:null,note:""},
-      {id:"s6",label:"Badges issued", done:false,doneAt:null,note:""},
-      {id:"s7",label:"Safety walkthrough", done:false,doneAt:null,note:""}
-    ]},
-  { id:107, name:"Process Improvement", lane:"Side Projects", notes:"Label workflow", order:0, parentId:null, stages:[] }
+  // A nested PROJECT and a nested TASK, side by side - the only way the
+  // difference between the two is visible on screen.
+  { id:104, name:"Electrical hookup", lane:"Projects", notes:"Needs the sparky booked",
+    order:0, parentId:103, role:"project", kind:"finite", stages:[],
+    // A nested tracker: its steps roll up onto the parent's line, the lane's
+    // and the board's, which is what makes those lines worth looking at.
+    milestones:[
+      { id:"te1", label:"Sparky booked", dueAt:tutAt(0, 16, 0), targets:[], doneAt:null, note:"" },
+      { id:"te2", label:"First fix",     dueAt:tutAt(-6, 12, 0),targets:[], doneAt:null, note:"" }
+    ] },
+  // Closed out: this is what makes the "Bay cleared" milestone read as met
+  // without anyone touching the milestone itself - the everyday path.
+  { id:105, name:"Clear the old bench", lane:"Projects", notes:"",
+    order:1, parentId:103, role:"task", kind:"ongoing", stages:[],
+    closedAt:tutAt(3, 10, 15), closedNote:"Bench out, floor swept", closedOutcome:"done" },
+  { id:106, name:"Weekly inspection", lane:"Projects", notes:"Every Friday",
+    order:1, parentId:null, role:"project", kind:"ongoing", stages:[] },
+  { id:107, name:"Sort the tool wall", lane:"Side Projects", notes:"When there is a quiet hour",
+    order:0, parentId:null, role:"project", kind:"ongoing", stages:[] }
+];
+// Seeded history, so Reports, the Day Summary and the disruption badges have
+// real numbers in the one place meant for demonstrating them. Without this the
+// tutorial shows every screen empty.
+function tutLog(id, pid, name, lane, day, h, m, mins, parentId, parentName){
+  var st=tutAt(day, h, m);
+  return { id:id, type:"project", projectId:pid, projectName:name, lane:lane,
+           startTime:st, endTime:st+mins*60000, duration:mins*60000,
+           day:new Date(st).toDateString(), parentId:parentId||null, parentName:parentName||null };
+}
+var TEST_LOGS = [
+  tutLog("tl1", 101, "Start-of-day checks", "Daily Activity", 1, 7, 5, 25),
+  tutLog("tl2", 103, "Install new workbench", "Projects",      1, 7, 40, 145),
+  tutLog("tl3", 105, "Clear the old bench", "Projects",        1, 13, 0, 50, 103, "Install new workbench"),
+  tutLog("tl4", 106, "Weekly inspection", "Projects",          1, 14, 10, 35),
+  tutLog("tl5", 101, "Start-of-day checks", "Daily Activity",  0, 7, 10, 20),
+  tutLog("tl6", 103, "Install new workbench", "Projects",      0, 7, 45, 95)
+];
+var TEST_DIST = [
+  { id:"td1", projectId:103, projectName:"Install new workbench",
+    startTime:tutAt(1, 9, 20), endTime:tutAt(1, 9, 32), duration:12*60000, note:"Machine Issue" },
+  { id:"td2", projectId:101, projectName:"Start-of-day checks",
+    startTime:tutAt(1, 7, 15), endTime:tutAt(1, 7, 19), duration:4*60000, note:"Phone Call" },
+  { id:"td3", projectId:103, projectName:"Install new workbench",
+    startTime:tutAt(0, 8, 30), endTime:tutAt(0, 8, 52), duration:22*60000, note:"Walk-in Visitor" }
+];
+var TEST_BREAKS = [
+  { id:"tb1", label:"Lunch", startTime:tutAt(1, 12, 0), endTime:tutAt(1, 12, 30), duration:30*60000,
+    day:new Date(tutAt(1,12,0)).toDateString() }
 ];
 
 // ---- HOOKS -------------------------------------------------------------------
@@ -414,6 +511,67 @@ function markScrolling(){
 // Gesture: distinguishes single tap from double tap.
 // Single fires after a short delay if no second tap arrives; double fires immediately.
 // Blocked entirely while the page is scrolling.
+// Tap or hold. A tap fires onTap on release; holding past holdMs fires
+// onHold instead and the release is swallowed, so a hold never also taps.
+// Pointer events cover mouse and touch alike. Movement past a few px cancels
+// the hold, so a scroll that starts on the button is not read as one.
+// Every hold shows the same charging fill (HoldFill): a hold with no feedback
+// feels broken for the half-second before anything happens, and people let
+// go; the fill says it is working and how much longer to hold. An accidental
+// brush starts it, lifting empties it, nothing happened. The hook reports
+// `holding` so the control it is on can draw the fill - no control decides
+// for itself whether to show one.
+function useHold(onTap, onHold, holdMs){
+  holdMs = holdMs || 500;
+  var timer=useRef(null), held=useRef(false), start=useRef(null);
+  var tapRef=useRef(onTap), holdRef=useRef(onHold);
+  var holdingS=useState(false); var setHolding=holdingS[1]; var holding=holdingS[0];
+  tapRef.current=onTap; holdRef.current=onHold;
+  function clear(){ if(timer.current){ clearTimeout(timer.current); timer.current=null; } setHolding(false); }
+  return {
+    holding:holding, holdMs:holdMs,
+    handlers:{
+      onPointerDown:function(e){
+        held.current=false; start.current={ x:e.clientX, y:e.clientY };
+        clear(); setHolding(true);
+        timer.current=setTimeout(function(){ timer.current=null; held.current=true; setHolding(false); haptic(18); if(holdRef.current) holdRef.current(); }, holdMs);
+      },
+      onPointerMove:function(e){
+        if(!start.current || !timer.current) return;
+        if(Math.abs(e.clientX-start.current.x)>8 || Math.abs(e.clientY-start.current.y)>8) clear();
+      },
+      onPointerUp:function(){ var wasTimed=!!timer.current; clear(); if(wasTimed && !held.current && tapRef.current) tapRef.current(); },
+      onPointerLeave:function(){ clear(); },
+      onPointerCancel:function(){ clear(); },
+      // the click that follows a pointer sequence is handled above; swallow it
+      onClick:function(e){ if(e && e.preventDefault) e.preventDefault(); },
+      onContextMenu:function(e){ if(e && e.preventDefault) e.preventDefault(); }
+    }
+  };
+}
+// A control that is worked by holding. One component, so every hold in the
+// app looks and behaves the same: the fill charges for holdMs, a release
+// before that is a tap (which may do nothing, for a Delete), a release after
+// it never also taps. Content sits above the fill.
+var HOLD_DELETE_MS = 1500;   // "a couple of seconds" before a Delete opens
+function HoldButton(props){
+  var hold=useHold(props.onTap||null, props.onHold, props.holdMs);
+  var style=Object.assign({ position:"relative",overflow:"hidden",cursor:"pointer",
+    touchAction:"manipulation",userSelect:"none",WebkitUserSelect:"none",WebkitTouchCallout:"none" }, props.style||{});
+  var attrs=Object.assign({ style:style, disabled:!!props.disabled }, props.attrs||{}, props.disabled?{}:hold.handlers);
+  return React.createElement("button", attrs,
+    React.createElement(HoldFill, { holding:hold.holding, ms:hold.holdMs, color:props.fill }),
+    React.createElement("span", { style:{position:"relative",display:"block"} }, props.children));
+}
+// The fill. Sits behind a control's content (the control must be
+// position:relative with overflow hidden) and grows across it for the length
+// of the hold; snaps back to nothing when the hold is released or cancelled.
+function HoldFill(props){
+  return React.createElement("div", { "data-holdfill":props.holding?"1":"0", "aria-hidden":true,
+    style:{position:"absolute",left:0,top:0,bottom:0,pointerEvents:"none",
+           width:props.holding?"100%":"0%",background:props.color||S.successBg,
+           transition:props.holding?("width "+props.ms+"ms linear"):"none"} });
+}
 function useTaps(onSingle, onDouble, delayMs){
   delayMs = delayMs || 300;
   var timer = useRef(null);
@@ -464,9 +622,23 @@ function Mono(props){
 // visible however long the content is. It mirrors the app chrome: header at
 // the bottom puts the bar at the bottom, left-handed mode reverses the button
 // order so the primary lands under the thumb.
+// Save sits under the thumb and Cancel away from it: Save right in right-handed
+// mode, Save left in left-handed. Children are always written Save first and
+// Cancel second, and the direction does the mirroring - so reading the source
+// never depends on which hand is set.
+//
+// This used to be the other way round, which put Cancel under the thumb on
+// both settings.
+// Always row-reverse. The app root flips to dir="rtl" for a left-hander, and
+// that ALREADY mirrors every flex row; flipping here as well cancelled it out,
+// so Save sat on the right for both hands. Children are written Save, Cancel,
+// Delete: row-reverse puts Save at the end the thumb is on under either
+// direction, and Delete at the far corner.
+function ACTION_DIR(){ return "row-reverse"; }
+function ACTION_ROW(){ return { display:"flex", gap:"0.5rem", flexDirection: ACTION_DIR() }; }
 function ModalActions(props){
   var st={ position:"sticky", zIndex:5, display:"flex", gap:"0.6rem", alignItems:"stretch",
-           flexDirection: UI.left ? "row-reverse" : "row",
+           flexDirection: ACTION_DIR(),
            background:S.menuBg, border:"1px solid "+S.border, borderRadius:S.radius,
            padding:"0.55rem", boxShadow:"0 8px 32px rgba(0,0,0,0.45)" };
   if(UI.bottom){ st.bottom="-1.25rem"; st.order=9999; st.marginTop="0.9rem"; }
@@ -476,8 +648,11 @@ function ModalActions(props){
 // Built per render: a module-level constant would freeze the tokens of
 // whatever palette was active at load time and ignore every later theme or
 // mode switch - exactly how the Settings cancel went wrong in light mode.
-function MODAL_CANCEL(){ return { flex:1,background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.85rem",color:S.textDim,cursor:"pointer",fontFamily:S.fontBody }; }
-function MODAL_SAVE(){ return { flex:1,background:S.infoBg,border:"2.5px solid "+S.actionBdr,borderRadius:S.radius,padding:"0.85rem",color:S.infoText,fontWeight:700,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.95rem" }; }
+function MODAL_CANCEL(){ return { flex:1,background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.85rem",color:S.textDim,cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:MODAL_BTN_FONT }; }
+// One size for every modal action button. Cancel was inheriting the browser
+// default at normal weight and sat too light against the panel to find quickly.
+var MODAL_BTN_FONT = "1.05rem";
+function MODAL_SAVE(){ return { flex:1,background:S.infoBg,border:"2.5px solid "+S.actionBdr,borderRadius:S.radius,padding:"0.85rem",color:S.infoText,fontWeight:700,cursor:"pointer",fontFamily:S.fontBody,fontSize:MODAL_BTN_FONT }; }
 
 function Modal(props){
   var wide = props.wide;
@@ -488,15 +663,32 @@ function Modal(props){
               backdropFilter:S.scrimBlur,WebkitBackdropFilter:S.scrimBlur }
     },
       React.createElement("div", { "data-surface":"modal",
-        style:{ background:S.modalBg,border:"2px solid "+S.border,borderRadius:S.radius2,padding:"1.25rem",width:"100%",maxWidth:wide?"520px":"400px",maxHeight:"85vh",overflowY:"auto",
+        // overscroll-behavior:contain stops the sheet handing a gesture to the
+        // page when it has nowhere left to scroll.
+        "data-modal-panel":true,
+        // shrinkBy: while an overlay sits over the foot of the viewport (the
+        // outline's controller), the sheet gives up that height rather than
+        // padding under it - so a sticky action row lands ABOVE the overlay.
+        style:{ background:S.modalBg,border:"2px solid "+S.border,borderRadius:S.radius2,
+                padding:"1.25rem",
+                width:"100%",maxWidth:wide?"520px":"400px",
+                maxHeight:props.shrinkBy?("calc(85vh - "+props.shrinkBy+")"):"85vh",
+                alignSelf:props.shrinkBy?"flex-start":undefined,
+                marginTop:props.shrinkBy?"1.5rem":undefined,
+                overflowY:"auto",overscrollBehavior:"contain",
                 display:"flex",flexDirection:"column" }
       },
-        React.createElement("div", { style:{display:"flex",justifyContent:UI.left?"flex-end":"flex-start",alignItems:"center",marginBottom:"1rem"} },
+        React.createElement("div", { style:{display:"flex",justifyContent:UI.left?"flex-end":"flex-start",alignItems:"center",gap:"0.5rem",marginBottom:"1rem"} },
+          React.createElement(ModalGlyph, { title:props.title }),
           React.createElement("span", { style:{fontWeight:700,fontSize:"1rem",color:S.text} }, props.title)
         ),
         props.children,
         // Modals that keep their own action row pass ownActions; every other
         // modal gets a floating bar with Save (when provided) and Cancel.
+        // A sheet's own buttons - Save, Cancel, Delete, a hold - ride in the
+        // same sticky, mirrored, header-following box as the built-in pair.
+        // The rule: no sheet draws an action row inline any more.
+        props.actions && React.createElement(ModalActions, null, props.actions),
         !props.ownActions && React.createElement(ModalActions, null,
           props.onSave && React.createElement("button", { onClick:props.onSave, style:MODAL_SAVE() }, props.saveLabel||"Save"),
           React.createElement("button", { onClick:props.onClose, style:MODAL_CANCEL() }, props.cancelLabel||"Cancel")
@@ -511,7 +703,9 @@ function Modal(props){
 // away - so closing a modal left the app stuck larger than it started, needing
 // a manual pinch. Every focusable field in the app is pinned at 16px for that
 // reason; the stylesheet enforces it for any that set their own size.
-var INPUT_STYLE = { direction:"ltr",textAlign:"left",width:"100%",background:"#0A0A16",border:"2px solid "+S.border,borderRadius:S.radius3,padding:"0.65rem 0.85rem",color:S.text,fontFamily:S.fontBody,fontSize:"16px",outline:"none" };
+// border-box, or width:100% plus the padding and border overflows its
+// container by ~30px - every text input in the app ran past its sheet's edge.
+var INPUT_STYLE = { direction:"ltr",textAlign:"left",width:"100%",boxSizing:"border-box",background:"#0A0A16",border:"2px solid "+S.border,borderRadius:S.radius3,padding:"0.65rem 0.85rem",color:S.text,fontFamily:S.fontBody,fontSize:"16px",outline:"none" };
 var LABEL_STYLE = { display:"block",color:S.textDim,fontSize:"0.75rem",marginBottom:"0.35rem",textTransform:"uppercase",letterSpacing:"0.08em" };
 
 // ---- DESIGN TOKENS -----------------------------------------------------------
@@ -548,6 +742,9 @@ var SCHEMES = {
       actionText:"#4B8EC8", arrangeText:"#9B6DD6", arrangeHint:"#7A68C8",
       testFrameBg:"#3A2A00", testFrameInk:"#C8A030", statusEdgeOn:"#1A3050",
       statusEdgeBrk:"#2A2010", mutedGlyph:"#666666", dragGlyph:"#555555",
+      // Milestone statuses, and the off-day band on a milestone line. Darker
+      // in light mode: the dark-mode green and amber wash out on a pale surface.
+      msMet:"#4A9C6B", msLate:"#C8A030", msMissed:"#CC5050", msUpcoming:"#6A6A8A", msOffDay:"rgba(255,255,255,0.05)",
       onAccent:"#FFFFFF", addDisabled:"#252538", runningTint:"#0A1420"
     },
     light: {
@@ -576,6 +773,9 @@ var SCHEMES = {
       actionText:"#1E5A9A", arrangeText:"#6A3EA8", arrangeHint:"#7A5AB8",
       testFrameBg:"#F0E4C0", testFrameInk:"#8A6A10", statusEdgeOn:"#A8BCD8",
       statusEdgeBrk:"#D8C89A", mutedGlyph:"#8A8AA0", dragGlyph:"#9A9AAE",
+      // Milestone statuses, and the off-day band on a milestone line. Darker
+      // in light mode: the dark-mode green and amber wash out on a pale surface.
+      msMet:"#2E7D4F", msLate:"#9A7A10", msMissed:"#B23A3A", msUpcoming:"#7A7A9A", msOffDay:"rgba(0,0,0,0.08)",
       onAccent:"#FFFFFF", addDisabled:"#C8C8DC", runningTint:"#E4ECF8"
     }
   },
@@ -615,6 +815,7 @@ var SCHEMES = {
       actionBdr:"#FF3ECF", actionText:"#FF6EE0", arrangeText:"#A02EFF",
       arrangeHint:"#7A2ECC", testFrameBg:"#2A0A2A", testFrameInk:"#FFC61E",
       statusEdgeOn:"#2A1050", statusEdgeBrk:"#2A2000", mutedGlyph:"#8A5AB8",
+      msMet:"#4A9C6B", msLate:"#C8A030", msMissed:"#CC5050", msUpcoming:"#6A6A8A", msOffDay:"rgba(255,255,255,0.05)",
       dragGlyph:"#7A4AA8", onAccent:"#FFFFFF", addDisabled:"#2A1240",
       runningTint:"#16062A"
     },
@@ -641,6 +842,7 @@ var SCHEMES = {
       actionBdr:"#C000A0", actionText:"#A00088", arrangeText:"#8000B0",
       arrangeHint:"#9A30C0", testFrameBg:"#FFD6E5", testFrameInk:"#B04A00",
       statusEdgeOn:"#F6A9DC", statusEdgeBrk:"#D2C63C", mutedGlyph:"#9A5AB8",
+      msMet:"#2E7D4F", msLate:"#9A7A10", msMissed:"#B23A3A", msUpcoming:"#7A7A9A", msOffDay:"rgba(0,0,0,0.08)",
       dragGlyph:"#A86AC8", onAccent:"#FFFFFF", addDisabled:"#F59ADF",
       runningTint:"#FADEF2"
     }
@@ -682,6 +884,9 @@ var SCHEMES = {
       arrangeText:"#0091C3", arrangeHint:"#0084AA", testFrameBg:"#372B0F",
       testFrameInk:"#C2A152", statusEdgeOn:"#173341", statusEdgeBrk:"#2B1F1A",
       mutedGlyph:"#666666", dragGlyph:"#555555", onAccent:"#F6F6F6",
+      // Milestone statuses, and the off-day band on a milestone line. Darker
+      // in light mode: the dark-mode green and amber wash out on a pale surface.
+      msMet:"#4A9C6B", msLate:"#C8A030", msMissed:"#CC5050", msUpcoming:"#6A6A8A", msOffDay:"rgba(255,255,255,0.05)",
       addDisabled:"#1E2832", runningTint:"#09151A"
     },
     light: {
@@ -708,6 +913,9 @@ var SCHEMES = {
       arrangeText:"#006395", arrangeHint:"#0078A2", testFrameBg:"#EDE4C9",
       testFrameInk:"#866B2E", statusEdgeOn:"#A7BEC9", statusEdgeBrk:"#E0C3B1",
       mutedGlyph:"#818E98", dragGlyph:"#929DA7", onAccent:"#F6F6F6",
+      // Milestone statuses, and the off-day band on a milestone line. Darker
+      // in light mode: the dark-mode green and amber wash out on a pale surface.
+      msMet:"#2E7D4F", msLate:"#9A7A10", msMissed:"#B23A3A", msUpcoming:"#7A7A9A", msOffDay:"rgba(0,0,0,0.08)",
       addDisabled:"#C1CBD5", runningTint:"#E3EDF1"
     }
   },
@@ -748,6 +956,9 @@ var SCHEMES = {
       arrangeText:"#C4648D", arrangeHint:"#AC5C87", testFrameBg:"#342C13",
       testFrameInk:"#FFECA1", statusEdgeOn:"#302E40", statusEdgeBrk:"#242218",
       mutedGlyph:"#A9A9A9", dragGlyph:"#969696", onAccent:"#F6F6F6",
+      // Milestone statuses, and the off-day band on a milestone line. Darker
+      // in light mode: the dark-mode green and amber wash out on a pale surface.
+      msMet:"#4A9C6B", msLate:"#C8A030", msMissed:"#CC5050", msUpcoming:"#6A6A8A", msOffDay:"rgba(255,255,255,0.05)",
       addDisabled:"#2B252E", runningTint:"#13131A"
     },
     light: {
@@ -774,6 +985,9 @@ var SCHEMES = {
       arrangeText:"#94325F", arrangeHint:"#A35077", testFrameBg:"#8DA292",
       testFrameInk:"#C6B077", statusEdgeOn:"#BFAEEA", statusEdgeBrk:"#8EA69A",
       mutedGlyph:"#D8CFDB", dragGlyph:"#E8E0EB", onAccent:"#F6F6F6",
+      // Milestone statuses, and the off-day band on a milestone line. Darker
+      // in light mode: the dark-mode green and amber wash out on a pale surface.
+      msMet:"#2E7D4F", msLate:"#9A7A10", msMissed:"#B23A3A", msUpcoming:"#7A7A9A", msOffDay:"rgba(0,0,0,0.08)",
       addDisabled:"#8E8185", runningTint:"#A8A2A6"
     }
   }
@@ -783,6 +997,47 @@ var SCHEMES = {
 // of an outline, variation at several scales at once (broad mineral mottling
 // under fine grain), and one consistent light source across every stone in the
 // scene. A single uniform speckle gives you sandpaper.
+// ---- READABLE INK --------------------------------------------------------
+// A lane accent is chosen to work as a border and a fill. That is a different
+// job from being read as text: measured on the painted result, the accents sit
+// around 5.1-5.7:1 on the dark card and only 3.2-3.6:1 on the light one, which
+// is under AA for anything smaller than 18.66px bold - both title sizes.
+//
+// So the accent is nudged toward the surface's own text colour, one step at a
+// time, and stopped the moment it clears the target. In dark mode nothing
+// moves at all; in light mode it darkens just enough to read.
+function relLum(c){
+  var f=function(v){ v/=255; return v<=0.03928 ? v/12.92 : Math.pow((v+0.055)/1.055,2.4); };
+  return 0.2126*f(c[0])+0.7152*f(c[1])+0.0722*f(c[2]);
+}
+function contrastOf(a,b){
+  var L1=relLum(a), L2=relLum(b), hi=Math.max(L1,L2), lo=Math.min(L1,L2);
+  return (hi+0.05)/(lo+0.05);
+}
+function hexRGB(h){
+  var x=String(h||"").replace("#","");
+  if(x.length===3) x=x[0]+x[0]+x[1]+x[1]+x[2]+x[2];
+  if(x.length!==6 || /[^0-9a-fA-F]/.test(x)) return null;
+  return [parseInt(x.slice(0,2),16),parseInt(x.slice(2,4),16),parseInt(x.slice(4,6),16)];
+}
+function rgbHex(c){
+  return "#"+c.map(function(v){
+    var n=Math.max(0,Math.min(255,Math.round(v))).toString(16);
+    return n.length<2 ? "0"+n : n;
+  }).join("");
+}
+function readableInk(accent, surface, text, target){
+  var a=hexRGB(accent), s=hexRGB(surface), t=hexRGB(text);
+  // Anything unparseable is left exactly as it was rather than guessed at.
+  if(!a || !s || !t) return accent;
+  var goal=target||4.5;
+  if(contrastOf(a,s)>=goal) return accent;
+  for(var k=1;k<=12;k++){
+    var m=[a[0]+(t[0]-a[0])*k/12, a[1]+(t[1]-a[1])*k/12, a[2]+(t[2]-a[2])*k/12];
+    if(contrastOf(m,s)>=goal) return rgbHex(m);
+  }
+  return text;
+}
 function rgba(hex,a){
   hex=String(hex).replace("#","");
   if(hex.length===3) hex=hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
@@ -1057,6 +1312,10 @@ function applyTokens(settings){
   S.mode=mode;
   S.lanes = sch.lanes || LANE_COLORS;
   S.bg0=c.bg0; S.bg1=c.bg1; S.bg2=c.bg2; S.bg3=c.bg3; S.menuBg=c.menuBg;
+  // Milestone statuses and the off-day band. applyTokens copies keys by name,
+  // so a token added to the scheme tables is invisible until it is copied
+  // here too - the line drew black the first time for exactly that reason.
+  S.msMet=c.msMet; S.msLate=c.msLate; S.msMissed=c.msMissed; S.msUpcoming=c.msUpcoming; S.msOffDay=c.msOffDay;
   S.border=c.border; S.borderBright=c.borderBright;
   S.text=c.text; S.textDim=c.textDim; S.textMuted=c.textMuted;
   S.titleText=c.titleText; S.ink=c.ink;
@@ -1115,6 +1374,204 @@ function GearSVG(props){
       React.createElement("polygon", { points:gearPts(c,c,outerR,innerR,10,0.38), fill:S.bg1, stroke:col, strokeWidth:"1.2", strokeLinejoin:"round" }),
       React.createElement("circle", { cx:c, cy:c, r:holeR, fill:S.bg0, stroke:col, strokeWidth:"1.2" })
     )
+  );
+}
+
+// ---- MENU GLYPHS -------------------------------------------------------------
+// One table, one component, so the settings menu cannot drift into a mix of
+// styles. Every glyph is stroked line art on a 28-unit grid at 2.5 weight with
+// round caps and joins and no fills - the clock is the reference and the rest
+// of the set was drawn to match it.
+//
+// Weights under 2.5 are deliberate, never decoration: a part that should sit
+// behind the main shape - a road's far dashes, a ripple spreading out - is
+// drawn lighter so it recedes instead of competing with the thing in front.
+//
+// Every glyph must fit 0..28 including its stroke. A composition of rotated or
+// arced parts has a bounding box nowhere near the numbers in its path data, so
+// measure a render rather than trusting the coordinates. The Interface glyph
+// shipped clipped once because it was eyeballed. See HANDOVER.
+//
+// Entries: ["p", d, width] path, ["c", cx, cy, r, width] circle,
+//          ["r", x, y, w, h, rx, width] rect.
+var MENU_GLYPHS = {
+  // A plus in a ring, rather than a bare plus that reads as a maths symbol.
+  add: [["c",14,14,10.5,2.5], ["p","M14 9V19 M9 14H19",2.5]],
+  // A road running to the horizon. The dashes shorten, their gaps tighten and
+  // each is lighter than the one below: evenly spaced dashes read as a ladder
+  // and fight the perspective the converging edges build.
+  lanes: [["p","M3.6 25.6 Q4.8 14.9 11.2 4.2",2.5], ["p","M24.4 25.6 Q18.0 14.9 16.8 4.2",2.5],
+          ["p","M13.8 24.7 L12.9 19.2",2.3], ["p","M12.7 16.7 L12.8 12.2",2.1],
+          ["p","M13.0 10.0 L13.5 6.3",1.9]],
+  clock: [["c",14,14,11,2.5], ["p","M14 8 L14 14 L18 17",2.5]],
+  summary: [["r",5,3,18,22,2.5,2.5], ["p","M9.5 9.5H18.5 M9.5 14H18.5 M9.5 18.5H15",2.5]],
+  reports: [["r",3,3,22,22,3.5,2.5], ["p","M9 19V12 M14 19V8.5 M19 19V15",2.5]],
+  archive: [["r",3,4,22,5.5,1.8,2.5], ["p","M5 9.5V23A1 1 0 0 0 6 24H22A1 1 0 0 0 23 23V9.5",2.5],
+            ["p","M11 14.5H17",2.5]],
+  // A disk, not a cloud: the backup is a file through the share sheet, and a
+  // cloud would promise storage this app does not have.
+  backup: [["r",3.5,3.5,21,21,3,2.5], ["r",9,3.5,10,8,1,2.5], ["p","M8 24V17H20V24",2.5]],
+  extensions: [["r",3.5,3.5,9.5,9.5,2,2.5], ["r",15,3.5,9.5,9.5,2,2.5],
+               ["r",3.5,15,9.5,9.5,2,2.5], ["p","M19.75 16.5V23 M16.5 19.75H23",2.5]],
+  arrange: [["p","M10 9H24 M10 14H24 M10 19H24",2.5],
+            ["p","M5 6.5V21.5 M2.5 9L5 6.5L7.5 9 M2.5 19L5 21.5L7.5 19",2.5]],
+  test: [["p","M10.5 3.5V11L4 22A1.5 1.5 0 0 0 5.3 24.3H22.7A1.5 1.5 0 0 0 24 22L17.5 11V3.5",2.5],
+         ["p","M9 3.5H19",2.5], ["p","M8.5 17H19.5",2.5]],
+  "break": [["c",14,14,10.5,2.5], ["p","M11 9.5V18.5 M17 9.5V18.5",2.5]],
+  more: [["p","M4 8H24 M4 14H24 M4 20H24",2.5]],
+  // A clipboard with the set square marked on its sheet. The square is drawn
+  // on the board rather than beside it: two separate objects at this size and
+  // the triangle collapses into a pennant.
+  project: [["p","M4 8.9A2.4 2.4 0 0 1 6.4 6.5H21.6A2.4 2.4 0 0 1 24 8.9V22.6A2.4 2.4 0 0 1 21.6 25H6.4A2.4 2.4 0 0 1 4 22.6Z",2.4],
+            ["p","M10.6 6.5V5.1A1.5 1.5 0 0 1 12.1 3.6h3.8A1.5 1.5 0 0 1 17.4 5.1V6.5",2.1],
+            ["p","M8.5 20.5 L19.5 20.5 L19.5 11.5 Z",2.2]],
+  // One job, ticked.
+  task: [["r",4,4,20,20,3.5,2.5], ["p","M9 14.2 L12.6 17.8 L19.4 11",2.5]],
+  // A gauge part filled, the run ahead marked off in divisions. Square corners
+  // and a level that nearly fills the height, or it reads as a toggle switch;
+  // a gap between level and outline, or the two merge into one blob.
+  stages: [["r",2.6,8,22.8,12,2,2.5], ["f",4.85,10.25,10.45,7.5,0.6],
+           ["p","M18.02 10.75V17.25 M21.58 10.75V17.25",1.5]],
+  // A road sign on a post, planted on a ground line with two ticks - the
+  // ticks a milestone line carries along its whole length.
+  milestone: [["p","M3.5 24.5H24.5",2.5], ["p","M8 24.5V21 M20 24.5V21",2.2],
+              ["p","M14 24.5V14",2.4], ["p","M14 3.5L19.5 9L14 14.5L8.5 9Z",2.4]]
+};
+// A modal that lands you where a menu row pointed shows that row's glyph beside
+// its title, so the screen is visibly the one you tapped. Keyed by exact title.
+// Three titles are worded differently from their row but are the same
+// destination - Day Summary from Summary, Start Break from Break, Exit Test
+// Mode from Test Mode - and are mapped deliberately rather than by accident.
+//
+// Titles absent from here render with no glyph, which is the right answer for
+// the ones that never came from a menu row: confirmations, pickers, prompts.
+// Some titles carry the record's name, so they can only be matched on their
+// opening. Checked after the exact table, longest first, so a specific title
+// always beats a prefix that happens to cover it.
+var MODAL_GLYPH_PREFIX = [["Stages - ","stages"], ["Add to ","project"]];
+var MODAL_GLYPHS = {
+  "Edit Project":"project", "Edit Task":"task", "Add Task":"task",
+  "Edit Lanes":"lanes", "Time Settings":"clock",
+  "Interface":"interface", "Day Summary":"summary", "Reports":"reports",
+  "Archive":"archive", "Backup & Restore":"backup", "Extensions":"extensions",
+  "Exit Tutorial":"test", "Start Break":"break"
+};
+// A glyph in front of a title. The board is inside dir=rtl when left-handed,
+// so a flex row already lays its children right to left there - writing the
+// glyph first is all that is needed for it to land after the title on that
+// hand. An explicit UI.left conditional here would cancel the mirror out and
+// pin the glyph on one side.
+function TitleGlyph(props){
+  return React.createElement(MenuIcon, { name:props.name, size:props.size||18,
+    col:props.col||S.chromeText });
+}
+function ModalGlyph(props){
+  var title=String(props.title||"");
+  var name=MODAL_GLYPHS[title];
+  if(!name){
+    for(var i=0;i<MODAL_GLYPH_PREFIX.length;i++){
+      if(title.indexOf(MODAL_GLYPH_PREFIX[i][0])===0){ name=MODAL_GLYPH_PREFIX[i][1]; break; }
+    }
+  }
+  if(!name) return null;
+  // 20px against a 1rem title: the menu's 28 would tower over it.
+  if(name==="interface") return React.createElement(TouchSVG, { size:20, col:S.chromeText });
+  return React.createElement(MenuIcon, { name:name, size:20, col:S.chromeText });
+}
+function MenuIcon(props){
+  var size=props.size||MENU_ICON, col=props.col||S.chromeText;
+  var parts=MENU_GLYPHS[props.name]||[];
+  return React.createElement("svg", { width:size, height:size, viewBox:"0 0 28 28", fill:"none" },
+    parts.map(function(el, i){
+      var w=String(el[el.length-1]);
+      if(el[0]==="c") return React.createElement("circle", { key:i, cx:el[1], cy:el[2], r:el[3],
+        stroke:col, strokeWidth:w, fill:"none" });
+      if(el[0]==="r") return React.createElement("rect", { key:i, x:el[1], y:el[2], width:el[3],
+        height:el[4], rx:el[5], stroke:col, strokeWidth:w, fill:"none" });
+      // "f" is a solid area, not an outline - the one thing in the set that is
+      // filled, because a gauge level cannot be drawn as a stroke.
+      if(el[0]==="f") return React.createElement("rect", { key:i, x:el[1], y:el[2], width:el[3],
+        height:el[4], rx:el[5], fill:col, stroke:"none" });
+      return React.createElement("path", { key:i, d:el[1], stroke:col, strokeWidth:w,
+        strokeLinecap:"round", strokeLinejoin:"round", fill:"none" });
+    })
+  );
+}
+
+// A hand tapping: index extended at 45\u00B0 with two ripples spreading off the
+// fingertip. The Interface group, where everything about how the app looks and
+// is reached lives.
+//
+// Construction notes, because several of them are load-bearing:
+//   - The ripples are concentric with the fingertip and each one is opened
+//     along the hand's own axis, so it dies exactly where the hand begins
+//     rather than crossing it.
+//   - The underside runs straight from the heel to the thumb. An earlier
+//     version curved back into the heel to open a pocket under the thumb; at
+//     28px that pocket closed into a smudge, and the open crotch above the
+//     thumb already carries its shape.
+//   - No knuckle scallops on the trailing edge. Three bumps at this size fill
+//     in and read as a lump rather than as fingers.
+//   - The hand is drawn on its own 28-unit grid and scaled by 0.78, so its
+//     stroke is pre-divided (2.5 / 0.78) to land back on the shared 2.5.
+//     Changing the scale means changing that number too.
+// Fitted to the 28-unit box by measuring the rendered artwork and solving for
+// the scale, not by eye - the composition is a rotated hand plus two ripples,
+// and its bounding box is nowhere near the paths' own coordinates. An earlier
+// version overflowed to 28.1 x 23.3 units and shipped clipped at the corner.
+// Geometry scales; the stroke weights do not, because they are the shared
+// house weights and must land where the clock's do.
+var TOUCH_SCALE = 0.6786;
+function TouchSVG(props){
+  var size=props.size||14, col=props.col||S.chromeText;
+  var sw=(2.5/TOUCH_SCALE).toFixed(3);
+  return (
+    React.createElement("svg", { width:size, height:size, viewBox:"0 0 28 28", fill:"none" },
+      React.createElement("path", { d:"M8.72 15.88 A4.176 4.176 0 1 1 13.73 10.87",
+        stroke:col, strokeWidth:"2.2", strokeLinecap:"round", fill:"none" }),
+      React.createElement("path", { d:"M8.06 18.76 A7.134 7.134 0 1 1 16.61 10.21",
+        stroke:col, strokeWidth:"1.8", strokeLinecap:"round", fill:"none" }),
+      React.createElement("g", { transform:"translate(9.66,11.81) rotate(-45) scale("+TOUCH_SCALE+") translate(-11.65,-0.9)" },
+        React.createElement("path", { d:"M9.3 3.2a2.35 2.35 0 0 1 4.7 0V12.4h3.4a5.6 5.6 0 0 1 5.6 5.6v1.2"+
+          "a6.2 6.2 0 0 1-6.2 6.2h-2.6L3.6 16.2A2.1 2.1 0 0 1 6.4 13.3C7.6 14.3 8.7 15.7 9.1 16.8"+
+          "C9.2 17.2 9.3 17.6 9.3 18.0V3.2Z",
+          stroke:col, strokeWidth:sw, strokeLinecap:"round", strokeLinejoin:"round", fill:"none" })
+      )
+    )
+  );
+}
+
+// The settings menu reads at the size of the header buttons it drops out of:
+// 1rem labels and 28px glyphs, the same as the Clock and Disruption buttons.
+// A thumb moving from the header into the menu keeps aiming at the same target.
+var MENU_FONT = "1rem";
+var MENU_ICON = 28;
+
+// ---- MENU GROUP MODAL --------------------------------------------------------
+// A group of screens in the settings menu. These used to expand in place, which
+// pushed everything below them down and, in a 72vh scroller on a phone, off the
+// bottom - opening a group meant losing sight of the rest of the menu. A modal
+// puts the choice on its own, at full size, and closes back to the board.
+//
+// It takes a list rather than knowing its contents so both groups - and any
+// later one - are the same screen. Two hand-built versions would drift.
+function MenuGroupModal(props){
+  var title=props.title, items=props.items, onClose=props.onClose;
+  return React.createElement(Modal, { title:title, onClose:onClose, ownActions:true },
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.5rem",marginBottom:"1rem"} },
+      items.map(function(it){
+        return React.createElement("button", { key:it.label, "data-groupitem":true, onClick:it.onSelect,
+          style:{display:"flex",alignItems:"center",gap:"0.6rem",width:"100%",textAlign:"left",
+                 background:S.bg1,border:"2px solid "+S.border,borderRadius:S.radius,
+                 padding:"0.9rem 1rem",color:S.text,cursor:"pointer",
+                 fontFamily:S.fontBody,fontWeight:700,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+          it.label);
+      })
+    ),
+    React.createElement("button", { onClick:onClose,
+      style:{width:"100%",background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,
+             padding:"0.85rem",color:S.textDim,cursor:"pointer",fontFamily:S.fontBody,
+             fontWeight:600,fontSize:MENU_FONT} }, "Close")
   );
 }
 
@@ -1224,7 +1681,7 @@ function StagesModal(props){
         React.createElement("button", { onClick:addStage, disabled:!newLabel.trim(), style:{background:newLabel.trim()?meta.accent:S.addDisabled,border:"none",borderRadius:S.radius3,padding:"0 1rem",color:S.onAccent,cursor:newLabel.trim()?"pointer":"default",fontWeight:700,fontFamily:S.fontBody,fontSize:"1.1rem"} }, "+")
       ),
       React.createElement(ModalActions, null,
-        React.createElement("button", { onClick:save, style:{flex:1,background:meta.accent+"22",border:"2.5px solid "+meta.accent,borderRadius:S.radius,padding:"0.85rem",color:meta.accent,fontWeight:700,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.95rem"} }, "Save Stages"),
+        React.createElement("button", { onClick:save, style:{flex:1,background:meta.accent+"22",border:"2.5px solid "+meta.accent,borderRadius:S.radius,padding:"0.85rem",color:meta.accent,fontWeight:700,cursor:"pointer",fontFamily:S.fontBody,fontSize:MODAL_BTN_FONT} }, "Save"),
         React.createElement("button", { onClick:onClose, style:MODAL_CANCEL() }, "Cancel")
       )
     )
@@ -1251,7 +1708,12 @@ function ProjectForm(props){
   // An existing project keeps whatever it already is, so moving it under
   // another project does not quietly turn it into a task.
   var roleS = useState(function(){
-    return project ? projRole(project) : ((defaultParentId||null)!=null ? "task" : "project");
+    // A caller can ask for one or the other - "add a project here" and "add a
+    // task here" are different requests, and nesting alone cannot tell them
+    // apart. Without a request, nesting still implies a task.
+    if(project) return projRole(project);
+    if(props.defaultRole) return props.defaultRole;
+    return (defaultParentId||null)!=null ? "task" : "project";
   });
   var setRole=roleS[1]; var role=roleS[0];
   // When it starts. A new project starts the moment it is added unless told
@@ -1310,10 +1772,16 @@ function ProjectForm(props){
     var pid=resolveParentId(parentId);
     // An ongoing project has no end by definition, so switching the type away
     // from finite clears one rather than leaving it behind to reappear later.
-    onSave({ name:name.trim(), lane:lane, notes:notes.trim(), parentId:pid, kind:kind,
-             role: pid==null ? "project" : role,
-             startAt: startMode==="now" ? Date.now() : joinDateTime(startDate, startTime),
-             endAt: kind==="finite" ? joinDateTime(endDate, endTime) : null });
+    var out={ name:name.trim(), notes:notes.trim(), kind:kind,
+              startAt: startMode==="now" ? Date.now() : joinDateTime(startDate, startTime),
+              endAt: kind==="finite" ? joinDateTime(endDate, endTime) : null };
+    // With the placement controls hidden these keys are omitted entirely
+    // rather than written back unchanged, so the panel cannot overwrite an
+    // arrangement the outline is still holding.
+    if(props.structure!==false){
+      out.lane=lane; out.parentId=pid; out.role = pid==null ? "project" : role;
+    }
+    onSave(out);
   }
 
   var hintStyle = { fontSize:"0.74rem", color:S.textMuted, lineHeight:1.4, marginTop:"0.35rem" };
@@ -1338,7 +1806,11 @@ function ProjectForm(props){
         React.createElement("input", { value:name, onChange:function(e){ setName(e.target.value); }, placeholder:parentId?"Task Name":"Project Name", style:INPUT_STYLE,
           onKeyDown:function(e){ if(e.key==="Enter") submit(); } })
       ),
-      React.createElement("div", null,
+      // Lane, Nested under and Nested as are where a record SITS. Opened from
+      // the outline those are the outline's job - it is holding an unsaved
+      // arrangement of exactly these - so the panel shows details only and
+      // leaves placement alone. Everywhere else the form still owns them.
+      props.structure!==false && React.createElement("div", null,
         React.createElement("label", { style:LABEL_STYLE }, "Lane"),
         React.createElement("select", { value:lane, onChange:function(e){ setLane(e.target.value); pickParent(null); }, style:Object.assign({},INPUT_STYLE,{cursor:"pointer"}) },
           laneKeys.map(function(k){
@@ -1347,7 +1819,7 @@ function ProjectForm(props){
           })
         )
       ),
-      eligibleParents.length>0 && React.createElement("div", null,
+      props.structure!==false && eligibleParents.length>0 && React.createElement("div", null,
         React.createElement("label", { style:LABEL_STYLE }, "Nested under (optional)"),
         React.createElement("select", { value:parentId==null?"":String(parentId), onChange:function(e){ pickParent(e.target.value||null); }, style:Object.assign({},INPUT_STYLE,{cursor:"pointer"}) },
           React.createElement("option", { value:"" }, "-- Nothing, top level --"),
@@ -1364,7 +1836,7 @@ function ProjectForm(props){
       ),
       // Only meaningful once something is nested: at the top level everything
       // is a project by definition.
-      parentId!=null && React.createElement("div", null,
+      props.structure!==false && parentId!=null && React.createElement("div", null,
         React.createElement("label", { style:LABEL_STYLE }, "Nested as"),
         React.createElement(Toggle, { name:"projrole", keys:["task","project"], value:role,
           labelOf:function(k){ return k==="task" ? "A task" : "A project"; },
@@ -1422,10 +1894,15 @@ function ProjectForm(props){
         React.createElement("textarea", { value:notes, onChange:function(e){ setNotes(e.target.value); }, placeholder:"Optional details", rows:2, style:Object.assign({},INPUT_STYLE,{resize:"vertical"}) })
       ),
       // Destructive action stays in the body - the floating bar is Save/Cancel.
-      project&&onDelete && React.createElement("button", { onClick:onDelete, style:{width:"100%",background:S.dangerBg,border:"1px solid "+S.dangerText,borderRadius:S.radius,padding:"0.7rem",color:S.dangerText,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600} }, "Delete "+noun),
+      // Held, not tapped: a couple of seconds of fill before the confirmation
+      // even opens, so a stray tap on the way to Save cannot start a delete.
+      project&&onDelete && React.createElement(HoldButton, { onHold:onDelete, holdMs:HOLD_DELETE_MS, fill:rgba(S.dangerText,0.38),
+        attrs:{ "data-holddelete":true },
+        style:{width:"100%",background:S.dangerBg,border:"1px solid "+S.dangerText,borderRadius:S.radius,padding:"0.7rem",color:S.dangerText,fontFamily:S.fontBody,fontWeight:600} },
+        "Delete "+noun),
       React.createElement(ModalActions, null,
-        React.createElement("button", { onClick:submit, disabled:!name.trim(), style:{flex:1,background:name.trim()?S.infoBg:S.bg2,border:"2.5px solid "+(name.trim()?S.actionBdr:S.border),borderRadius:S.radius,padding:"0.85rem",color:name.trim()?S.infoText:S.textMuted,fontWeight:700,cursor:name.trim()?"pointer":"default",fontFamily:S.fontBody,fontSize:"0.95rem"} },
-          project?"Save Changes":("Add "+noun)
+        React.createElement("button", { onClick:submit, disabled:!name.trim(), style:{flex:1,background:name.trim()?S.infoBg:S.bg2,border:"2.5px solid "+(name.trim()?S.actionBdr:S.border),borderRadius:S.radius,padding:"0.85rem",color:name.trim()?S.infoText:S.textMuted,fontWeight:700,cursor:name.trim()?"pointer":"default",fontFamily:S.fontBody,fontSize:MODAL_BTN_FONT} },
+          project?"Save":("Add "+noun)
         ),
         React.createElement("button", { onClick:onCancel, style:MODAL_CANCEL() }, "Cancel")
       )
@@ -1437,47 +1914,140 @@ function ProjectForm(props){
 // Closing keeps everything. The point of saying so plainly here is that the
 // button sits where Delete used to be the only ending a project had, and the
 // two need to be obviously different things.
+// ---- THE CLOSURE SHEET -------------------------------------------------------
+// Reached by HOLDING Complete on a card with no stages, by Close Out in a
+// card's menu, or by the offer that follows the last stage being ticked. It
+// asks what happened (outcome), when (defaulting to now, editable - the same
+// reason a milestone mark can be backdated), and for a closing note. Open
+// children used to be a refusal; they are a choice here - close them with it,
+// or move them up a level - because the sheet is the confirmation and can
+// carry the decision.
+var CLOSE_OUTCOMES = [["done","Done"],["abandoned","Abandoned"],["superseded","Superseded"]];
 function CloseProjectModal(props){
   var proj=props.proj, blockers=props.blockers||[], onClose=props.onClose, onConfirm=props.onConfirm;
-  var noteS=useState(""); var setNote=noteS[1]; var note=noteS[0];
   var noun = proj && proj.parentId ? "Task" : "Project";
-  var blocked = blockers.length>0;
-
-  if(blocked){
-    return React.createElement(Modal, { title:"Close "+noun, onClose:onClose, ownActions:true },
-      React.createElement("p", { style:{color:S.textDim,fontSize:"0.88rem",lineHeight:1.5,marginBottom:"0.8rem"} },
-        proj.name+" still has "+blockers.length+" open task"+(blockers.length!==1?"s":"")+
-        ". Closing it now would take them off the board with no way back to them, so close them first."),
-      React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,
-        padding:"0.5rem 0.75rem",marginBottom:"1rem"} },
-        blockers.map(function(b){
-          return React.createElement("div", { key:b.id, style:{color:S.text,fontSize:"0.85rem",padding:"0.2rem 0"} },
-            "\u2022  "+b.name);
-        })
-      ),
-      React.createElement("button", { onClick:onClose, style:Object.assign({}, MODAL_CANCEL(), {width:"100%",flex:"none"}) }, "OK")
-    );
-  }
-
-  return React.createElement(Modal, { title:"Close Out "+noun, onClose:onClose, ownActions:true },
-    React.createElement("p", { style:{color:S.textDim,fontSize:"0.88rem",lineHeight:1.5,marginBottom:"0.9rem"} },
-      "Close out "+proj.name+"? It comes off the board and moves to the Archive. Every log, "+
-      "disruption and report figure it has ever had is kept, and you can reopen it at any time."),
-    React.createElement("div", { style:{marginBottom:"1rem"} },
-      React.createElement("label", { style:LABEL_STYLE }, "Closing note (optional)"),
-      React.createElement("input", { value:note, onChange:function(e){ setNote(e.target.value); },
-        placeholder:"e.g. Signed off by QA", style:INPUT_STYLE,
-        onKeyDown:function(e){ if(e.key==="Enter") onConfirm(note.trim()); } })
-    ),
-    React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
-      React.createElement("button", { onClick:function(){ onConfirm(note.trim()); },
-        style:{flex:1,background:S.successBg2,border:"2px solid "+S.successBorder,borderRadius:S.radius,
-               padding:"0.85rem",color:S.successText,cursor:"pointer",fontWeight:700,fontFamily:S.fontBody} },
-        "Close Out"),
-      React.createElement("button", { onClick:onClose, style:MODAL_CANCEL() }, "Cancel")
-    )
-  );
+  var outcomeS=useState("done"); var setOutcome=outcomeS[1]; var outcome=outcomeS[0];
+  var dateS=useState(toDateInput(Date.now())); var setDate=dateS[1]; var date=dateS[0];
+  var timeS=useState(toTimeInput(Date.now())); var setTime=timeS[1]; var time=timeS[0];
+  var noteS=useState(""); var setNote=noteS[1]; var note=noteS[0];
+  // Every open child must be MOVED to a chosen parent or DELETED before the
+  // record can be completed. Nothing is ever closed over them silently.
+  // resolutions: { childId: { kind:"move", lane, parentId, label } | { kind:"delete" } }
+  var resS=useState({}); var setRes=resS[1]; var res=resS[0];
+  var pickS=useState(null); var setPick=pickS[1]; var pick=pickS[0];   // "all" or a child id
+  var unresolved=blockers.filter(function(b){ return !res[b.id]; });
+  var at=joinDateTime(date, time);
+  var future = at!==null && at>Date.now()+60000;
+  var ok = at!==null && !future && unresolved.length===0;
+  function resolve(ids, r){ setRes(function(prev){ var n=Object.assign({},prev); ids.forEach(function(id){ n[id]=r; }); return n; }); }
+  function submit(){ if(ok) onConfirm({ at:at, outcome:outcome, note:note.trim(), resolutions:res }); }
+  var segBtn=function(on, label, fn, key){
+    return React.createElement("button", { key:key, "data-closeopt":key, onClick:fn,
+      style:{flex:1,padding:"0.6rem 0.4rem",borderRadius:S.radius3,background:on?S.infoBg:S.bg1,
+             border:"2px solid "+(on?S.actionBdr:S.border),color:on?S.infoText:S.textDim,cursor:"pointer",
+             fontFamily:S.fontBody,fontWeight:700,fontSize:"0.82rem",WebkitTapHighlightColor:"transparent"} }, label);
+  };
+  return React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", "data-closeconfirm":true, onClick:submit, disabled:!ok,
+          style:Object.assign({}, MODAL_SAVE(), ok?null:{opacity:0.5,cursor:"default"}) }, "Complete"),
+        React.createElement("button", { key:"a1", onClick:onClose, style:MODAL_CANCEL() }, "Cancel")], title:"Complete \u00b7 "+proj.name, onClose:onClose, ownActions:true },
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.9rem"} },
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Outcome"),
+        React.createElement("div", { style:{display:"flex",gap:"0.4rem"} },
+          CLOSE_OUTCOMES.map(function(o){ return segBtn(outcome===o[0], o[1], function(){ setOutcome(o[0]); }, "outcome-"+o[0]); }))),
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Completed"),
+        React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
+          React.createElement("input", { "data-closedate":true, type:"date", value:date, onChange:function(e){ setDate(e.target.value); }, style:Object.assign({},INPUT_STYLE,{flex:1.4,minWidth:0}) }),
+          React.createElement("input", { "data-closetime":true, type:"time", value:time, onChange:function(e){ setTime(e.target.value); }, style:Object.assign({},INPUT_STYLE,{flex:1,minWidth:0}) })),
+        // On the time alone - not on the children being undecided.
+        future && React.createElement("div", { style:{fontSize:"0.76rem",color:S.warnText,marginTop:"0.35rem"} },
+          "That is in the future. Completion records something that has happened.")),
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Closure notes"),
+        React.createElement("textarea", { "data-closenote":true, value:note, onChange:function(e){ setNote(e.target.value); },
+          rows:3, placeholder:"What was the state at the end", style:Object.assign({},INPUT_STYLE,{resize:"vertical",minHeight:"4.2rem"}) })),
+      // Open children: each is moved to a chosen parent or deleted, one at a
+      // time or all at once. Until every one is decided, Complete is blocked.
+      blockers.length>0 && React.createElement("div", { "data-closekids":true,
+        style:{background:S.warnBg,border:"1px solid "+S.warnText,borderRadius:S.radius3,padding:"0.7rem 0.8rem"} },
+        React.createElement("div", { style:{color:S.warnText,fontWeight:700,fontSize:"0.86rem",marginBottom:"0.2rem"} },
+          blockers.length+" open "+(blockers.length===1?"task":"tasks")+" under this "+noun.toLowerCase()),
+        React.createElement("div", { style:{color:S.textDim,fontSize:"0.76rem",marginBottom:"0.55rem"} },
+          "Each must be moved to another parent, or deleted, before this can be completed."),
+        blockers.length>1 && React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.4rem",marginBottom:"0.5rem"} },
+          React.createElement("span", { style:{fontSize:"0.62rem",fontWeight:800,letterSpacing:"0.1em",color:S.textDim,marginRight:"0.2rem"} }, "ALL"),
+          React.createElement("button", { "data-kidsall":"move", onClick:function(){ setPick("all"); },
+            style:{padding:"0.4rem 0.7rem",borderRadius:S.radius3,background:S.bg1,border:"1px solid "+S.border,color:S.textDim,cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:"0.78rem"} }, "Move all to\u2026"),
+          React.createElement("button", { "data-kidsall":"delete", onClick:function(){ resolve(blockers.map(function(b){ return b.id; }), { kind:"delete" }); },
+            style:{padding:"0.4rem 0.7rem",borderRadius:S.radius3,background:S.dangerBg,border:"1px solid "+S.dangerText,color:S.dangerText,cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:"0.78rem"} }, "Delete all")),
+        React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.4rem"} },
+          blockers.map(function(b){
+            var r=res[b.id];
+            var standing = !r ? "not yet decided" : r.kind==="move" ? "\u2192 "+r.label : "will be deleted";
+            var stColor = !r ? S.warnText : r.kind==="move" ? S.msMet : S.dangerText;
+            return React.createElement("div", { key:b.id, "data-closekid":b.id, "data-resolved":r?r.kind:"no",
+              style:{display:"flex",alignItems:"center",gap:"0.5rem",background:S.bg1,
+                     border:"1px solid "+(r?S.border:S.warnText),borderRadius:S.radius3,padding:"0.45rem 0.55rem"} },
+              React.createElement(MenuIcon, { name:projRole(b)==="task"?"task":"project", size:15, col:r&&r.kind==="delete"?S.dangerText:S.chromeText }),
+              React.createElement("span", { style:{flex:1,minWidth:0} },
+                React.createElement("span", { style:{display:"block",color:r&&r.kind==="delete"?S.textMuted:S.text,fontWeight:700,fontSize:"0.84rem",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"} }, b.name),
+                React.createElement("span", { style:{display:"block",color:stColor,fontSize:"0.7rem",fontWeight:600} }, standing)),
+              React.createElement("button", { "data-kidmove":b.id, onClick:function(){ setPick(b.id); },
+                style:{padding:"0.35rem 0.6rem",borderRadius:S.radius3,background:(r&&r.kind==="move")?S.infoBg:S.bg2,
+                       border:"1px solid "+((r&&r.kind==="move")?S.actionBdr:S.border),color:(r&&r.kind==="move")?S.infoText:S.textDim,
+                       cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:"0.76rem",whiteSpace:"nowrap"} }, (r&&r.kind==="move")?"Moved \u25BE":"Move \u25BE"),
+              React.createElement("button", { "data-kiddelete":b.id, onClick:function(){ resolve([b.id], { kind:"delete" }); },
+                style:{padding:"0.35rem 0.6rem",borderRadius:S.radius3,background:(r&&r.kind==="delete")?S.dangerBg:S.bg2,
+                       border:"1px solid "+((r&&r.kind==="delete")?S.dangerText:S.border),color:(r&&r.kind==="delete")?S.dangerText:S.textDim,
+                       cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:"0.76rem"} }, "Delete"));
+          })),
+        unresolved.length>0 && React.createElement("div", { "data-kidsleft":unresolved.length,
+          style:{color:S.warnText,fontSize:"0.74rem",fontWeight:700,textAlign:"center",marginTop:"0.5rem"} },
+          unresolved.length+" still to decide"))),
+    pick!==null && React.createElement(MoveTargetModal, { projects:props.allProjects||[], laneMeta:props.laneMeta, laneOrder:props.laneOrder,
+      exclude:proj.id, count: pick==="all" ? blockers.length : 1,
+      onPick:function(target){ resolve(pick==="all" ? blockers.map(function(b){ return b.id; }) : [pick], Object.assign({ kind:"move" }, target)); setPick(null); },
+      onCancel:function(){ setPick(null); } }));
 }
+// Where a child can go: the top of any lane, or under any open project that
+// is not the record being closed nor anything beneath it.
+function MoveTargetModal(props){
+  var projects=props.projects||[], laneMeta=props.laneMeta, laneOrder=props.laneOrder||[], exclude=props.exclude;
+  var banned=getDescendantIds(projects, exclude).concat([exclude]);
+  var targets=[];
+  laneOrder.forEach(function(k){ targets.push({ key:"lane:"+k, lane:k, parentId:null, label:"Top of "+getMeta(laneMeta,k).label, glyph:"lanes", accent:getMeta(laneMeta,k).accent }); });
+  projects.filter(function(p){ return isOpen(p) && banned.indexOf(p.id)<0 && projRole(p)==="project"; })
+    .forEach(function(p){ targets.push({ key:"proj:"+p.id, lane:p.lane, parentId:p.id, label:p.name, glyph:"project", accent:getMeta(laneMeta,p.lane).accent, sub:getMeta(laneMeta,p.lane).label }); });
+  return React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", onClick:props.onCancel, style:MODAL_CANCEL() }, "Cancel")], title:"Move "+(props.count>1?props.count+" tasks":"task")+" to\u2026", onClose:props.onCancel, ownActions:true },
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.4rem"} },
+      targets.map(function(t){
+        return React.createElement("button", { key:t.key, "data-movetarget":t.key,
+          onClick:function(){ props.onPick({ lane:t.lane, parentId:t.parentId, label:t.label }); },
+          style:{display:"flex",alignItems:"center",gap:"0.6rem",width:"100%",textAlign:"left",background:S.bg1,
+                 border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.6rem 0.7rem",cursor:"pointer",fontFamily:S.fontBody} },
+          React.createElement(MenuIcon, { name:t.glyph, size:18, col:t.accent }),
+          React.createElement("span", { style:{flex:1,minWidth:0} },
+            React.createElement("span", { style:{display:"block",color:S.text,fontWeight:700,fontSize:"0.88rem"} }, t.label),
+            t.sub && React.createElement("span", { style:{display:"block",color:S.textDim,fontSize:"0.7rem"} }, t.sub)));
+      })));
+}
+// All stages ticked: an offer, not an action. Close it out, or there is more
+// to do and the stages should say so.
+function StagesDoneModal(props){
+  var proj=props.proj;
+  return React.createElement(Modal, { title:"All stages done", onClose:props.onLater, ownActions:true },
+    React.createElement("p", { style:{color:S.textDim,fontSize:"0.9rem",lineHeight:1.5,marginBottom:"1rem"} },
+      "Every stage of "+proj.name+" is ticked. Complete it, or add the stages that are still to come."),
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.5rem"} },
+      React.createElement("button", { "data-stagesdone":"close", onClick:props.onCloseOut,
+        style:Object.assign({}, MODAL_SAVE(), {width:"100%",flex:"none"}) }, "Complete it"),
+      React.createElement("button", { "data-stagesdone":"more", onClick:props.onMoreStages,
+        style:Object.assign({}, MODAL_CANCEL(), {width:"100%",flex:"none"}) }, "Add more stages"),
+      React.createElement("button", { "data-stagesdone":"later", onClick:props.onLater,
+        style:{width:"100%",background:"none",border:"none",padding:"0.6rem",color:S.textMuted,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600} }, "Not now")));
+}
+
 
 // ---- STARTING AHEAD OF SCHEDULE ---------------------------------------------
 // Raised when the greyed Start on a project scheduled for later is pressed.
@@ -1494,7 +2064,11 @@ function StartAheadModal(props){
   var bad = date!=="" && picked==null;
 
   if(stage==="when"){
-    return React.createElement(Modal, { title:"New Start Time", onClose:onWait, ownActions:true },
+    return React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", onClick:function(){ if(!bad) onReschedule(picked); },
+          style:{flex:1,background:bad?S.bg2:S.infoBg,border:"2px solid "+(bad?S.border:S.actionBdr),
+                 borderRadius:S.radius,padding:"0.85rem",color:bad?S.textMuted:S.infoText,
+                 cursor:bad?"default":"pointer",fontWeight:700,fontFamily:S.fontBody,fontSize:MODAL_BTN_FONT} }, "Save"),
+        React.createElement("button", { key:"a1", onClick:function(){ setStage(null); }, style:MODAL_CANCEL() }, "Back")], title:"New Start Time", onClose:onWait, ownActions:true },
       React.createElement("p", { style:{color:S.textDim,fontSize:"0.88rem",lineHeight:1.5,marginBottom:"0.8rem"} },
         "When should "+proj.name+" start instead?"),
       React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.5rem"} },
@@ -1511,14 +2085,7 @@ function StartAheadModal(props){
         bad ? "That is not a date on the calendar."
           : (picked==null ? "Clear the date to leave it with no scheduled start."
             : (picked>Date.now() ? "It will stay greyed out until then."
-                                 : "That is in the past, so it will be startable straight away."))),
-      React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
-        React.createElement("button", { onClick:function(){ if(!bad) onReschedule(picked); },
-          style:{flex:1,background:bad?S.bg2:S.infoBg,border:"2px solid "+(bad?S.border:S.actionBdr),
-                 borderRadius:S.radius,padding:"0.85rem",color:bad?S.textMuted:S.infoText,
-                 cursor:bad?"default":"pointer",fontWeight:700,fontFamily:S.fontBody} }, "Save Start Time"),
-        React.createElement("button", { onClick:function(){ setStage(null); }, style:MODAL_CANCEL() }, "Back")
-      )
+                                 : "That is in the past, so it will be startable straight away.")))
     );
   }
 
@@ -1547,93 +2114,6 @@ function StartAheadModal(props){
 // rather than buried in a nested menu. Two steps at most: what, then where.
 // A task needs a project to hang off, so if there are none it says so instead
 // of offering an empty list.
-function AddNewModal(props){
-  var stage=props.stage, laneOrder=props.laneOrder||[], laneMeta=props.laneMeta;
-  var projects=props.projects||[], onPick=props.onPick, onClose=props.onClose;
-
-  function row(key, dot, label, sub, onClick){
-    return React.createElement("button", { key:key, "data-flat":true, onClick:onClick,
-      style:{display:"flex",alignItems:"center",gap:"0.7rem",width:"100%",textAlign:"left",
-             background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,
-             padding:"0.75rem 0.85rem",cursor:"pointer",fontFamily:S.fontBody} },
-      dot,
-      React.createElement("span", { style:{flex:1,minWidth:0} },
-        React.createElement("span", { style:{display:"block",color:S.text,fontWeight:700,fontSize:"0.92rem",
-          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"} }, label),
-        sub ? React.createElement("span", { style:{display:"block",color:S.textMuted,fontSize:"0.74rem",marginTop:"0.1rem",
-          overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"} }, sub) : null
-      )
-    );
-  }
-  function dotOf(col, dashed){
-    return React.createElement("span", { style:{width:"11px",height:"11px",flexShrink:0,
-      borderRadius:dashed?"2px":"50%", background:dashed?"none":col,
-      border:dashed?("2px dashed "+col):"none"} });
-  }
-  var wrap = { display:"flex", flexDirection:"column", gap:"0.5rem" };
-
-  if(stage==="lane"){
-    return React.createElement(Modal, { title:"New Project In...", onClose:onClose, cancelLabel:"Cancel" },
-      React.createElement("div", { style:wrap },
-        laneOrder.map(function(k){
-          var m=getMeta(laneMeta,k);
-          var n=projects.filter(function(p){ return p.lane===k && p.parentId===null; }).length;
-          return row(k, dotOf(m.accent), m.label, n+" project"+(n!==1?"s":""),
-            function(){ onPick({ what:"project", lane:k }); });
-        })
-      )
-    );
-  }
-
-  if(stage==="project"){
-    var tops=projects.filter(function(p){ return p.parentId===null; });
-    if(!tops.length){
-      return React.createElement(Modal, { title:"New Task", onClose:onClose, cancelLabel:"Close" },
-        React.createElement("div", { style:{border:"2px dashed "+S.borderBright,borderRadius:S.radius,
-          padding:"1.2rem 1rem",textAlign:"center"} },
-          React.createElement("div", { style:{color:S.text,fontWeight:700,fontSize:"0.92rem",marginBottom:"0.3rem"} },
-            "No projects yet"),
-          React.createElement("div", { style:{color:S.textDim,fontSize:"0.8rem",lineHeight:1.45} },
-            "A task belongs to a project, so add a project first."))
-      );
-    }
-    var byLane=[];
-    laneOrder.forEach(function(k){
-      var inLane=tops.filter(function(p){ return p.lane===k; });
-      if(inLane.length) byLane.push({ lane:k, items:inLane });
-    });
-    return React.createElement(Modal, { title:"New Task Under...", onClose:onClose, cancelLabel:"Cancel" },
-      React.createElement("div", { style:wrap },
-        byLane.map(function(g){
-          var m=getMeta(laneMeta,g.lane);
-          return React.createElement("div", { key:g.lane, style:wrap },
-            React.createElement("div", { style:{fontSize:"0.68rem",textTransform:"uppercase",letterSpacing:"0.08em",
-              color:S.textDim,fontWeight:700,marginTop:"0.25rem"} }, m.label),
-            g.items.map(function(p){
-              var kids=getChildren(projects,p.id).length;
-              return row(p.id, dotOf(m.accent), p.name,
-                (isFinite_(p)?"Has an end":"Ongoing")+(kids?"  \u00B7  "+kids+" task"+(kids!==1?"s":""):""),
-                function(){ onPick({ what:"task", lane:p.lane, parentId:p.id }); });
-            })
-          );
-        })
-      )
-    );
-  }
-
-  return React.createElement(Modal, { title:"Add New", onClose:onClose, cancelLabel:"Cancel" },
-    React.createElement("p", { style:{color:S.textDim,fontSize:"0.86rem",lineHeight:1.45,marginBottom:"0.8rem"} },
-      "What would you like to add?"),
-    React.createElement("div", { style:wrap },
-      row("project", dotOf(S.successText), "New Project", "Sits in a lane on its own",
-        function(){ onPick({ what:"chooseLane" }); }),
-      row("task", dotOf(S.actionText), "New Task", "Belongs to a project",
-        function(){ onPick({ what:"chooseProject" }); }),
-      row("lane", dotOf(S.mutedGlyph, true), "New Lane", "A new column of work",
-        function(){ onPick({ what:"lane" }); })
-    )
-  );
-}
 
 // ---- MATCH TASKS ------------------------------------------------------------
 // Raised when a project's type changes and its tasks no longer agree. Asked
@@ -1678,7 +2158,12 @@ function MatchTasksModal(props){
     );
   }
 
-  return React.createElement(Modal, { title:"Match Tasks?", onClose:onLeave, ownActions:true },
+  return React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", onClick:function(){ onMatch(chosen); },
+        style:{flex:1,background:noneOn?S.bg2:S.infoBg,border:"2px solid "+(noneOn?S.border:S.actionBdr),
+               borderRadius:S.radius,padding:"0.85rem",color:noneOn?S.textDim:S.infoText,
+               cursor:"pointer",fontWeight:700,fontFamily:S.fontBody,fontSize:MODAL_BTN_FONT} },
+        noneOn ? "Leave All As Is" : (chosen.length===1 ? "Change 1 Task" : "Change "+chosen.length+" Tasks")),
+      React.createElement("button", { key:"a1", onClick:onLeave, style:MODAL_CANCEL() }, "Cancel")], title:"Match Tasks?", onClose:onLeave, ownActions:true },
     React.createElement("p", { style:{color:S.textDim,fontSize:"0.88rem",lineHeight:1.5,marginBottom:"0.7rem"} },
       proj.name+" is now set to \u201C"+want+"\u201D. "+n+" of its task"+(n!==1?"s are":" is")+
       " still set to \u201C"+other+"\u201D. Tick the ones that should follow."),
@@ -1688,14 +2173,6 @@ function MatchTasksModal(props){
       tasks.map(function(t, i){
         return row(t.id, !!sel[t.id], false, t.name, null, function(){ flip(t.id); }, n>1?false:(i===0));
       })
-    ),
-    React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
-      React.createElement("button", { onClick:function(){ onMatch(chosen); },
-        style:{flex:1,background:noneOn?S.bg2:S.infoBg,border:"2px solid "+(noneOn?S.border:S.actionBdr),
-               borderRadius:S.radius,padding:"0.85rem",color:noneOn?S.textDim:S.infoText,
-               cursor:"pointer",fontWeight:700,fontFamily:S.fontBody} },
-        noneOn ? "Leave All As Is" : (chosen.length===1 ? "Change 1 Task" : "Change "+chosen.length+" Tasks")),
-      React.createElement("button", { onClick:onLeave, style:MODAL_CANCEL() }, "Cancel")
     )
   );
 }
@@ -1770,7 +2247,7 @@ function DisruptionModal(props){
           React.createElement("textarea", { value:note, onChange:function(e){ setNote(e.target.value); }, placeholder:"e.g. Phone call, unexpected visitor...", rows:2, style:Object.assign({},INPUT_STYLE,{resize:"vertical"}) })
         ),
         React.createElement(ModalActions, null,
-          React.createElement("button", { onClick:function(){ onStart(note.trim()); }, style:{flex:1,background:S.dangerBg2,border:"2px solid #CC3030",borderRadius:S.radius,padding:"0.85rem",color:S.dangerBright,cursor:"pointer",fontWeight:700,fontFamily:S.fontBody,fontSize:"0.95rem"} }, "!! Start Disruption"),
+          React.createElement("button", { onClick:function(){ onStart(note.trim()); }, style:{flex:1,background:S.dangerBg2,border:"2px solid #CC3030",borderRadius:S.radius,padding:"0.85rem",color:S.dangerBright,cursor:"pointer",fontWeight:700,fontFamily:S.fontBody,fontSize:MODAL_BTN_FONT} }, "!! Start Disruption"),
           React.createElement("button", { onClick:onCancel, style:MODAL_CANCEL() }, "Cancel")
         )
       )
@@ -1974,93 +2451,1126 @@ function NewLaneModal(props){
   );
 }
 
-// ---- EDIT LANES MODAL -------------------------------------------------------
-function EditLanesModal(props){
-  var laneOrder=props.laneOrder, laneMeta=props.laneMeta, projects=props.projects||[];
+// ---- EDIT ONE LANE -----------------------------------------------------------
+// The edit twin of New Lane: the same name field, the same eight swatches, the
+// same live preview - so renaming or recolouring a lane is the full-size form,
+// not a dot to cycle and a cramped input in a list.
+//
+// The preview sits directly under the name, where a rename shows immediately.
+// Delete stands alone below the action row rather than beside Save: it is the
+// one control here whose mis-tap costs a lane and everything in it.
+//
+// It owns the delete conversation too - what to do with the projects inside -
+// because that question belongs to the lane being deleted, not to a list.
+function LaneEditModal(props){
+  var laneKey=props.laneKey, laneMeta=props.laneMeta, projects=props.projects||[];
   var onSave=props.onSave, onCancel=props.onCancel, onDeleteLane=props.onDeleteLane;
-  var draftS=useState(function(){
-    var d={};
-    laneOrder.forEach(function(k){ var m=getMeta(laneMeta,k); d[k]={label:m.label,accent:m.accent,bg:m.bg,dim:m.dim}; });
-    return d;
+  var laneOrder=props.laneOrder||[];
+  var start=getMeta(laneMeta, laneKey);
+  var labelS=useState(start.label||laneKey); var setLabel=labelS[1]; var label=labelS[0];
+  var pickedS=useState(function(){
+    var hit=laneColors().filter(function(c){ return c.accent===start.accent; })[0];
+    return hit || { label:"Custom", accent:start.accent, bg:start.bg, dim:start.dim };
   });
-  var setDraft=draftS[1]; var draft=draftS[0];
-  var deletingS=useState(null); var setDeleting=deletingS[1]; var deleting=deletingS[0];
+  var setPicked=pickedS[1]; var picked=pickedS[0];
+  var confirmS=useState(false); var setConfirm=confirmS[1]; var confirm=confirmS[0];
+  var inside=projects.filter(function(p){ return p.lane===laneKey; });
+  var moveTargets=laneOrder.filter(function(k){ return k!==laneKey; });
 
-  function setLabel(k,v){
-    setDraft(function(prev){ var n=Object.assign({},prev); n[k]=Object.assign({},n[k],{label:v}); return n; });
+  if(confirm){
+    return React.createElement(Modal, { title:"Delete Lane", onClose:function(){ setConfirm(false); }, ownActions:true },
+      React.createElement("div", { style:{background:S.dangerBg,border:"2px solid "+S.dangerText,borderRadius:S.radius,padding:"0.85rem 1rem",marginBottom:"0.9rem"} },
+        React.createElement("div", { style:{fontWeight:700,fontSize:"1rem",color:S.dangerText,marginBottom:"0.3rem"} },
+          "Delete \u201c"+(label.trim()||start.label)+"\u201d?"),
+        React.createElement("div", { style:{fontSize:"0.85rem",color:S.textDim} },
+          inside.length===0 ? "This lane is empty."
+            : "This lane holds "+inside.length+" project"+(inside.length!==1?"s":"")+".")),
+      inside.length>0 && moveTargets.length>0 && React.createElement("div", { style:{marginBottom:"0.9rem"} },
+        React.createElement("div", { style:{fontSize:"0.78rem",color:S.textDim,marginBottom:"0.45rem"} }, "Move them to:"),
+        React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.4rem"} },
+          moveTargets.map(function(k){
+            var m=getMeta(laneMeta,k);
+            return React.createElement("button", { key:k, "data-movelane":k,
+              onClick:function(){ onDeleteLane(laneKey,"move",k); },
+              style:{width:"100%",textAlign:"left",background:S.bg1,border:"1px solid "+m.accent,
+                     borderRadius:S.radius3,padding:"0.7rem 0.9rem",color:m.accent,cursor:"pointer",
+                     fontFamily:S.fontBody,fontWeight:700,fontSize:MODAL_BTN_FONT} }, m.label);
+          }))),
+      React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.5rem"} },
+        React.createElement("button", { "data-deleteall":true, onClick:function(){ onDeleteLane(laneKey,"delete",null); },
+          style:{width:"100%",background:S.dangerBg,border:"2px solid "+S.dangerText,borderRadius:S.radius,
+                 padding:"0.85rem",color:S.dangerText,cursor:"pointer",fontFamily:S.fontBody,
+                 fontWeight:700,fontSize:MODAL_BTN_FONT} },
+          inside.length===0 ? "Delete Lane" : "Delete the lane and its "+inside.length+" project"+(inside.length!==1?"s":"")),
+        React.createElement("button", { onClick:function(){ setConfirm(false); },
+          style:Object.assign({}, MODAL_CANCEL(), {width:"100%",flex:"none"}) }, "Keep it")));
   }
-  function cycleColor(k){
-    setDraft(function(prev){
-      var cur=prev[k], idx=-1;
-      var set=laneColors();
-      var ci=LANE_INDEX[String(cur.accent).toUpperCase()];
-      idx = ci===undefined ? -1 : ci;
-      var next=set[(idx+1)%set.length];
-      var n=Object.assign({},prev);
-      n[k]=Object.assign({},n[k],{accent:next.accent,bg:next.bg,dim:next.dim});
-      return n;
-    });
-  }
 
-  var delMeta = deleting ? (draft[deleting]||getMeta(laneMeta,deleting)) : null;
-  var delCount = deleting ? projects.filter(function(p){ return p.lane===deleting; }).length : 0;
-  var moveTargets = deleting ? laneOrder.filter(function(k){ return k!==deleting; }) : [];
-
-  return (
-    React.createElement(Modal, { title:"Edit Lanes", onClose:onCancel, ownActions:true },
-      deleting
-        ? React.createElement("div", null,
-            React.createElement("div", { style:{background:S.dangerBg,border:"2px solid "+S.dangerText,borderRadius:S.radius,padding:"0.85rem 1rem",marginBottom:"0.85rem"} },
-              React.createElement("div", { style:{fontWeight:700,fontSize:"1rem",color:S.dangerText,marginBottom:"0.3rem"} }, "Delete \""+delMeta.label+"\"?"),
-              React.createElement("div", { style:{fontSize:"0.85rem",color:S.textDim} },
-                delCount===0 ? "This lane is empty." : "This lane contains "+delCount+" project"+(delCount!==1?"s":"")+"."
-              )
-            ),
-            delCount>0 && React.createElement("div", { style:{marginBottom:"0.85rem"} },
-              React.createElement("div", { style:{fontSize:"0.75rem",color:S.textDim,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:"0.45rem",fontWeight:700} }, "Move projects to another lane:"),
-              React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.4rem"} },
-                moveTargets.map(function(k){
-                  var m=draft[k]||getMeta(laneMeta,k);
-                  return React.createElement("button", { key:k, onClick:function(){ onDeleteLane(deleting,"move",k); setDeleting(null); },
-                    style:{display:"flex",alignItems:"center",gap:"0.6rem",background:S.bg1,border:"2px solid "+m.accent,borderRadius:S.radius,padding:"0.7rem 1rem",cursor:"pointer",fontFamily:S.fontBody,textAlign:"left"} },
-                    React.createElement("div", { style:{width:"12px",height:"12px",borderRadius:"50%",background:m.accent,flexShrink:0} }),
-                    React.createElement("span", { style:{fontSize:"0.92rem",fontWeight:600,color:S.text} }, "Move all to "+m.label)
-                  );
-                })
-              )
-            ),
-            React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.5rem"} },
-              React.createElement("button", { onClick:function(){ onDeleteLane(deleting,"delete",null); setDeleting(null); },
-                style:{width:"100%",background:S.dangerBg2,border:"2px solid #AA2020",borderRadius:S.radius,padding:"0.8rem",color:S.dangerBright,cursor:"pointer",fontWeight:700,fontFamily:S.fontBody,fontSize:"0.92rem"} },
-                delCount===0 ? "Delete Lane" : "Delete Lane + "+delCount+" Project"+(delCount!==1?"s":"")
-              ),
-              React.createElement("button", { onClick:function(){ setDeleting(null); },
-                style:{width:"100%",background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.8rem",color:S.textDim,cursor:"pointer",fontFamily:S.fontBody} }, "Cancel")
-            )
-          )
-        : React.createElement("div", null,
-            React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.6rem",marginBottom:"1rem"} },
-              laneOrder.map(function(k){
-                var d=draft[k]||{label:k,accent:"#888",bg:"#111"};
-                return React.createElement("div", { key:k, style:{display:"flex",alignItems:"center",gap:"0.6rem"} },
-                  React.createElement("button", { onClick:function(){ cycleColor(k); }, title:"Tap to change color",
-                    style:{width:"30px",height:"30px",borderRadius:"50%",background:d.accent,border:"3px solid "+d.bg,cursor:"pointer",flexShrink:0,boxShadow:"0 0 6px "+d.accent} }),
-                  React.createElement("input", { value:d.label, onChange:function(e){ setLabel(k,e.target.value); },
-                    style:Object.assign({},INPUT_STYLE,{flex:1,borderColor:d.accent}) }),
-                  laneOrder.length>1 && React.createElement("button", { onClick:function(){ setDeleting(k); }, title:"Delete lane",
-                    style:{width:"30px",height:"30px",borderRadius:"8px",background:S.dangerBg,border:"2px solid "+S.dangerText,color:S.dangerText,cursor:"pointer",flexShrink:0,fontSize:"0.95rem",lineHeight:1,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"} }, "x")
-                );
-              })
-            ),
-            React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted,marginBottom:"0.85rem"} }, "Tap a color dot to cycle colors. Edit names in the fields. Tap x to delete a lane."),
-            React.createElement(ModalActions, null,
-              React.createElement("button", { onClick:function(){ onSave(draft); }, style:{flex:1,background:S.infoBg,border:"2.5px solid "+S.actionBdr,borderRadius:S.radius,padding:"0.85rem",color:S.infoText,fontWeight:700,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.95rem"} }, "Save Lanes"),
-              React.createElement("button", { onClick:onCancel, style:MODAL_CANCEL() }, "Cancel")
-            )
-          )
-    )
-  );
+  var name=label.trim();
+  return React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", "data-lanesave":true, onClick:function(){ if(name) onSave(laneKey, name, picked); },
+          disabled:!name, style:Object.assign({}, MODAL_SAVE(), name?null:{opacity:0.5,cursor:"default"}) }, "Save"),
+        React.createElement("button", { key:"a1", onClick:onCancel, style:MODAL_CANCEL() }, "Cancel"),
+        React.createElement(HoldButton, { key:"a2", onHold:function(){ setConfirm(true); }, holdMs:HOLD_DELETE_MS, fill:rgba(S.dangerText,0.38),
+          attrs:{ "data-lanedelete":true, "data-holddelete":true },
+          style:{flex:"0 0 auto",background:S.dangerBg,border:"1px solid "+S.dangerText,
+                 borderRadius:S.radius,padding:"0.85rem 0.9rem",color:S.dangerText,
+                 fontFamily:S.fontBody,fontWeight:700,fontSize:MODAL_BTN_FONT} }, "Delete")], title:"Edit Lane", onClose:onCancel, ownActions:true },
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"1rem"} },
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Lane Name"),
+        React.createElement("input", { "data-lanename":true, value:label,
+          onChange:function(e){ setLabel(e.target.value); }, style:INPUT_STYLE,
+          onKeyDown:function(e){ if(e.key==="Enter"&&name) onSave(laneKey, name, picked); } })),
+      // Straight under the name, so a rename shows as it is typed.
+      React.createElement("div", { "data-lanepreview":true,
+        style:{background:picked.bg,border:"1px solid "+picked.accent,borderRadius:S.radius,padding:"0.65rem 1rem"} },
+        React.createElement("div", { style:{fontSize:"0.7rem",textTransform:"uppercase",letterSpacing:"0.1em",
+               color:picked.accent,fontWeight:700} }, name||start.label||"Lane Name")),
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Color"),
+        React.createElement("div", { style:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:"0.5rem"} },
+          laneColors().map(function(col){
+            var on=picked.accent===col.accent;
+            return React.createElement("button", { key:col.label, "data-lanecolor":col.label,
+              onClick:function(){ setPicked(col); },
+              style:{background:col.bg,border:(on?"2px solid ":"1px solid ")+(on?col.accent:col.dim),
+                     borderRadius:S.radius,padding:"0.6rem 0.4rem",cursor:"pointer",display:"flex",
+                     flexDirection:"column",alignItems:"center",gap:"0.3rem"} },
+              React.createElement("div", { style:{width:"20px",height:"20px",borderRadius:"50%",
+                     background:col.accent,boxShadow:on&&S.glow?("0 0 8px "+col.accent):"none"} }),
+              React.createElement("span", { style:{fontSize:"0.68rem",color:col.accent,fontWeight:600,
+                     fontFamily:S.fontBody} }, col.label));
+          }))),
+      // One row: Save under the thumb, Cancel beside it, Delete at the far
+      // end. Children are written Save, Cancel, Delete and ACTION_ROW reverses
+      // them for handedness, so Delete is always the corner furthest from
+      // Save - the two should never be neighbours.
+    ));
 }
+
+// ---- EDIT LANES MODAL -------------------------------------------------------
+function moveItem(arr, from, to){
+  var out=(arr||[]).slice();
+  if(from===to || from<0 || to<0 || from>=out.length || to>=out.length) return out;
+  out.splice(to, 0, out.splice(from,1)[0]);
+  return out;
+}
+// ---- MILESTONES --------------------------------------------------------------
+// A milestone tracker is a list of STEPS on a project - and only on a project.
+// A step is a point in time: a target (dueAt) and an expectation, the records
+// that should be closed out by then. Its ACTUAL time is when that expectation
+// was satisfied: the moment its last target closed, or the moment someone
+// marked it by hand, whichever came first. From target and actual fall four
+// statuses - met, late, missed, upcoming - and a variance.
+//
+// Lanes and the board own nothing. Their lines are computed by ROLLING UP the
+// level directly beneath them: a project's line shows its own steps plus one
+// mark per sub-project at that child's current point; a lane's line one mark
+// per project; the board's one mark per lane. Same rule, applied recursively,
+// nothing stored that could drift from the steps that drive it.
+//
+// A step: { id, label, dueAt, targets:[{kind:"project", id}], doneAt|null, note }
+
+// Worst wins: a missed step outranks everything, a met one nothing.
+var MS_RANK = { missed:3, late:2, upcoming:1, met:0 };
+function worstStatus(list){
+  var w="met";
+  (list||[]).forEach(function(s){ if((MS_RANK[s]||0)>(MS_RANK[w]||0)) w=s; });
+  return w;
+}
+// A record is complete when it has been closed out. Not when its stages are
+// done - that prompts a close-out, but the close-out is the completion.
+function recordClosedAt(projects, id){
+  var p=findProj(projects, id);
+  return (p && p.closedAt) ? p.closedAt : null;
+}
+// When a step's expectation was met: every target closed, at the time the
+// last one did - or a hand-marked time, if that came first. Null while open.
+function stepActual(step, projects){
+  var byHand = step.doneAt || null;
+  var targets = step.targets || [];
+  var byTargets = null;
+  if(targets.length){
+    var latest=0, all=true;
+    targets.forEach(function(t){
+      var at=recordClosedAt(projects, t.id);
+      if(at===null) all=false; else if(at>latest) latest=at;
+    });
+    if(all) byTargets=latest;
+  }
+  if(byHand!==null && byTargets!==null) return Math.min(byHand, byTargets);
+  return byHand!==null ? byHand : byTargets;
+}
+function stepStatus(step, projects, now){
+  var actual=stepActual(step, projects);
+  if(actual!==null) return actual<=step.dueAt ? "met" : "late";
+  return now>step.dueAt ? "missed" : "upcoming";
+}
+// A point is what goes on a line: where, what colour, and by how much it
+// missed or beat its target.
+function stepPoint(step, projects, now){
+  var actual=stepActual(step, projects), status=stepStatus(step, projects, now);
+  return { id:step.id, label:step.label, at:step.dueAt, actual:actual, status:status,
+           variance: actual===null ? null : actual-step.dueAt };
+}
+// A tracker's current point, from the points beneath it. Outstanding points
+// (missed or upcoming) decide it: the earliest sets WHERE, the worst sets the
+// COLOUR. Once nothing is outstanding it rests at the last target, met.
+function aggregatePoint(points){
+  var open=(points||[]).filter(function(p){ return p.status==="missed" || p.status==="upcoming"; });
+  if(!points || !points.length) return null;
+  if(open.length){
+    var at=Math.min.apply(null, open.map(function(p){ return p.at; }));
+    return { at:at, status:worstStatus(open.map(function(p){ return p.status; })), open:open.length, total:points.length };
+  }
+  return { at:Math.max.apply(null, points.map(function(p){ return p.at; })), status:"met", open:0, total:points.length };
+}
+// Does anything under this record carry steps? Decides whether a record earns
+// a line at all: a strip only appears where there is something to show.
+function hasMilestonesBeneath(projects, id){
+  var p=findProj(projects, id);
+  if(!p) return false;
+  if(p.milestones && p.milestones.length) return true;
+  return projects.some(function(c){ return c.parentId===id && hasMilestonesBeneath(projects, c.id); });
+}
+// Every step anywhere beneath a record, as points. A parent shows the FULL
+// extent of what is coming, not one mark per child: a lane line that collapses
+// each project to its current point hides most of the future. The aggregate
+// (projectCurrent / laneCurrent) is still what colours a collapsed lane and
+// what the report summarises - it is a summary, not the line.
+function subtreePoints(projects, id, now){
+  var out=[];
+  (function walk(pid){
+    var p=findProj(projects, pid);
+    if(p) (p.milestones||[]).forEach(function(st){
+      var pt=stepPoint(st, projects, now);
+      pt.ownerId=pid; pt.owner=p.name; pt.own=(pid===id);
+      out.push(pt);
+    });
+    projects.filter(function(c){ return c.parentId===pid; }).forEach(function(c){ walk(c.id); });
+  })(id);
+  return out.sort(function(a,b){ return a.at-b.at; });
+}
+// A project's line: its own step points, plus one point per child that has
+// milestones beneath it, at that child's current point.
+function projectLine(projects, id, now){
+  var p=findProj(projects, id);
+  if(!p) return { own:[], children:[] };
+  var own=(p.milestones||[]).map(function(st){ return stepPoint(st, projects, now); });
+  var children=projects.filter(function(c){ return c.parentId===id && hasMilestonesBeneath(projects, c.id); })
+    .map(function(c){ var cp=projectCurrent(projects, c.id, now); return cp ? Object.assign({ id:c.id, label:c.name, child:true }, cp) : null; })
+    .filter(function(x){ return !!x; });
+  return { own:own, children:children };
+}
+function projectCurrent(projects, id, now){
+  return aggregatePoint(subtreePoints(projects, id, now));
+}
+// A lane's line: every step under every open project in it.
+function laneLine(projects, lane, now){
+  var out=[];
+  projects.filter(function(p){ return p.lane===lane && !p.parentId && !p.closedAt; })
+    .forEach(function(p){ out=out.concat(subtreePoints(projects, p.id, now)); });
+  return out.sort(function(a,b){ return a.at-b.at; });
+}
+// The summary, not the line: what colours a collapsed lane, and what the
+// report quotes. Built from every step beneath it.
+function laneCurrent(projects, lane, now){ return aggregatePoint(laneLine(projects, lane, now)); }
+// The board's line: every step in every lane.
+function boardLine(projects, laneOrder, laneMeta, now){
+  var out=[];
+  (laneOrder||[]).forEach(function(k){ out=out.concat(laneLine(projects, k, now)); });
+  return out.sort(function(a,b){ return a.at-b.at; });
+}
+// ---- laying a line out ----
+// The axis spans the earliest and latest point on it, stretched to include
+// now, with a little room either side. Ticks are days when the span is under
+// a month and weeks past that, so a three-month line does not get ninety.
+var MS_DAY = 86400000;
+function lineSpan(points, now){
+  // ACTUAL dates count towards the extent too, not just targets: a step
+  // finished well before the earliest target fell off the left edge, and its
+  // bright mark with it - leaving a lone ghost that read as still to come.
+  var ats=[];
+  (points||[]).forEach(function(p){ ats.push(p.at); if(p.actual!=null) ats.push(p.actual); });
+  ats.push(now);
+  var lo=Math.min.apply(null, ats), hi=Math.max.apply(null, ats);
+  if(hi-lo < 7*MS_DAY){ var mid=(lo+hi)/2; lo=mid-3.5*MS_DAY; hi=mid+3.5*MS_DAY; }
+  var pad=(hi-lo)*0.06;
+  return { lo:lo-pad, hi:hi+pad };
+}
+// What the milestones did over a period. The line shows the shape; this is
+// the account of it: what was due in the window, what was met and how late or
+// early, what was missed, and what is coming next after it. Steps are matched
+// to the window by their TARGET, because that is what the period was supposed
+// to deliver - a step met in June against a May target belongs to May's
+// report, counted late.
+function milestoneReport(projects, laneOrder, from, to, now){
+  var all=[];
+  (laneOrder||[]).forEach(function(k){
+    projects.filter(function(p){ return p.lane===k && !p.parentId; }).forEach(function(p){
+      subtreePoints(projects, p.id, now).forEach(function(pt){ all.push(Object.assign({ lane:k }, pt)); });
+    });
+  });
+  var due=all.filter(function(p){ return p.at>=from && p.at<=to; });
+  var met=due.filter(function(p){ return p.status==="met"; });
+  var late=due.filter(function(p){ return p.status==="late"; });
+  var missed=due.filter(function(p){ return p.status==="missed"; });
+  var open=due.filter(function(p){ return p.status==="upcoming"; });
+  // Only steps actually met carry a variance; late ones are the interesting
+  // half of that, so both slips and gains are reported separately.
+  var slips=late.map(function(p){ return p.variance; });
+  var gains=met.map(function(p){ return -p.variance; }).filter(function(v){ return v>0; });
+  function avg(a){ return a.length ? Math.round(a.reduce(function(x,y){ return x+y; },0)/a.length) : null; }
+  var ahead=all.filter(function(p){ return p.at>to && (p.status==="upcoming"||p.status==="missed"); })
+               .sort(function(a,b){ return a.at-b.at; });
+  return {
+    due:due.length, met:met.length, late:late.length, missed:missed.length, open:open.length,
+    onTimePct: (met.length+late.length)>0 ? Math.round(100*met.length/(met.length+late.length)) : null,
+    worstSlip: slips.length ? Math.max.apply(null, slips) : null,
+    avgSlip: avg(slips), avgGain: avg(gains),
+    missedList: missed.sort(function(a,b){ return a.at-b.at; }),
+    lateList: late.sort(function(a,b){ return b.variance-a.variance; }),
+    next: ahead.slice(0,3), points: due.sort(function(a,b){ return a.at-b.at; })
+  };
+}
+// ---- ZOOM --------------------------------------------------------------------
+// A parent line showing every step beneath it can run for months, and at
+// fit-to-width the marks crowd. Zoom steps through real units rather than an
+// arbitrary scale: Fit shows everything, then a fixed window of months, weeks
+// or days centred on where you are. Tapping the control steps to the next
+// level and wraps; holding it snaps back to Fit.
+//
+// Deliberately NOT a charge-and-slide: in this app a charging fill means
+// something irreversible is about to happen (Delete, Complete). Zoom is
+// harmless, and borrowing the signal would blunt it.
+var MS_ZOOMS = [
+  { id:"fit",    label:"Fit",    ms:null },
+  { id:"months", label:"3 months", ms:92*MS_DAY },
+  { id:"weeks",  label:"4 weeks",  ms:28*MS_DAY },
+  { id:"days",   label:"7 days",   ms:7*MS_DAY },
+  // One day: the tick unit is still a day, so this level shows a single tick
+  // with the hours around it - the only level where two steps on the same
+  // morning and afternoon separate.
+  { id:"day",    label:"1 day",    ms:MS_DAY }
+];
+function zoomAt(i){ return MS_ZOOMS[((i % MS_ZOOMS.length) + MS_ZOOMS.length) % MS_ZOOMS.length]; }
+function nextZoom(i){ return (i+1) % MS_ZOOMS.length; }
+// The span actually drawn: Fit is the whole line; any other level is a window
+// of that width centred on `centre`, clamped so it never runs past the line's
+// own extent (panning past the ends shows nothing and feels broken).
+function zoomSpan(points, now, zoomIdx, centre){
+  var full=lineSpan(points, now), z=zoomAt(zoomIdx||0);
+  if(!z.ms || (full.hi-full.lo)<=z.ms) return full;
+  var c = centre==null ? now : centre;
+  var half=z.ms/2, lo=c-half, hi=c+half;
+  if(lo<full.lo){ lo=full.lo; hi=lo+z.ms; }
+  if(hi>full.hi){ hi=full.hi; lo=hi-z.ms; }
+  return { lo:lo, hi:hi };
+}
+// How far a drag of `dx` px moves the window, in ms - and clamped to the line.
+function panSpan(span, points, now, dx, widthPx){
+  // No Fit special case: a Fit window is already the full extent, so the
+  // clamps below put it straight back where it was. (An early-out for it was
+  // dead code - the mutation test proved removing it changed nothing.)
+  var full=lineSpan(points, now), w=span.hi-span.lo;
+  var shift=-dx*(w/widthPx), lo=span.lo+shift, hi=span.hi+shift;
+  if(lo<full.lo){ lo=full.lo; hi=lo+w; }
+  if(hi>full.hi){ hi=full.hi; lo=hi-w; }
+  return { lo:lo, hi:hi };
+}
+// The day the user's own week begins, from Work Schedule > Pay & Work Week.
+// Milestone week boundaries follow it rather than an assumed Monday.
+function weekStartOf(schedule){
+  var pr=schedule&&schedule.payroll;
+  return (pr&&pr.weekStart) || "mon";
+}
+function tickUnit(span){ return (span.hi-span.lo) > 31*MS_DAY ? "week" : "day"; }
+// Two tick sizes at every zoom: a MINOR tick for the small unit and a MAJOR
+// one for the big. What each means slides with the window, so the line always
+// carries a readable amount of them rather than a solid comb or a bare rule:
+//   over a month   minor = a week,  major = a month
+//   a week to a month  minor = a day,   major = the week start
+//   under two days     minor = an hour, major = the day
+// The major tick is taller AND thicker so it reads as a boundary, not just a
+// longer scratch.
+var MS_HOUR = 3600000;
+// ---- DRIFT: where a step was due against where it actually landed ----------
+// The bright sign sits on the ACTUAL date, because that is what happened; a
+// ghost is left at the target, and an arc joins them. Arc height is the
+// overrun, so the worst slip is the tallest thing on the line and can be
+// ranked without reading a date.
+//
+// Height is sqrt-compressed and CAPPED: straight proportional let a six-week
+// slip eat the whole panel, and a flat cap made every long drift look alike.
+// sqrt keeps a two-day drift visibly bowed while a six-week one stays inside
+// the ceiling.
+var DRIFT_MIN_PX = 7;      // below this, target and actual are the same mark
+var DRIFT_MAX_H  = 34;     // ceiling, whatever the overrun
+function arcHeight(spanPx){
+  return Math.min(DRIFT_MAX_H, 9 + Math.sqrt(Math.abs(spanPx))*3.4);
+}
+// The arcs a line should draw, widest first so short ones sit on top rather
+// than being buried, plus the headroom the tallest needs. A line with only
+// small drifts asks for only a little; one with none asks for nothing at all,
+// so the strip carries no fixed gap for this.
+function driftArcs(points, span, widthPx, all){
+  var scale = widthPx/Math.max(1, span.hi-span.lo);
+  var out=(points||[]).filter(function(p){
+    if(p.actual==null || (p.status!=="met" && p.status!=="late")) return false;
+    if(Math.abs((p.actual-p.at)*scale) < DRIFT_MIN_PX) return false;
+    // An arc is drawn whenever any PART of it falls in the window, not only
+    // when its target does: a drift whose target sits just off the left edge
+    // still has its arc and its bright mark on screen, and dropping it made
+    // arcs wink out as you panned towards them. Off-screen ends are clipped
+    // by the viewBox, which reads correctly as a line heading out of view.
+    if(all) return true;
+    var a=Math.min(p.at, p.actual), b=Math.max(p.at, p.actual);
+    return b>=span.lo && a<=span.hi;
+  }).map(function(p){
+    var x=(p.at-span.lo)*scale, ax=(p.actual-span.lo)*scale;
+    return { id:p.id, status:p.status, x:x, ax:ax, h:arcHeight(ax-x), late:p.actual>p.at };
+  });
+  out.sort(function(a,b){ return Math.abs(b.ax-b.x)-Math.abs(a.ax-a.x); });
+  return out;
+}
+// The room the tallest arc needs: its peak plus the 9px it starts above the
+// axis. A quadratic peaks at half its control offset, so the drawn control is
+// 2h and the peak is h - reserve exactly that and nothing clips.
+function driftHeadroom(arcs){
+  if(!arcs || !arcs.length) return 0;
+  return arcs.reduce(function(m,a){ return Math.max(m, a.h); }, 0) + 9;
+}
+function tickScale(span){
+  var w=span.hi-span.lo;
+  if(w > 31*MS_DAY)  return { minor:"week", major:"month" };
+  if(w > 2*MS_DAY)   return { minor:"day",  major:"week"  };
+  return { minor:"hour", major:"day" };
+}
+// Every minor tick in the window, each flagged as major or not. weekStart is
+// the day the user's own pay week begins, so the week boundaries on the line
+// land where their week actually starts - not on an assumed Monday.
+function lineTicks(span, weekStart){
+  var sc=tickScale(span), out=[];
+  var step = sc.minor==="hour" ? MS_HOUR : sc.minor==="day" ? MS_DAY : 7*MS_DAY;
+  var c=new Date(span.lo);
+  if(sc.minor==="hour") c.setMinutes(0,0,0);
+  else { c.setHours(0,0,0,0); if(sc.minor==="week") c=startOfWeek(c, weekStart); }
+  // Guard: a window of months at hour steps would be tens of thousands of
+  // ticks. The scale above cannot produce that, but a bad span could.
+  var guard=0;
+  for(var t=c.getTime(); t<=span.hi && guard<2000; t+=step, guard++){
+    if(t<span.lo) continue;
+    var d=new Date(t), major;
+    if(sc.major==="month") major = d.getDate()<=7;                       // first week of a month
+    else if(sc.major==="week") major = startOfWeek(d, weekStart).getTime()===new Date(t).setHours(0,0,0,0);
+    else major = d.getHours()===0;
+    out.push({ at:t, major:!!major });
+  }
+  return out;
+}
+// Marks that would land within `minPx` of each other share one signpost.
+// Each group keeps every member, so the dots above it can show every colour,
+// and the sign itself takes the worst.
+function groupMarks(points, span, widthPx, minPx){
+  var scale = widthPx/(span.hi-span.lo);
+  var sorted=(points||[]).slice().sort(function(a,b){ return a.at-b.at; });
+  var groups=[];
+  sorted.forEach(function(p){
+    var x=(p.at-span.lo)*scale;
+    var g=groups.length ? groups[groups.length-1] : null;
+    if(g && x-g.x < minPx){ g.members.push(p); g.status=worstStatus(g.members.map(function(m){ return m.status; })); }
+    else groups.push({ x:x, at:p.at, members:[p], status:p.status });
+  });
+  return groups;
+}
+
+// ---- THE MILESTONE LINE ------------------------------------------------------
+// One drawing, used everywhere a milestone line appears: the strips on the
+// board and in the outline, the editor, the lane view, the report. Marks only,
+// placed by date. Ticks stand ABOVE the line, taller every week; off days are
+// shaded from the work schedule; the axis is tinted up to now, with the now
+// marker below. Own steps and rolled-up children use the SAME signpost. Marks
+// that share a day become one signpost in the worst colour with a dot per
+// member above it - no count badges anywhere.
+var MS_STATUS_COLOR = function(status){
+  return { met:S.msMet, late:S.msLate, missed:S.msMissed, upcoming:S.msUpcoming }[status] || S.msUpcoming;
+};
+// Which weekdays (0=Sun..6=Sat) the schedule has off.
+function offDaysOf(schedule){
+  var map={ sun:0, mon:1, tue:2, wed:3, thu:4, fri:5, sat:6 }, out=[];
+  DAY_KEYS.forEach(function(k){ if(schedule && schedule[k] && schedule[k].on===false) out.push(map[k]); });
+  return out;
+}
+function MilestoneLine(props){
+  var points=props.points||[], now=props.now||Date.now(), width=props.width||320;
+  var labels=!!props.labels, offDays=props.offDays||[];
+  var bar = !!props.fullSpan;
+  var left=10, right=10, w=width-left-right;
+  // Drift arcs are measured FIRST, because the line grows by exactly what the
+  // tallest one needs and by nothing when there are none: a couple of short
+  // moves barely lift it, a six-week slip lifts it to the ceiling.
+  var drawSpan = props.span || lineSpan(points, now);
+  var arcs = props.drift===false ? [] : driftArcs(points, drawSpan, w);
+  // Headroom is measured over EVERY drift at this zoom, not just the ones on
+  // screen, so the line keeps one height while you pan and does not jump each
+  // time an arc scrolls in or out. It still changes between zoom LEVELS,
+  // because the arcs themselves genuinely change size there.
+  var head = props.drift===false ? 0 : Math.round(driftHeadroom(
+    driftArcs(points, { lo:drawSpan.lo, hi:drawSpan.hi }, w, true)));
+  var H = (labels ? 58 : 34) + (bar?6:0) + head, axisY = (labels ? 34 : 26) + head;
+  // The caller may hand in a zoomed and panned window; without one, Fit.
+  var span=props.span || lineSpan(points, now), unit=tickUnit(span), scale=w/(span.hi-span.lo);
+  var xOf=function(t){ return left+(t-span.lo)*scale; };
+  var kids=[];
+  // off-day bands, one per calendar day in the span
+  if(offDays.length){
+    var d=new Date(span.lo); d.setHours(0,0,0,0);
+    for(var t=d.getTime(); t<span.hi; t+=MS_DAY){
+      if(offDays.indexOf(new Date(t).getDay())>=0){
+        var x0=Math.max(left, xOf(t)), x1=Math.min(left+w, xOf(t+MS_DAY));
+        if(x1>x0) kids.push(React.createElement("rect", { key:"off"+t, x:x0, y:axisY-22, width:x1-x0, height:22, fill:S.msOffDay }));
+      }
+    }
+  }
+  kids.push(React.createElement("line", { key:"axis", x1:left, y1:axisY, x2:left+w, y2:axisY, stroke:S.border, strokeWidth:2 }));
+  var nowX=Math.max(left, Math.min(left+w, xOf(now)));
+  kids.push(React.createElement("line", { key:"elapsed", x1:left, y1:axisY, x2:nowX, y2:axisY, stroke:S.textDim, strokeWidth:2 }));
+  // Ticks: a short minor one for the small unit and a taller, thicker major
+  // for the boundary. What each unit IS slides with the window (see
+  // tickScale), and the week boundary follows the user's own pay week.
+  lineTicks(span, props.weekStart||"mon").forEach(function(k){
+    var x=xOf(k.at);
+    kids.push(React.createElement("line", { key:"tk"+k.at, "data-tick":k.major?"major":"minor",
+      x1:x, y1:axisY, x2:x, y2:axisY-(k.major?8:3),
+      stroke:k.major?S.textMuted:S.border, strokeWidth:k.major?2:1 }));
+  });
+  // The arcs, drawn before the marks so a sign always sits on top of them.
+  // Widest first (driftArcs sorts), so a short arc is never buried.
+  arcs.forEach(function(a){
+    var x=left+a.x, ax=left+a.ax, mid=(x+ax)/2, c=MS_STATUS_COLOR(a.status);
+    kids.push(React.createElement("path", { key:"arc"+a.id, "data-driftarc":a.id,
+      d:"M"+x+" "+(axisY-9)+"Q"+mid+" "+(axisY-9-a.h*2)+" "+ax+" "+(axisY-9),
+      fill:"none", stroke:c, strokeWidth:1.5, strokeDasharray:"3 3", opacity:0.72 }));
+    // The ghost: where it was DUE. Hollow head, dashed post, so the bright
+    // sign at the actual date is unmistakably the thing that happened.
+    kids.push(React.createElement("g", { key:"gh"+a.id, "data-driftghost":a.id, opacity:0.42 },
+      React.createElement("line", { x1:x, y1:axisY, x2:x, y2:axisY-8, stroke:c, strokeWidth:2.1,
+        strokeLinecap:"round", strokeDasharray:"2.5 2.5" }),
+      React.createElement("path", { d:"M"+x+" "+(axisY-8)+"L"+(x+4.4)+" "+(axisY-12.4)+"L"+x+" "+(axisY-16.8)+"L"+(x-4.4)+" "+(axisY-12.4)+"Z",
+        stroke:c, strokeWidth:2.1, strokeLinejoin:"round", fill:"none" })));
+  });
+  // marks
+  // Only what is inside the window: groupMarks places by date, so a mark
+  // outside it would be drawn off the end of the axis.
+  // Placed on the date that HAPPENED where there is one: a met or late step
+  // belongs on its actual date, with the ghost above marking the target. A
+  // missed or upcoming step has no actual, so it stays on its target.
+  var visible=points.filter(function(p){ return p.at>=span.lo && p.at<=span.hi; })
+    .map(function(p){
+      var real = (p.actual!=null && (p.status==="met"||p.status==="late")) ? p.actual : p.at;
+      return (real===p.at) ? p : Object.assign({}, p, { at:real });
+    })
+    .filter(function(p){ return p.at>=span.lo && p.at<=span.hi; });
+  var groups=groupMarks(visible, span, w, 10);
+  groups.forEach(function(g, i){
+    var x=left+g.x, c=MS_STATUS_COLOR(g.status), filled=g.status!=="upcoming";
+    kids.push(React.createElement("g", { key:"m"+i, "data-msmark":g.members.map(function(m){ return m.id; }).join(",") },
+      React.createElement("line", { x1:x, y1:axisY, x2:x, y2:axisY-8, stroke:c, strokeWidth:2.1, strokeLinecap:"round" }),
+      React.createElement("path", { d:"M"+x+" "+(axisY-8)+"L"+(x+4.4)+" "+(axisY-12.4)+"L"+x+" "+(axisY-16.8)+"L"+(x-4.4)+" "+(axisY-12.4)+"Z",
+        stroke:c, strokeWidth:2.1, strokeLinejoin:"round", fill:filled?c:S.bg1 }),
+      g.members.length>1 ? g.members.map(function(m, k){
+        return React.createElement("circle", { key:k, cx:x+8+k*5, cy:axisY-21, r:2, fill:MS_STATUS_COLOR(m.status) });
+      }) : null,
+      labels ? React.createElement("text", { x:x, y:axisY+16, fill:S.textDim, fontSize:8, fontWeight:600,
+        textAnchor:"middle", fontFamily:S.fontBody }, g.members.length>1 ? (g.members[0].label+" +"+(g.members.length-1)) : g.members[0].label) : null
+    ));
+  });
+  kids.push(React.createElement("path", { key:"now", d:"M"+(nowX-4.5)+" "+(axisY+8)+"L"+nowX+" "+(axisY+2)+"L"+(nowX+4.5)+" "+(axisY+8)+"Z", fill:S.text }));
+  // Two signals that the line runs past what is shown, and only when it does:
+  // the edges FADE, so the line visibly continues; and a scrollbar says where
+  // this window sits in the whole and how much of it you are seeing. The fade
+  // alone reads as decoration; the bar alone does not show continuation.
+  var full=props.fullSpan;
+  if(full && (full.hi-full.lo) > (span.hi-span.lo)+1){
+    var fid="msfade"+Math.round(width);
+    kids.push(React.createElement("defs", { key:"defs" },
+      React.createElement("linearGradient", { id:fid+"l" },
+        React.createElement("stop", { offset:"0", stopColor:S.bg1 }),
+        React.createElement("stop", { offset:"1", stopColor:S.bg1, stopOpacity:0 })),
+      React.createElement("linearGradient", { id:fid+"r" },
+        React.createElement("stop", { offset:"0", stopColor:S.bg1, stopOpacity:0 }),
+        React.createElement("stop", { offset:"1", stopColor:S.bg1 }))));
+    var fadeW=Math.min(26, w*0.12);
+    kids.push(React.createElement("rect", { key:"fl", x:left, y:0, width:fadeW, height:axisY+2, fill:"url(#"+fid+"l)" }));
+    kids.push(React.createElement("rect", { key:"fr", x:left+w-fadeW, y:0, width:fadeW, height:axisY+2, fill:"url(#"+fid+"r)" }));
+    // The bar: its width is the share of the line in view, its position where.
+    var fw=full.hi-full.lo;
+    var thumbW=Math.max(16, w*((span.hi-span.lo)/fw));
+    var thumbX=left+(w-thumbW)*Math.max(0, Math.min(1, (span.lo-full.lo)/Math.max(1, fw-(span.hi-span.lo))));
+    kids.push(React.createElement("rect", { key:"track", x:left, y:H-4, width:w, height:3, rx:1.5, fill:S.border }));
+    kids.push(React.createElement("rect", { key:"thumb", "data-msthumb":Math.round(thumbW), x:thumbX, y:H-4, width:thumbW, height:3, rx:1.5, fill:S.infoText }));
+  }
+  return React.createElement("svg", { width:"100%", height:H, viewBox:"0 0 "+width+" "+H, preserveAspectRatio:"none",
+    style:{display:"block"}, "data-msline":points.length }, kids);
+}
+
+// ---- MILESTONE EDITORS -------------------------------------------------------
+// The project editor: the line at full width with labels, then the steps as
+// rows; tap a row for its sheet. Steps are drafted here and written on Save,
+// so a wrong edit can be Cancelled like anything else.
+function fmtMsWhen(ms){
+  var d=new Date(ms);
+  return d.toLocaleDateString(undefined,{month:"short",day:"numeric"})+" \u00b7 "+
+    d.toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit"});
+}
+// "late by 1d 3h", "met, 2h early", "missed", "in 5 days"
+function fmtMsStanding(pt, now){
+  if(pt.status==="met"){ var e=-(pt.variance||0); return e>0 ? "met, "+fmtDur(e,true)+" early" : "met"; }
+  if(pt.status==="late") return "late by "+fmtDur(pt.variance,true);
+  if(pt.status==="missed") return "missed";
+  var ahead=pt.at-now; return "in "+fmtDur(ahead,true);
+}
+function toDateInput(ms){ var d=new Date(ms); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+function toTimeInput(ms){ var d=new Date(ms); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
+
+function MilestoneStepModal(props){
+  var step=props.step, records=props.records||[], onSave=props.onSave, onDelete=props.onDelete, onCancel=props.onCancel;
+  var isNew=!step.id;
+  var labelS=useState(step.label||""); var setLabel=labelS[1]; var label=labelS[0];
+  var dateS=useState(toDateInput(step.dueAt||Date.now())); var setDate=dateS[1]; var date=dateS[0];
+  var timeS=useState(toTimeInput(step.dueAt||Date.now())); var setTime=timeS[1]; var time=timeS[0];
+  var tgtS=useState((step.targets||[]).map(function(t){ return t.id; })); var setTgt=tgtS[1]; var tgt=tgtS[0];
+  var doneS=useState(step.doneAt||null); var setDone=doneS[1]; var done=doneS[0];
+  var noteS=useState(step.note||""); var setNote=noteS[1]; var note=noteS[0];
+  // Holding the mark opens a sheet to set WHEN it was met. A mark made after
+  // the fact would otherwise record the tap, not the moment, and turn an
+  // on-time step amber for no reason.
+  var whenS=useState(null); var setWhen=whenS[1]; var when=whenS[0];
+
+  var dueAt=joinDateTime(date, time);
+  var ok=label.trim() && dueAt!==null;
+  function submit(){
+    if(!ok) return;
+    onSave(Object.assign({}, step, { id:step.id||uid(), label:label.trim(), dueAt:dueAt,
+      targets:tgt.map(function(id){ return { kind:"project", id:id }; }), doneAt:done, note:note.trim() }));
+  }
+  // A hand mark, for expectations the app cannot see. Whichever comes first -
+  // the mark or the last target closing - is the actual. It rides in the
+  // sheet's sticky box, its own row above Save / Cancel / Delete, so the
+  // buttons a step is worked with are never scrolled out of reach - and it is
+  // never next to Delete.
+  var markBtn=React.createElement(HoldButton, { attrs:{ "data-msmarkmet":true }, fill:rgba(S.actionBdr,0.38),
+    onTap:function(){ setDone(done?null:Date.now()); },
+    onHold:function(){ setWhen({ date:toDateInput(done||Date.now()), time:toTimeInput(done||Date.now()) }); },
+    style:{width:"100%",background:done?S.infoBg:S.bg1,border:"2px solid "+(done?S.actionBdr:S.border),
+           borderRadius:S.radius,padding:"0.85rem",color:done?S.infoText:S.textDim,
+           fontFamily:S.fontBody,fontWeight:700,fontSize:MODAL_BTN_FONT} },
+    React.createElement("span", { style:{display:"block"} }, done ? "Marked met "+fmtMsWhen(done) : "Mark met now"),
+    React.createElement("span", { style:{display:"block",fontSize:"0.68rem",fontWeight:600,opacity:0.75,marginTop:"0.15rem"} },
+      done ? "tap to unmark \u00b7 hold to change when" : "hold to set when it was met"));
+  return React.createElement(React.Fragment, null,
+    React.createElement(Modal, { actions:[
+      React.createElement("div", { key:"col", style:{display:"flex",flexDirection:"column",gap:"0.5rem",flex:1} },
+        markBtn,
+        React.createElement("div", { style:{display:"flex",gap:"0.6rem",flexDirection:ACTION_DIR()} },
+          React.createElement("button", { "data-mssave":true, onClick:submit, disabled:!ok,
+          style:Object.assign({}, MODAL_SAVE(), ok?null:{opacity:0.5,cursor:"default"}) }, "Save"),
+        React.createElement("button", { onClick:onCancel, style:MODAL_CANCEL() }, "Cancel"),
+        !isNew && React.createElement(HoldButton, { onHold:function(){ onDelete(step.id); }, holdMs:HOLD_DELETE_MS, fill:rgba(S.dangerText,0.38),
+          attrs:{ "data-msdelete":true, "data-holddelete":true },
+          style:{flex:"0 0 auto",background:S.dangerBg,border:"1px solid "+S.dangerText,borderRadius:S.radius,
+                 padding:"0.85rem 0.9rem",color:S.dangerText,fontFamily:S.fontBody,
+                 fontWeight:700,fontSize:MODAL_BTN_FONT} }, "Delete")))],
+      title:isNew?"New Step":"Step \u00b7 "+(step.label||""), onClose:onCancel, ownActions:true },
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.9rem"} },
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Label"),
+        React.createElement("input", { "data-mslabel":true, value:label, onChange:function(e){ setLabel(e.target.value); },
+          placeholder:"What is reached at this point", style:INPUT_STYLE })),
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Due"),
+        React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
+          // minWidth:0 - date and time inputs carry a large intrinsic minimum
+          // that flex cannot shrink past, and the row ran off the sheet.
+          React.createElement("input", { "data-msdate":true, type:"date", value:date, onChange:function(e){ setDate(e.target.value); }, style:Object.assign({},INPUT_STYLE,{flex:1.4,minWidth:0}) }),
+          React.createElement("input", { "data-mstime":true, type:"time", value:time, onChange:function(e){ setTime(e.target.value); }, style:Object.assign({},INPUT_STYLE,{flex:1,minWidth:0}) }))),
+      // The expectation: which records under this project should be closed
+      // out by then. The step becomes actual when the last of them closes.
+      records.length>0 && React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Expects these closed out"),
+        React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.3rem"} },
+          records.map(function(r){
+            var on=tgt.indexOf(r.id)>=0;
+            return React.createElement("button", { key:r.id, "data-mstarget":r.id,
+              onClick:function(){ setTgt(on ? tgt.filter(function(x){ return x!==r.id; }) : tgt.concat([r.id])); },
+              style:{display:"flex",alignItems:"center",gap:"0.5rem",textAlign:"left",width:"100%",
+                     background:on?S.infoBg:S.bg1,border:"1px solid "+(on?S.actionBdr:S.border),
+                     borderRadius:S.radius3,padding:"0.55rem 0.7rem",color:S.text,cursor:"pointer",
+                     fontFamily:S.fontBody,fontWeight:600,fontSize:"0.84rem"} },
+              React.createElement(MenuIcon, { name:projRole(r)==="task"?"task":"project", size:16, col:on?S.infoText:S.chromeText }),
+              React.createElement("span", { style:{flex:1} }, r.name),
+              r.closedAt ? React.createElement("span", { style:{fontSize:"0.7rem",color:S.msMet,fontWeight:700} }, "closed") : null);
+          }))),
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Notes"),
+        React.createElement("textarea", { "data-msnote":true, value:note, onChange:function(e){ setNote(e.target.value); },
+          rows:3, placeholder:"Anything worth knowing about this point",
+          style:Object.assign({},INPUT_STYLE,{resize:"vertical",minHeight:"4.2rem"}) })))),
+    // A sibling of the step sheet, never inside it.
+    when && React.createElement(MilestoneWhenModal, { when:when,
+      onSave:function(ms){ setDone(ms); setWhen(null); }, onCancel:function(){ setWhen(null); } }));
+}
+// When was it met? Date and time, defaulting to the existing mark or now.
+function MilestoneWhenModal(props){
+  var dS=useState(props.when.date); var setD=dS[1]; var d=dS[0];
+  var tS=useState(props.when.time); var setT=tS[1]; var t=tS[0];
+  var ms=joinDateTime(d, t), ok=ms!==null && ms<=Date.now()+60000;
+  return React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", "data-mswhensave":true, onClick:function(){ if(ok) props.onSave(ms); }, disabled:!ok,
+          style:Object.assign({}, MODAL_SAVE(), ok?null:{opacity:0.5,cursor:"default"}) }, "Save"),
+        React.createElement("button", { key:"a1", onClick:props.onCancel, style:MODAL_CANCEL() }, "Cancel")], title:"When was it met?", onClose:props.onCancel, ownActions:true },
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.9rem"} },
+      React.createElement("div", { style:{fontSize:"0.8rem",color:S.textDim,lineHeight:1.4} },
+        "Set the moment it was actually reached - not when you got round to marking it."),
+      React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
+        React.createElement("input", { "data-mswhendate":true, type:"date", value:d, onChange:function(e){ setD(e.target.value); }, style:Object.assign({},INPUT_STYLE,{flex:1.4,minWidth:0}) }),
+        React.createElement("input", { "data-mswhentime":true, type:"time", value:t, onChange:function(e){ setT(e.target.value); }, style:Object.assign({},INPUT_STYLE,{flex:1,minWidth:0}) })),
+      !ok && ms!==null && React.createElement("div", { style:{fontSize:"0.76rem",color:S.warnText} }, "That is in the future. A mark records something that has happened.")));
+}
+
+function MilestoneEditModal(props){
+  var proj=props.project, projects=props.projects||[], onSave=props.onSave, onClose=props.onClose;
+  var now=props.now||Date.now(), offDays=props.offDays||[];
+  var stepsS=useState(function(){ return (proj.milestones||[]).slice(); }); var setSteps=stepsS[1]; var steps=stepsS[0];
+  var editS=useState(null); var setEdit=editS[1]; var edit=editS[0];   // a step being edited, or {} for new
+  // Drafted steps are scored against the live projects, so the line and the
+  // standings update as they are edited.
+  var draftProj=Object.assign({}, proj, { milestones:steps });
+  var scored=projects.map(function(p){ return p.id===proj.id ? draftProj : p; });
+  var line=projectLine(scored, proj.id, now);            // own steps drive the rows
+  var points=subtreePoints(scored, proj.id, now);        // the line shows everything beneath
+  // Records a step may expect: everything beneath this project.
+  var beneath=[];
+  (function walk(pid){ projects.filter(function(c){ return c.parentId===pid; }).forEach(function(c){ beneath.push(c); walk(c.id); }); })(proj.id);
+  function stepRow(pt, st){
+    var c=MS_STATUS_COLOR(pt.status);
+    return React.createElement("button", { key:st.id, "data-msstep":st.id, onClick:function(){ setEdit(st); },
+      style:{display:"flex",alignItems:"center",gap:"0.6rem",width:"100%",textAlign:"left",
+             background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.6rem 0.7rem",
+             cursor:"pointer",fontFamily:S.fontBody} },
+      React.createElement("svg", { width:16, height:22, viewBox:"0 0 16 22" },
+        React.createElement("line", { x1:8, y1:21, x2:8, y2:13, stroke:c, strokeWidth:2.1, strokeLinecap:"round" }),
+        React.createElement("path", { d:"M8 13L12.4 8.6L8 4.2L3.6 8.6Z", stroke:c, strokeWidth:2.1, strokeLinejoin:"round", fill:pt.status==="upcoming"?S.bg1:c })),
+      React.createElement("span", { style:{flex:1,minWidth:0} },
+        React.createElement("span", { style:{display:"block",color:S.text,fontWeight:700,fontSize:"0.9rem"} }, st.label),
+        React.createElement("span", { style:{display:"block",color:S.textDim,fontSize:"0.72rem",marginTop:"0.1rem"} },
+          fmtMsWhen(st.dueAt)+"  \u00b7  "+fmtMsStanding(pt, now)),
+        st.note ? React.createElement("span", { style:{display:"block",color:S.textMuted,fontSize:"0.7rem",marginTop:"0.15rem",
+          whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"} }, st.note) : null),
+      React.createElement("span", { style:{color:S.textMuted,fontSize:"1.1rem",fontWeight:700} }, "\u203a"));
+  }
+  return React.createElement(React.Fragment, null,
+    React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", "data-mssaveall":true, onClick:function(){ onSave(proj.id, steps); }, style:MODAL_SAVE() }, "Save"),
+          React.createElement("button", { key:"a1", onClick:onClose, style:MODAL_CANCEL() }, "Cancel")], title:"Milestones \u00b7 "+proj.name, onClose:onClose, wide:true, ownActions:true },
+      React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.6rem"} },
+        points.length>0 && React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.4rem 0.3rem 0"} },
+          React.createElement(MilestoneLine, { weekStart:(props.weekStart||"mon"), points:points, now:now, width:420, labels:true, offDays:offDays })),
+        // Rows in the order the line shows them, not the order they were typed.
+        line.own.slice().sort(function(a,b){ return a.at-b.at; })
+          .map(function(pt){ var st=steps.filter(function(x){ return x.id===pt.id; })[0]; return st ? stepRow(pt, st) : null; }),
+        line.children.length>0 && React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted,padding:"0.2rem 0.3rem"} },
+          line.children.length+" nested project"+(line.children.length!==1?"s":"")+" with milestones roll up onto this line"),
+        React.createElement("button", { "data-msadd":true, onClick:function(){ setEdit({}); },
+          style:{width:"100%",background:"none",border:"1px solid "+S.border,borderRadius:S.radius3,
+                 padding:"0.7rem",color:S.infoText,cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:"0.9rem"} },
+          "+ Add step"))),
+    edit && React.createElement(MilestoneStepModal, { step:edit, records:beneath,
+      onSave:function(st){ setSteps(function(prev){ var i=prev.findIndex(function(x){ return x.id===st.id; });
+        return i>=0 ? prev.map(function(x){ return x.id===st.id ? st : x; }) : prev.concat([st]); }); setEdit(null); },
+      onDelete:function(id){ setSteps(function(prev){ return prev.filter(function(x){ return x.id!==id; }); }); setEdit(null); },
+      onCancel:function(){ setEdit(null); } }));
+}
+
+// The lane view. A lane owns no steps: its line is its projects at their
+// current points, and each row opens that project's editor. Done, not Save -
+// there is nothing here to save.
+function LaneMilestonesModal(props){
+  var lane=props.lane, laneMeta=props.laneMeta, projects=props.projects||[], now=props.now||Date.now();
+  var onOpenProject=props.onOpenProject, onClose=props.onClose, offDays=props.offDays||[];
+  var meta=getMeta(laneMeta, lane);
+  var points=laneLine(projects, lane, now);
+  var tops=projects.filter(function(p){ return p.lane===lane && !p.parentId && !p.closedAt && projRole(p)==="project"; });
+  return React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", onClick:onClose, style:MODAL_SAVE() }, "Done")], title:"Milestones \u00b7 "+meta.label, onClose:onClose, wide:true, ownActions:true },
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.6rem"} },
+      React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted} },
+        "Lanes own no steps. Each mark is a project at its current point."),
+      points.length>0 && React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.4rem 0.3rem 0"} },
+        React.createElement(MilestoneLine, { weekStart:(props.weekStart||"mon"), points:points, now:now, width:420, labels:true, offDays:offDays })),
+      tops.map(function(p){
+        var cp=projectCurrent(projects, p.id, now), c=cp?MS_STATUS_COLOR(cp.status):S.textMuted;
+        var sub = !cp ? "no milestones yet \u00b7 tap to add"
+          : cp.open===0 ? "all "+cp.total+" met"
+          : cp.open+" of "+cp.total+" open \u00b7 "+(cp.status==="missed" ? "one missed" : "next "+fmtMsWhen(cp.at));
+        return React.createElement("button", { key:p.id, "data-mslaneproj":p.id, onClick:function(){ onOpenProject(p); },
+          style:{display:"flex",alignItems:"center",gap:"0.6rem",width:"100%",textAlign:"left",
+                 background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.6rem 0.7rem",
+                 cursor:"pointer",fontFamily:S.fontBody,opacity:cp?1:0.7} },
+          React.createElement("svg", { width:16, height:22, viewBox:"0 0 16 22" },
+            React.createElement("line", { x1:8, y1:21, x2:8, y2:13, stroke:c, strokeWidth:2.1, strokeLinecap:"round" }),
+            React.createElement("path", { d:"M8 13L12.4 8.6L8 4.2L3.6 8.6Z", stroke:c, strokeWidth:2.1, strokeLinejoin:"round", fill:(cp&&cp.status!=="upcoming")?c:S.bg1 })),
+          React.createElement("span", { style:{flex:1,minWidth:0} },
+            React.createElement("span", { style:{display:"block",color:cp?S.text:S.textMuted,fontWeight:700,fontSize:"0.9rem"} }, p.name),
+            React.createElement("span", { style:{display:"block",color:S.textDim,fontSize:"0.72rem",marginTop:"0.1rem"} }, sub)),
+          React.createElement("span", { style:{color:S.textMuted,fontSize:"1.1rem",fontWeight:700} }, "\u203a"));
+      })));
+}
+
+// The board view. One level above the lanes: its line is each lane at its
+// current point, and each row opens that lane's view. Done, not Save.
+function BoardMilestonesModal(props){
+  var laneOrder=props.laneOrder||[], laneMeta=props.laneMeta, projects=props.projects||[], now=props.now||Date.now();
+  var onOpenLane=props.onOpenLane, onClose=props.onClose, offDays=props.offDays||[];
+  var points=boardLine(projects, laneOrder, laneMeta, now);
+  return React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", onClick:onClose, style:MODAL_SAVE() }, "Done")], title:"Milestones \u00b7 Board", onClose:onClose, wide:true, ownActions:true },
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.6rem"} },
+      React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted} },
+        "Each mark is a lane at its current point. Lanes roll up from their projects."),
+      points.length>0 && React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.4rem 0.3rem 0"} },
+        React.createElement(MilestoneLine, { weekStart:(props.weekStart||"mon"), points:points, now:now, width:420, labels:true, offDays:offDays })),
+      laneOrder.map(function(k){
+        var meta=getMeta(laneMeta,k), cp=laneCurrent(projects, k, now), c=cp?MS_STATUS_COLOR(cp.status):S.textMuted;
+        var sub = !cp ? "no milestones in this lane"
+          : cp.open===0 ? "all met" : cp.open+" open \u00b7 "+(cp.status==="missed" ? "one missed" : "next "+fmtMsWhen(cp.at));
+        return React.createElement("button", { key:k, "data-msboardlane":k, onClick:function(){ onOpenLane(k); },
+          style:{display:"flex",alignItems:"center",gap:"0.6rem",width:"100%",textAlign:"left",
+                 background:S.bg1,border:"1px solid "+(cp?meta.accent:S.border),borderRadius:S.radius3,padding:"0.6rem 0.7rem",
+                 cursor:"pointer",fontFamily:S.fontBody,opacity:cp?1:0.6} },
+          React.createElement(MenuIcon, { name:"lanes", size:18, col:meta.accent }),
+          React.createElement("span", { style:{flex:1,minWidth:0} },
+            React.createElement("span", { style:{display:"block",color:meta.accent,fontWeight:700,fontSize:"0.88rem",letterSpacing:"0.06em",textTransform:"uppercase"} }, meta.label),
+            React.createElement("span", { style:{display:"block",color:S.textDim,fontSize:"0.72rem",marginTop:"0.1rem"} }, sub)),
+          cp && React.createElement("span", { style:{width:"10px",height:"10px",borderRadius:"50%",background:c,flexShrink:0} }),
+          React.createElement("span", { style:{color:S.textMuted,fontSize:"1.1rem",fontWeight:700} }, "\u203a"));
+      })));
+}
+
+// ---- THE MILESTONE STRIP -----------------------------------------------------
+// The line, as it sits under a component on the board and in the outline: no
+// labels, tap to open. One component for lane, project and board so the three
+// cannot drift; what differs is only the points handed in and what a tap opens.
+function MilestoneStrip(props){
+  var points=props.points||[], now=props.now||Date.now(), width=props.width||360;
+  var zoomS=useState(0); var setZoom=zoomS[1]; var zoom=zoomS[0];
+  var spanS=useState(null); var setSpan=spanS[1]; var span=spanS[0];
+  var drag=useRef(null);
+  var shown = span || zoomSpan(points, now, zoom, null);
+  function step(){ var z=nextZoom(zoom); setZoom(z); setSpan(zoomSpan(points, now, z, (shown.lo+shown.hi)/2)); haptic(8); }
+  function toFit(){ setZoom(0); setSpan(null); haptic(12); }
+  var zoomed = zoom!==0;
+  // The line pans by dragging it, but only when zoomed in: at Fit there is
+  // nowhere to go, and a vertically scrolling page should not swallow a
+  // horizontal drag it cannot use. A drag that never moved is a tap.
+  var panHandlers = zoomed ? {
+    onPointerDown:function(e){ drag.current={ x:e.clientX, span:shown, moved:false }; },
+    onPointerMove:function(e){
+      if(!drag.current) return;
+      var dx=e.clientX-drag.current.x;
+      if(Math.abs(dx)>4){ drag.current.moved=true; setSpan(panSpan(drag.current.span, points, now, dx, width)); }
+    },
+    onPointerUp:function(){ var d=drag.current; drag.current=null; if(d && !d.moved && props.onOpen) props.onOpen(); },
+    onPointerCancel:function(){ drag.current=null; },
+    onPointerLeave:function(){ drag.current=null; }
+  } : { onClick:props.onOpen };
+  if(!points.length) return null;
+  return React.createElement("div", { "data-msstrip":props.kind,
+    style:{display:"flex",alignItems:"stretch",gap:"0.3rem",background:S.bg1,
+           border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.15rem 0.2rem 0",
+           marginTop:props.tight?"0.35rem":"0.5rem"} },
+    React.createElement("div", Object.assign({ "data-mspan":true,
+      style:{flex:1,minWidth:0,cursor:zoomed?"grab":"pointer",touchAction:zoomed?"pan-y":"auto"} }, panHandlers),
+      React.createElement(MilestoneLine, { weekStart:(props.weekStart||"mon"), points:points, now:now, width:width, span:shown,
+        fullSpan: zoomed ? lineSpan(points, now) : null,
+        labels:false, offDays:props.offDays||[] })),
+    // The zoom control LAST, so it sits at the trailing edge: the right for a
+    // right-hander, and the root's dir="rtl" moves it to the left for a
+    // left-hander - the thumb edge either way. The strip sets no
+    // flexDirection of its own: the root already mirrors this row, and doing
+    // it here too cancelled out and put the control left of the line for BOTH
+    // hands. Tap steps the level and wraps; hold snaps back to Fit.
+    React.createElement(HoldButton, { onTap:step, onHold:toFit, holdMs:HOLD_DELETE_MS, fill:rgba(S.actionBdr,0.3),
+      attrs:{ "data-mszoom":zoomAt(zoom).id, "aria-label":"Zoom: "+zoomAt(zoom).label },
+      style:{flex:"0 0 auto",alignSelf:"center",display:"flex",alignItems:"center",
+             background:S.infoBg,border:"1px solid "+S.actionBdr,
+             borderRadius:S.radius3,padding:"0.2rem 0.4rem",color:S.infoText,
+             fontFamily:S.fontBody,fontWeight:700,fontSize:"0.6rem",letterSpacing:"0.04em",whiteSpace:"nowrap"} },
+      // dir="ltr": the root is rtl for a left-hander, which reverses the words
+      // inside the label - "3 months" came out as "months 3". The control's
+      // PLACEMENT should mirror; its text should not.
+      React.createElement("span", { dir:"ltr" }, zoomAt(zoom).label)));
+}
+
+// ---- THE OUTLINE -------------------------------------------------------------
+// One list holding lanes, the projects and tasks inside them, and the stages
+// hanging off those. Position and indent together say where a row belongs: a
+// row's parent is the nearest row above it with a smaller indent. That is the
+// entire model. There is no separate parent field kept alongside, so a move
+// cannot leave position and parentage disagreeing with each other.
+//
+// The drag is free; the drop is checked. The hierarchy is typed - a lane
+// cannot sit inside a project, a stage cannot hold anything, a node has to
+// live in a lane - so some drops are refused outright and the row springs
+// back. Refusing visibly beats silently correcting to something legal that
+// the user did not ask for.
+
+// Flatten the board into rows. Stages come directly after their own node and
+// before that node's children, so a node's own detail reads before its
+// sub-tree.
+function outlineRows(laneOrder, laneMeta, projects){
+  var rows=[], all=projects||[];
+  (laneOrder||[]).forEach(function(lane){
+    var meta=(laneMeta&&laneMeta[lane])||{};
+    rows.push({ key:"L:"+lane, kind:"lane", id:lane, name:meta.label||lane, level:0, accent:meta.accent });
+    (function walk(parentId, level){
+      all.filter(function(p){ return p.lane===lane && (p.parentId||null)===parentId; })
+         .sort(function(a,b){ return (a.order||0)-(b.order||0); })
+         .forEach(function(p){
+           rows.push({ key:"P:"+p.id, kind:"node", id:p.id, name:p.name, level:level,
+                       role:projRole(p), accent:meta.accent });
+           (p.stages||[]).forEach(function(st){
+             rows.push({ key:"S:"+p.id+":"+st.id, kind:"stage", id:st.id, hostId:p.id,
+                         name:st.label||st.name||"", level:level+1, done:!!st.done, accent:meta.accent });
+           });
+           walk(p.id, level+1);
+         });
+    })(null, 1);
+  });
+  return rows;
+}
+// Fold a freshly-read board back into an outline that is already being
+// edited. The editor holds unsaved moves in its own state, so it cannot
+// simply rebuild when a name is changed in a child editor - that would throw
+// the moves away. Content comes from the fresh rows, sequence and indent from
+// the ones on screen.
+//
+// Rows created by a conversion have no counterpart in the fresh read yet, so
+// they are kept on their own account. Rows whose record has gone are dropped.
+function mergeOutline(existing, fresh){
+  var byKey={}; (fresh||[]).forEach(function(r){ byKey[r.key]=r; });
+  var out=[], seen={};
+  // A conversion has not been saved yet, so the record it came from is still
+  // in the fresh read. Without this the outline would show both the new lane
+  // and the project it was made from.
+  (existing||[]).forEach(function(r){
+    if(!r.fresh) return;
+    if(r.fromProject!==undefined) seen["P:"+r.fromProject]=true;
+    if(r.fromLane!==undefined) seen["L:"+r.fromLane]=true;
+  });
+  (existing||[]).forEach(function(r){
+    var f=byKey[r.key];
+    if(!f){ if(r.fresh){ out.push(r); seen[r.key]=true; } return; }
+    out.push(Object.assign({}, f, { level:r.level, role:r.role||f.role }));
+    seen[r.key]=true;
+  });
+  // Anything new - a stage added while the sheet was open - goes in after
+  // whichever of its fresh neighbours is already on screen.
+  (fresh||[]).forEach(function(f, i){
+    if(seen[f.key]) return;
+    var at=out.length;
+    for(var j=i-1;j>=0;j--){
+      var pos=-1;
+      for(var k=0;k<out.length;k++) if(out[k].key===fresh[j].key){ pos=k; break; }
+      if(pos>=0){ at=pos+1; break; }
+    }
+    out.splice(at, 0, f); seen[f.key]=true;
+  });
+  return out;
+}
+// ---- STEPPING THE OUTLINE --------------------------------------------------
+// Rows move by buttons, not by dragging. Up and down move a row among its
+// siblings; at the first or last position one more step takes it out of its
+// parent into the neighbouring one, which is the only move that asks first.
+// Left and right change indent, and type follows depth: level 0 is a lane,
+// level 1 a project, deeper is nested. Every function is pure and returns
+// either the new rows - with a note of what crossed - or null when the step
+// is not possible, so a button can be disabled rather than dead.
+
+function blockEnd(rows, i){ return i+outlineSpan(rows, i); }
+// The row that owns this one: nearest above with a smaller indent.
+function parentIndex(rows, i){
+  for(var j=i-1;j>=0;j--) if(rows[j].level<rows[i].level) return j;
+  return -1;
+}
+// Siblings share a parent, a level and a kind. Stages sit at the same level
+// as their host's child nodes, so kind has to match too.
+function prevSibling(rows, i){
+  var L=rows[i].level, K=rows[i].kind;
+  for(var j=i-1;j>=0;j--){
+    if(rows[j].level<L) return -1;
+    if(rows[j].level===L && rows[j].kind===K) return j;
+  }
+  return -1;
+}
+function nextSibling(rows, i){
+  var L=rows[i].level, K=rows[i].kind;
+  for(var j=blockEnd(rows,i);j<rows.length;j++){
+    if(rows[j].level<L) return -1;
+    if(rows[j].level===L && rows[j].kind===K) return j;
+  }
+  return -1;
+}
+// Lift a block out and put it back at `at` (an index into the list WITHOUT the
+// block), shifting its indent by `dl`.
+function replant(rows, i, at, dl){
+  var span=outlineSpan(rows,i);
+  var block=rows.slice(i,i+span).map(function(r){ return dl ? Object.assign({},r,{level:r.level+dl}) : r; });
+  var rest=rows.slice(0,i).concat(rows.slice(i+span));
+  return rest.slice(0,at).concat(block, rest.slice(at));
+}
+// Where a first child of `target` would go: after the target's own stages.
+function firstChildAt(rows, ti){
+  var at=ti+1;
+  while(at<rows.length && rows[at].kind==="stage" && rows[at].level===rows[ti].level+1) at++;
+  return at;
+}
+function stepUp(rows, i){
+  if(!rows || i<=0 || i>=rows.length) return null;
+  var r=rows[i], p=prevSibling(rows,i);
+  if(p>=0) return { rows:replant(rows,i,p,0), crossed:null };
+  if(r.kind!=="node") return null;                  // lanes and stages stay in their run
+  var P=parentIndex(rows,i); if(P<0) return null;
+  var Q=prevSibling(rows,P); if(Q<0) return null;   // parent is first: nowhere to go
+  // become the last child of Q; Q's subtree is above, so its indices hold
+  var span=outlineSpan(rows,i), rest=rows.slice(0,i).concat(rows.slice(i+span));
+  return { rows:replant(rows,i,blockEnd(rest,Q),0), crossed:{ from:rows[P], into:rows[Q] } };
+}
+function stepDown(rows, i){
+  if(!rows || i<0 || i>=rows.length) return null;
+  var r=rows[i], span=outlineSpan(rows,i), n=nextSibling(rows,i);
+  if(n>=0){
+    var rest=rows.slice(0,i).concat(rows.slice(i+span));
+    return { rows:replant(rows,i,blockEnd(rest,n-span),0), crossed:null };
+  }
+  if(r.kind!=="node") return null;
+  var P=parentIndex(rows,i); if(P<0) return null;
+  var R=nextSibling(rows,P); if(R<0) return null;
+  var rest2=rows.slice(0,i).concat(rows.slice(i+span));
+  return { rows:replant(rows,i,firstChildAt(rest2,R-span),0), crossed:{ from:rows[P], into:rows[R] } };
+}
+// What a row could become if it nested under the row above. A task holds only
+// tasks; a project holds either. Returned as a list so the controller can
+// offer exactly the choices that exist and grey the rest, rather than the
+// caller inferring a role and being corrected afterwards.
+function nestRoles(rows, i){
+  if(!rows || i<0 || i>=rows.length) return [];
+  var r=rows[i];
+  if(r.kind!=="node") return [];
+  var p=prevSibling(rows,i); if(p<0) return [];
+  var host=rows[p];
+  if(host.kind!=="node") return [];
+  return host.role==="task" ? ["task"] : ["task","project"];
+}
+// Nest under the row above, as the role asked for. A lane becomes a project
+// inside the lane above, its projects nesting one deeper.
+function stepIn(rows, i, asRole){
+  if(!rows || i<0 || i>=rows.length) return null;
+  var r=rows[i];
+  if(r.kind==="stage") return null;
+  var p=prevSibling(rows,i); if(p<0) return null;
+  if(r.kind==="lane"){
+    var span=outlineSpan(rows,i);
+    var block=rows.slice(i,i+span).map(function(x,k){
+      if(k===0) return { key:"P:new-"+x.id, kind:"node", id:"new-"+x.id, name:x.name, level:1,
+                         role:"project", accent:x.accent, fresh:true, fromLane:x.id };
+      return Object.assign({},x,{level:x.level+1});
+    });
+    return { rows:rows.slice(0,i).concat(block, rows.slice(i+span)), converted:{ lane:r, intoLane:rows[p] } };
+  }
+  // The role is chosen, not inferred. Refused outright when the host cannot
+  // hold it - a project inside a task has no meaning.
+  var roles=nestRoles(rows,i);
+  var want=asRole||roles[0];
+  if(!roles.length || roles.indexOf(want)<0) return null;
+  var span2=outlineSpan(rows,i), rest=rows.slice(0,i).concat(rows.slice(i+span2));
+  var out=replant(rows,i,blockEnd(rest,p),1);
+  var at=blockEnd(rest,p);
+  out[at]=Object.assign({},out[at],{ role:want });
+  return { rows:out, crossed:null };
+}
+// Un-nest. A task becomes a project beside its old parent. A top-level
+// project becomes a new lane after the one it was in - refused if it carries
+// stages, which a lane cannot hold.
+function stepOut(rows, i){
+  if(!rows || i<0 || i>=rows.length) return null;
+  var r=rows[i];
+  if(r.kind!=="node") return null;
+  var P=parentIndex(rows,i); if(P<0) return null;
+  var span=outlineSpan(rows,i), rest=rows.slice(0,i).concat(rows.slice(i+span));
+  if(r.level>=2){
+    var out=replant(rows,i,blockEnd(rest,P),-1);
+    var at=blockEnd(rest,P);
+    if(r.level-1===1) out[at]=Object.assign({},out[at],{ role:"project" });
+    return { rows:out, crossed:null };
+  }
+  // level 1 -> a lane of its own
+  for(var k=i+1;k<i+span;k++) if(rows[k].kind==="stage" && rows[k].level===2) return null;
+  var block=rows.slice(i,i+span).map(function(x,k){
+    if(k===0) return { key:"L:new-"+x.id, kind:"lane", id:"new-lane-"+x.id, name:x.name, level:0,
+                       accent:x.accent, fresh:true, fromProject:x.id };
+    return Object.assign({},x,{level:x.level-1});
+  });
+  return { rows:rest.slice(0,blockEnd(rest,P)).concat(block, rest.slice(blockEnd(rest,P))), converted:{ project:r, outOfLane:rows[P] } };
+}
+// What each button can do for a row, so the UI disables rather than guesses.
+function stepOptions(rows, i, asRole){
+  return { up:!!stepUp(rows,i), down:!!stepDown(rows,i),
+           in_:!!stepIn(rows,i,asRole), out:!!stepOut(rows,i), roles:nestRoles(rows,i) };
+}
+
+// How many rows a row owns: itself plus everything indented under it.
+function outlineSpan(rows, at){
+  var lvl=rows[at].level, n=1;
+  while(at+n<rows.length && rows[at+n].level>lvl) n++;
+  return n;
+}
+// Read the tree back out of the flat list. Lane order, each record's lane,
+// parent and order, and each node's stages - all derived from position and
+// indent, never from a field that could have drifted.
+function outlineCommit(rows){
+  // `orders` is the answer, `counts` is the running tally per sibling set.
+  // One map for both would collide the moment a record id matched a key.
+  var laneOrder=[], byLane={}, parents={}, orders={}, counts={}, stages={};
+  // Records created or retired by a conversion. A lane stepped in becomes a
+  // fresh project and its old lane goes; a project stepped out becomes a
+  // fresh lane and its old project record goes.
+  var newLanes=[], newProjects=[], dropLanes=[], dropProjects=[];
+  var laneOf=null, stack=[];
+  (rows||[]).forEach(function(r){
+    if(r.kind==="lane"){
+      laneOrder.push(r.id); laneOf=r.id; stack=[];
+      if(r.fresh){ newLanes.push({ id:r.id, label:r.name, accent:r.accent }); if(r.fromProject!==undefined) dropProjects.push(r.fromProject); }
+      return;
+    }
+    if(r.kind==="node" && r.fresh){
+      newProjects.push({ id:r.id, name:r.name, role:r.role||"project" });
+      if(r.fromLane!==undefined) dropLanes.push(r.fromLane);
+    }
+    if(laneOf===null) return;                       // orphan guard
+    while(stack.length && stack[stack.length-1].level>=r.level) stack.pop();
+    var host=stack.length ? stack[stack.length-1] : null;
+    if(r.kind==="stage"){
+      if(!host) return;
+      (stages[host.id]=stages[host.id]||[]).push(r);
+      return;
+    }
+    byLane[r.id]=laneOf;
+    parents[r.id]=host?host.id:null;
+    var k=laneOf+"/"+(host?host.id:"root");
+    orders[r.id]=(counts[k]===undefined?(counts[k]=0):++counts[k]);
+    stack.push(r);
+  });
+  return { laneOrder:laneOrder, laneOf:byLane, parentOf:parents, orderOf:orders, stagesOf:stages,
+           newLanes:newLanes, newProjects:newProjects, dropLanes:dropLanes, dropProjects:dropProjects };
+}
+
 
 // ---- CAROUSEL ---------------------------------------------------------------
 // For choices that can grow past two options. Continuous: swipe past the last
@@ -3077,7 +4587,7 @@ function WorkScheduleModal(props){
   };
   return React.createElement(React.Fragment, null,
     React.createElement(Modal, { title:"Work Schedule", onClose:props.onClose, wide:true,
-    onSave:function(){ props.onSave(draft); }, saveLabel:"Save Schedule" },
+    onSave:function(){ props.onSave(draft); }, saveLabel:"Save" },
     React.createElement("div", { style:{fontSize:"0.8rem",color:S.textDim,marginBottom:"0.9rem"} },
       "Days and hours you normally work. Reports will measure tracked time against this."),
     // ---- pay & work week ----
@@ -3677,43 +5187,43 @@ function TrackingModal(props){
   );
 }
 
-function SettingsModal(props){
+// ---- THEMES MODAL -----------------------------------------------------------
+// Appearance only: what the app looks like. Split from Layout because the two
+// are chosen at different moments - a theme is picked once and left alone,
+// while handedness and header position get moved around as the job does.
+// The shared section furniture lives in SETTINGS_BOXES so the two modals cannot
+// drift into looking like different apps.
+function SETTINGS_BOXES(){
+  return {
+    head:{fontSize:"0.75rem",textTransform:"uppercase",letterSpacing:"0.1em",color:S.textDim,fontWeight:700,marginBottom:"0.4rem"},
+    box:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.75rem 0.9rem",marginBottom:"0.85rem"},
+    placeholder:{border:"2px dashed "+S.borderBright,borderRadius:S.radius3,padding:"0.6rem 0.8rem",color:S.textMuted,fontSize:"0.82rem",textAlign:"center"},
+    subHead:{fontSize:"0.72rem",textTransform:"uppercase",letterSpacing:"0.08em",color:S.textMuted,fontWeight:700,margin:"0.95rem 0 0.35rem"},
+    note:{fontSize:"0.78rem",color:S.textDim,marginBottom:"0.5rem"},
+    closeBtn:{width:"100%",background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.85rem",color:S.textDim,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600}
+  };
+}
+function ThemesModal(props){
   var settings=props.settings, onChange=props.onChange, onClose=props.onClose;
-  var sectionHead={fontSize:"0.75rem",textTransform:"uppercase",letterSpacing:"0.1em",color:S.textDim,fontWeight:700,marginBottom:"0.4rem"};
-  var sectionBox={background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.75rem 0.9rem",marginBottom:"0.85rem"};
-  var placeholder={border:"2px dashed "+S.borderBright,borderRadius:S.radius3,padding:"0.6rem 0.8rem",color:S.textMuted,fontSize:"0.82rem",textAlign:"center"};
-
-  function set(key, val){
-    var n=Object.assign({},settings); n[key]=val; onChange(n);
-  }
-  function pending(title, desc){
-    return React.createElement("div", { key:title, style:sectionBox },
-      React.createElement("div", { style:sectionHead }, title),
-      React.createElement("div", { style:{fontSize:"0.8rem",color:S.textDim,marginBottom:"0.55rem"} }, desc),
-      React.createElement("div", { style:placeholder }, "Options coming soon")
-    );
-  }
-
-  var subHead={fontSize:"0.72rem",textTransform:"uppercase",letterSpacing:"0.08em",
-               color:S.textMuted,fontWeight:700,margin:"0.95rem 0 0.35rem"};
-  var note={fontSize:"0.78rem",color:S.textDim,marginBottom:"0.5rem"};
+  var B=SETTINGS_BOXES();
+  function set(key, val){ var n=Object.assign({},settings); n[key]=val; onChange(n); }
   var themeKey=themeKeyOf(settings);
 
   return (
-    React.createElement(Modal, { title:"Themes and Layout", onClose:onClose, onSave:onClose, wide:true },
-      // Appearance, ordered the way it is chosen: theme first, then the palette
-      // and type that theme allows, then the mode it renders in.
-      React.createElement("div", { style:sectionBox },
-        React.createElement("div", { style:sectionHead }, "Theme"),
-        React.createElement("div", { style:note }, "Shape, texture and type. Each theme carries its own palettes and faces."),
+    React.createElement(Modal, { title:"Themes", onClose:onClose, onSave:onClose, wide:true },
+      // Ordered the way it is chosen: theme first, then the palette and type
+      // that theme allows, then the mode it renders in.
+      React.createElement("div", { style:B.box },
+        React.createElement("div", { style:B.head }, "Theme"),
+        React.createElement("div", { style:B.note }, "Shape, texture and type. Each theme carries its own palettes and faces."),
         React.createElement(Carousel, {
           name:"theme", keys:Object.keys(THEMES), value:themeKey,
           labelOf:function(k){ return THEMES[k].label; },
           onChange:function(v){ set("theme", v); }
         }),
 
-        React.createElement("div", { style:subHead }, "Colour palette"),
-        React.createElement("div", { style:note }, "Only the palettes this theme allows."),
+        React.createElement("div", { style:B.subHead }, "Colour palette"),
+        React.createElement("div", { style:B.note }, "Only the palettes this theme allows."),
         React.createElement(Carousel, {
           name:"palette", keys:THEMES[themeKey].schemes, value:schemeKeyOf(settings),
           labelOf:function(k){ return (SCHEMES[k]||{}).label || k; },
@@ -3729,8 +5239,8 @@ function SettingsModal(props){
           })
         ),
 
-        React.createElement("div", { style:subHead }, "Typeface"),
-        React.createElement("div", { style:note }, "Shown in its own face. Each theme remembers the one you picked for it."),
+        React.createElement("div", { style:B.subHead }, "Typeface"),
+        React.createElement("div", { style:B.note }, "Shown in its own face. Each theme remembers the one you picked for it."),
         React.createElement(Carousel, {
           name:"typeface", keys:Object.keys(THEMES[themeKey].fonts), value:fontKeyOf(settings),
           labelOf:function(k){ return THEMES[themeKey].fonts[k].label; },
@@ -3741,7 +5251,7 @@ function SettingsModal(props){
           }
         }),
 
-        React.createElement("div", { style:subHead }, "Mode"),
+        React.createElement("div", { style:B.subHead }, "Mode"),
         React.createElement(Toggle, {
           name:"mode", keys:["dark","light"], value:settings.mode==="light"?"light":"dark",
           labelOf:function(k){ return k==="dark"?"Dark":"Light"; },
@@ -3749,21 +5259,44 @@ function SettingsModal(props){
         })
       ),
 
-      pending("Layout", "Density, card sizes, and what shows on each row."),
+      React.createElement("button", { onClick:onClose, style:B.closeBtn }, "Close")
+    )
+  );
+}
+
+// ---- LAYOUT MODAL -----------------------------------------------------------
+// Where things sit and how they are reached. Module settings panels land here
+// rather than in Themes: a module's options are about how it behaves, which is
+// nearer to layout than to palette. The contract field is still the single
+// `settingsPanel`, so no module has to change - if one ever needs the Themes
+// side instead, that is a new optional field rather than a rearrangement.
+function LayoutModal(props){
+  var settings=props.settings, onChange=props.onChange, onClose=props.onClose;
+  var B=SETTINGS_BOXES();
+  function set(key, val){ var n=Object.assign({},settings); n[key]=val; onChange(n); }
+
+  return (
+    React.createElement(Modal, { title:"Layout", onClose:onClose, onSave:onClose, wide:true },
+      React.createElement("div", { style:B.box },
+        React.createElement("div", { style:B.head }, "Density"),
+        React.createElement("div", { style:{fontSize:"0.8rem",color:S.textDim,marginBottom:"0.55rem"} },
+          "Card sizes, spacing, and what shows on each row."),
+        React.createElement("div", { style:B.placeholder }, "Options coming soon")
+      ),
 
       // Reach: which hand holds the phone, and which end of the screen the bar sits at.
-      React.createElement("div", { style:sectionBox },
-        React.createElement("div", { style:sectionHead }, "Handedness"),
-        React.createElement("div", { style:note }, "Mirrors the whole layout so controls fall under your thumb."),
+      React.createElement("div", { style:B.box },
+        React.createElement("div", { style:B.head }, "Handedness"),
+        React.createElement("div", { style:B.note }, "Mirrors the whole layout so controls fall under your thumb."),
         React.createElement(Toggle, {
           name:"hand", keys:["left","right"], value:settings.handedness==="left"?"left":"right",
           labelOf:function(k){ return k==="left"?"Left Hand":"Right Hand"; },
           onChange:function(v){ set("handedness", v); }
         })
       ),
-      React.createElement("div", { style:sectionBox },
-        React.createElement("div", { style:sectionHead }, "Header Position"),
-        React.createElement("div", { style:note }, "Swipe up or down to move the control bar to that end of the screen."),
+      React.createElement("div", { style:B.box },
+        React.createElement("div", { style:B.head }, "Header Position"),
+        React.createElement("div", { style:B.note }, "Swipe up or down to move the control bar to that end of the screen."),
         React.createElement(Toggle, {
           name:"header", axis:"y", keys:["top","bottom"], value:settings.headerPos==="bottom"?"bottom":"top",
           labelOf:function(k){ return k==="top"?"Top":"Bottom"; },
@@ -3774,14 +5307,380 @@ function SettingsModal(props){
       // Module panels, each in the same section box the core uses, so a module
       // cannot drift from the settings language. None registered yet.
       ttSettingsPanels().map(function(m){
-        return React.createElement("div", { key:m.id, style:sectionBox },
-          React.createElement("div", { style:sectionHead }, m.title),
+        return React.createElement("div", { key:m.id, style:B.box },
+          React.createElement("div", { style:B.head }, m.title),
           React.createElement(m.settingsPanel, ttModuleContext(m.id, { settings:settings, onChange:onChange }))
         );
       }),
 
-      React.createElement("button", { onClick:onClose,
-        style:{width:"100%",background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.85rem",color:S.textDim,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600} }, "Close")
+      React.createElement("button", { onClick:onClose, style:B.closeBtn }, "Close")
+    )
+  );
+}
+
+// ---- THE OUTLINE EDITOR ------------------------------------------------------
+// One screen for the whole board: lanes, the projects and tasks inside them,
+// and the stages hanging off those.
+//
+// Tap a row's glyph to select it; a controller rises from the bottom with a
+// d-pad and, where it means something, a choice of how the row should nest.
+// Tap a row's name to open that item's own editor instead.
+//
+// Buttons rather than dragging. Dragging on iOS lost a week to Safari
+// claiming the gesture for scrolling before the first touchmove, with
+// touch-action ignored. Buttons have no gesture to lose, work the same in a
+// list long enough to scroll, and make nesting explicit: the role a row takes
+// when it nests is chosen, not inferred from where it landed.
+// ---- ROW MENUS ---------------------------------------------------------------
+// One menu per kind, built here and used by BOTH the outline and the board -
+// so a lane's menu offers the same things in the same order whichever screen
+// it is opened from. Edit first, then what can be added from here, from the
+// same level inward. "Add project" / "Add task" on a record is a SIBLING;
+// "Add nested" goes inside. Stages are a list on their host, so both stage
+// entries open that list.
+//
+// `a` is the set of actions the caller can perform; an entry whose action is
+// missing is left out rather than rendered dead.
+function rowMenuItems(kind, role, a){
+  var out=[];
+  function add(label, glyph, fn){ if(fn) out.push({ label:label, glyph:glyph, go:fn }); }
+  if(kind==="lane"){
+    add("Edit lane",   "lanes",     a.edit);
+    add("New lane",    "lanes",     a.newLane);
+    add("New project", "project",   a.newProject);
+    add("Milestones",  "milestone", a.milestones);
+  } else if(kind==="stage"){
+    add("Edit stage",  "stages",  a.edit);
+    add("Add stage",   "stages",  a.edit);
+  } else if(role==="task"){
+    add("Edit task",        "task",   a.edit);
+    add("Add task",         "task",   a.addSibling);
+    add("Add nested task",  "task",   a.addNestedTask);
+    add("Add stages",       "stages", a.stages);
+  } else {
+    add("Edit project",       "project", a.edit);
+    add("Add project",        "project", a.addSibling);
+    add("Add nested project", "project", a.addNestedProject);
+    add("Add task",           "task",    a.addTask);
+    add("Add stages",         "stages",  a.stages);
+    add("Milestones",         "milestone", a.milestones);
+  }
+  return out;
+}
+// The rows of a menu, drawn the same way everywhere: glyph, label, a rule
+// between. `after` is an optional array of extra elements the caller appends
+// (the board's Close Out, for one) so the shared part stays identical.
+function MenuRows(props){
+  var items=props.items||[], onPick=props.onPick;
+  return items.map(function(it, n){
+    return React.createElement("button", { key:it.label, "data-flat":true, "data-rowmenuitem":it.label,
+      onClick:function(){ if(onPick) onPick(); it.go(); },
+      style:{display:"flex",alignItems:"center",gap:"0.65rem",width:"100%",textAlign:"left",
+             background:"none",border:"none",borderBottom:"1px solid "+S.border,
+             padding:"0.8rem 1rem",color:S.text,cursor:"pointer",
+             fontFamily:S.fontBody,fontWeight:600,fontSize:"0.92rem",
+             WebkitTapHighlightColor:"transparent"} },
+      React.createElement(MenuIcon, { name:it.glyph, size:20, col:S.chromeText }),
+      React.createElement("span", { style:{flex:1} }, it.label));
+  });
+}
+var OUTLINE_INDENT = 15;   // px per level
+// A miniature of the controller itself, sitting outside each row on the
+// trailing edge. Tapping it selects the row exactly as the row's own glyph
+// does - one more place to reach for, and the one that looks like what it
+// opens. Four separate keys with chevrons, the same shape as the real pad.
+//
+// It lives in a fixed box and scales inside it, so growing on selection does
+// not reflow the row. Written after the row, so dir mirrors it to the left in
+// left-handed mode with no conditional.
+var GRIP_BOX = 40, GRIP_REST = 32, GRIP_SEL = 38;
+// A row's name, with single tap for its menu and double tap to edit. It is a
+// component of its own for one reason: useTaps is a hook, and a hook called
+// inside rows.map() is a hook inside a loop. That rendered fine right up until
+// the number of rows changed - which is what adding a record does - and then
+// React threw #310 ("rendered more hooks than during the previous render")
+// and took the whole app down. Every add in the app looked broken because of
+// one hook in the wrong place.
+function OutlineName(props){
+  var r=props.row, isLane=r.kind==="lane";
+  var onTap=useTaps(props.onSingle, props.onDouble);
+  return React.createElement("button", { "data-outlineopen":r.key, onClick:onTap,
+    style:{flex:1,textAlign:"left",background:"none",border:"none",padding:"0.4rem 0",cursor:"pointer",
+           fontFamily:S.fontBody,minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",
+           fontWeight:isLane?700:600, fontSize:isLane?"0.88rem":"0.85rem",
+           letterSpacing:isLane?"0.06em":"normal", textTransform:isLane?"uppercase":"none",
+           color:r.kind==="stage"?S.textDim:(r.accent||S.text)} },
+    r.name || "(untitled)");
+}
+function RowGrip(props){
+  var size=props.on?GRIP_SEL:GRIP_REST, col=props.on?S.text:S.textDim;
+  // Every key must fit the 28-unit box INCLUDING its stroke. The first
+  // version reached -1.85 to 29.85 and had all four outer walls clipped off,
+  // which turned the cross into what looked like a lattice. Reach is
+  // offset + half the key + half the stroke: 8.2 + 4.8 + 0.9 = 13.9, inside 14.
+  var GRIP_OFF = 8.2, GRIP_KEY = 9.6, GRIP_SW = 1.8;
+  var h=GRIP_KEY/2;
+  var keys=[["up",14,14-GRIP_OFF],["down",14,14+GRIP_OFF],
+            ["left",14-GRIP_OFF,14],["right",14+GRIP_OFF,14]];
+  var chev={ up:"M-2 1.15 L0 -1.15 L2 1.15", down:"M-2 -1.15 L0 1.15 L2 -1.15",
+             left:"M1.15 -2 L-1.15 0 L1.15 2", right:"M-1.15 -2 L1.15 0 L-1.15 2" };
+  return React.createElement("button", { "data-rowgrip":props.rowKey, onClick:props.onPick,
+    "aria-label":"Move this row", "aria-pressed":props.on?"true":"false",
+    style:{width:GRIP_BOX+"px",height:GRIP_BOX+"px",flexShrink:0,padding:0,background:"none",
+           border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",
+           WebkitTapHighlightColor:"transparent"} },
+    React.createElement("svg", { width:size, height:size, viewBox:"0 0 28 28", fill:"none" },
+      keys.map(function(k){
+        return React.createElement(React.Fragment, { key:k[0] },
+          React.createElement("rect", { x:k[1]-h, y:k[2]-h, width:GRIP_KEY, height:GRIP_KEY,
+            rx:GRIP_KEY*0.29, fill:"none", stroke:col, strokeWidth:String(GRIP_SW) }),
+          React.createElement("path", { d:chev[k[0]], stroke:col, strokeWidth:"1.45",
+            strokeLinecap:"round", strokeLinejoin:"round", fill:"none",
+            transform:"translate("+k[1]+","+k[2]+")" }));
+      })));
+}
+function OutlineModal(props){
+  var laneOrder=props.laneOrder, laneMeta=props.laneMeta, projects=props.projects;
+  var onOpen=props.onOpen, onSave=props.onSave, onClose=props.onClose;
+  var rowsS=useState(function(){ return outlineRows(laneOrder, laneMeta, projects); });
+  var setRows=rowsS[1]; var rows=rowsS[0];
+  // Editing a row's details happens in a child sheet on top of this one, and
+  // this one stays mounted so its unsaved moves survive. When the board comes
+  // back changed - a rename, a deletion, a stage added - the new content is
+  // folded in without disturbing the arrangement being worked on.
+  var firstS=useRef(true);
+  useEffect(function(){
+    if(firstS.current){ firstS.current=false; return; }
+    setRows(function(prev){ return mergeOutline(prev, outlineRows(laneOrder, laneMeta, projects)); });
+  }, [projects, laneMeta, laneOrder]);
+  var selS=useState(null); var setSel=selS[1]; var sel=selS[0];          // row key
+  var roleS=useState("task"); var setRole=roleS[1]; var role=roleS[0];   // how it would nest
+  var askS=useState(null); var setAsk=askS[1]; var ask=askS[0];
+  // Single tap on a name opens that row's menu, double tap edits it - the same
+  // pair the board uses, so the gesture means one thing wherever you are.
+  var menuS=useState(null); var setRowMenu=menuS[1]; var rowMenu=menuS[0];
+
+  var idx=-1;
+  for(var n=0;n<rows.length;n++) if(rows[n].key===sel) idx=n;
+  var cur=idx>=0 ? rows[idx] : null;
+  var can=cur ? stepOptions(rows, idx, role) : null;
+  var roles=can ? can.roles : [];
+  // The chosen role has to stay one the host can actually hold: selecting a
+  // new row, or moving this one, can take "project" off the table.
+  useEffect(function(){
+    if(roles.length && roles.indexOf(role)<0) setRole(roles[0]);
+  }, [sel, roles.join(",")]);
+  // Keep the selected row in view: the controller covers the bottom of the
+  // sheet, and a row stepped past that edge would vanish behind it.
+  useEffect(function(){
+    if(!sel || typeof document==="undefined" || !document.querySelector) return;
+    var el=document.querySelector('[data-outlinekey="'+sel+'"]');
+    if(el && el.scrollIntoView) el.scrollIntoView({ block:"nearest", behavior:"smooth" });
+  }, [sel, rows]);
+
+  // The same entries the board's popups offer, so nothing new has to be
+  // learned: a lane can take a project or a new lane beside it, a project can
+  // take a task or stages, and everything can be edited.
+  // Each kind's menu, in a fixed order: edit first, then the things that can
+  // be added from here, from the same level inward. "Add project" on a
+  // project is a SIBLING - another beside this one, at the same level; "Add
+  // nested project" goes inside it. Tasks follow the same pattern. Stages
+  // are a list on their host, so both of theirs open that list.
+  function outlineMenuItems(r){
+    var edit=function(){ onOpen(r); };
+    return rowMenuItems(r.kind, r.role, {
+      edit:edit,
+      newLane:function(){ props.onNewLane(); },
+      newProject:function(){ props.onAddProject(r.id); },
+      addSibling:function(){ props.onAddSibling(r.id); },
+      addNestedProject:function(){ props.onAddProjectUnder(r.id); },
+      addNestedTask:function(){ props.onAddTask(r.id); },
+      addTask:function(){ props.onAddTask(r.id); },
+      stages:function(){ props.onEditStages(r.id); },
+      milestones: r.kind==="lane" ? function(){ props.onLaneMilestones(r.id); }
+                : (r.role!=="task" ? function(){ props.onMilestones(r.id); } : null)
+    });
+  }
+  function apply(res){
+    if(!res || !cur) return;
+    var commit=function(){ setRows(res.rows); setAsk(null); haptic(14); };
+    if(res.crossed){
+      setAsk({ apply:commit, label:"Move \u201c"+cur.name+"\u201d out of \u201c"+res.crossed.from.name+"\u201d into \u201c"+res.crossed.into.name+"\u201d?" });
+      return;
+    }
+    if(res.converted && res.converted.lane){
+      setAsk({ apply:commit, label:"Turn the lane \u201c"+cur.name+"\u201d into a project inside \u201c"+res.converted.intoLane.name+"\u201d? Its projects become nested under it." });
+      return;
+    }
+    if(res.converted && res.converted.project){
+      setAsk({ apply:commit, label:"Turn \u201c"+cur.name+"\u201d into a lane of its own, after \u201c"+res.converted.outOfLane.name+"\u201d? Anything nested under it becomes a project in the new lane." });
+      return;
+    }
+    commit();
+  }
+  var glyphFor=function(r){
+    if(r.kind==="lane") return "lanes";
+    if(r.kind==="stage") return "stages";
+    return r.role==="task" ? "task" : "project";
+  };
+  // The parent a row sits in, for the controller's subtitle.
+  function parentName(i){
+    var P=parentIndex(rows,i);
+    if(P<0) return null;
+    return rows[P].name;
+  }
+  // The pad: four separate keys, so an impossible direction is plainly absent
+  // rather than a greyed arm of one shape.
+  function padKey(dir, on, fn){
+    var d={ up:"M-4.2 2.5 L0 -2.5 L4.2 2.5", down:"M-4.2 -2.5 L0 2.5 L4.2 -2.5",
+            left:"M2.5 -4.2 L-2.5 0 L2.5 4.2", right:"M-2.5 -4.2 L2.5 0 L-2.5 4.2" }[dir];
+    var pos={ up:[38,10], down:[38,66], left:[10,38], right:[66,38] }[dir];
+    return React.createElement("button", { key:dir, "data-pad":dir, onClick:on?fn:undefined, disabled:!on,
+      "aria-label":{up:"Move up",down:"Move down",left:"Lift out",right:"Nest in"}[dir],
+      // A live key is a filled square with a bright border; a dead one keeps
+      // its outline but loses the fill. The difference is the fill and the
+      // colour, not dimness - at 0.28 with no border the pad stopped reading
+      // as a pad at all once most directions were unavailable.
+      style:{position:"absolute",left:pos[0]+"px",top:pos[1]+"px",width:"32px",height:"32px",
+             display:"flex",alignItems:"center",justifyContent:"center",padding:0,
+             background:on?S.bg3:"transparent",border:"2px solid "+(on?S.textDim:S.textMuted),
+             borderRadius:"9px",cursor:on?"pointer":"default",opacity:on?1:0.6,
+             WebkitTapHighlightColor:"transparent"} },
+      React.createElement("svg", { width:16, height:16, viewBox:"-8 -8 16 16", fill:"none" },
+        React.createElement("path", { d:d, stroke:on?S.text:S.textMuted, strokeWidth:"2.5",
+          strokeLinecap:"round", strokeLinejoin:"round" })));
+  }
+  function rolePill(kind, label){
+    var on=roles.indexOf(kind)>=0, picked=role===kind && on;
+    return React.createElement("button", { key:kind, "data-role":kind,
+      onClick:on?function(){ setRole(kind); }:undefined, disabled:!on,
+      style:{flex:1,padding:"0.55rem 0.4rem",borderRadius:S.radius3,
+             background:picked?S.infoBg:S.bg1, border:"2px solid "+(picked?S.actionBdr:S.border),
+             color:on?(picked?S.infoText:S.text):S.textMuted, opacity:on?1:0.4,
+             cursor:on?"pointer":"default", fontFamily:S.fontBody, fontWeight:700,
+             fontSize:"0.8rem", WebkitTapHighlightColor:"transparent"} }, label);
+  }
+  // Why a choice is missing, said plainly rather than left as a dead control.
+  var roleNote = !cur ? "" :
+    cur.kind!=="node" ? (cur.kind==="lane" ? "Lanes move up and down only." : "Stages stay with their project.")
+    : !roles.length ? "Nothing above this to nest into."
+    : roles.length===1 ? "A task can only hold tasks." : "";
+
+  return React.createElement(React.Fragment, null,
+    // The controller floats OVER the foot of the sheet, Save/Cancel included,
+    // rather than the sheet shrinking to make room. Moving and saving are two
+    // separate moments: Done puts the controller away, and the action row is
+    // there underneath it.
+    React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", onClick:function(){ onSave(rows); }, style:MODAL_SAVE() }, "Save"),
+          React.createElement("button", { key:"a1", onClick:onClose, style:MODAL_CANCEL() }, "Cancel")], title:"Edit\u2026", onClose:onClose, wide:true, ownActions:true },
+      React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted,marginBottom:"0.8rem",lineHeight:1.4} },
+        "Tap a row\u2019s icon to move it. Tap its name for its menu, twice to edit it."),
+      React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.3rem",
+             marginBottom:cur?"11rem":"0.5rem"} },
+        rows.map(function(r, i){
+          var isLane=r.kind==="lane", picked=r.key===sel;
+          var pick=function(){ setSel(picked?null:r.key); haptic(10); };
+          // A column: the row line - box plus grip beside it, outside the
+          // border - and under it the row's own menu when it is open.
+          // The row line is the popup's anchor: the menu hangs off it the way
+          // a lane header's does on the board, rather than pushing the rows
+          // below it down the list.
+          return React.createElement("div", { key:r.key,
+            style:{position:"relative", zIndex:rowMenu===r.key?60:undefined} },
+          React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.15rem"} },
+          React.createElement("div", { "data-outlinekey":r.key,
+            style:{display:"flex",alignItems:"center",gap:"0.5rem",flex:1,minWidth:0,
+                   marginLeft:(r.level*OUTLINE_INDENT)+"px",
+                   background:picked?S.infoBg:(isLane?rgba(r.accent||S.border,0.14):S.bg1),
+
+                   border:"2px solid "+(picked?S.actionBdr:(isLane?(r.accent||S.border):S.border)),
+                   borderRadius:S.radius3, padding:"0.35rem 0.5rem"} },
+            React.createElement("button", { "data-outlinepick":r.key, onClick:pick,
+              "aria-pressed":picked?"true":"false",
+              style:{width:"38px",height:"38px",display:"flex",alignItems:"center",justifyContent:"center",
+                     flexShrink:0,padding:0,borderRadius:S.radius3,cursor:"pointer",
+                     background:picked?rgba(S.actionBdr,0.25):"transparent",
+                     border:"1px solid "+(picked?S.actionBdr:"transparent"),
+                     WebkitTapHighlightColor:"transparent"} },
+              React.createElement(MenuIcon, { name:glyphFor(r), size:isLane?20:18, col:r.accent||S.chromeText })),
+            React.createElement(OutlineName, { row:r,
+              onSingle:function(){ setRowMenu(function(x){ return x===r.key ? null : r.key; }); },
+              onDouble:function(){ setRowMenu(null); onOpen(r); } })
+          ),
+          React.createElement(RowGrip, { rowKey:r.key, on:picked, onPick:pick })
+          ),
+          // The row's milestone line, when it has one. A lane's is its roll-up,
+          // a project's its own steps plus children; a task has none.
+          (r.kind==="lane" || (r.kind==="node" && r.role!=="task")) && (function(){
+            // The FULL record set, closed ones included - targets are closed
+            // records, and the outline is otherwise handed only what is open.
+            var all=props.msProjects||projects;
+            var pts = r.kind==="lane" ? laneLine(all, r.id, Date.now())
+                    : subtreePoints(all, r.id, Date.now());
+            if(!pts.length) return null;
+            return React.createElement("div", { style:{marginLeft:(r.level*OUTLINE_INDENT)+"px",marginRight:(GRIP_BOX+2)+"px"} },
+              React.createElement(MilestoneStrip, { weekStart:weekStartOf(props.schedule), kind:r.kind==="lane"?"lane":"project", points:pts, tight:true,
+                offDays:props.offDays, onOpen:function(){ r.kind==="lane" ? props.onLaneMilestones(r.id) : props.onMilestones(r.id); } }));
+          })(),
+          // Same shape as the board's popups: absolute, hanging under its
+          // anchor, above the rows beneath it rather than shoving them aside.
+          // Deliberately NOT data-surface="menu": that rule makes a menu glass,
+          // which works over the board but reads as muddy over the rows of the
+          // sheet it is inside. Same shape, solid fill.
+          rowMenu===r.key && React.createElement("div", { "data-rowmenu":r.key,
+            style:{position:"absolute",top:"calc(100% + 4px)",
+                   left:UI.left?"auto":((r.level*OUTLINE_INDENT)+12)+"px",
+                   right:UI.left?((r.level*OUTLINE_INDENT)+12)+"px":"auto",
+                   minWidth:"210px",background:S.bg2,border:"1px solid "+S.borderBright,
+                   borderRadius:S.radius2,overflow:"hidden",
+                   boxShadow:"0 8px 32px rgba(0,0,0,0.6)"} },
+            React.createElement(MenuRows, { items:outlineMenuItems(r), onPick:function(){ setRowMenu(null); } }))
+          );
+        })
+      ),
+      // The action row rides in the Modal's sticky box (actions:), the same
+      // as every other sheet, so an edit at the top of a long list saves
+      // without scrolling. The controller floats over it while a row is
+      // selected; DONE puts the controller away.
+    ),
+    // The controller. Pinned to the bottom of the sheet, above everything in
+    // it, and mirrored with handedness so the pad is always under the thumb.
+    cur && !props.suspended && React.createElement("div", { "data-controller":true,
+      style:{position:"fixed",left:"50%",transform:"translateX(-50%)",bottom:"1rem",
+             width:"min(520px, calc(100vw - 1.5rem))",zIndex:920,
+             background:S.modalBg,border:"2px solid "+S.actionBdr,borderRadius:S.radius2,
+             boxShadow:"0 10px 34px rgba(0,0,0,0.6)",padding:"0.7rem 0.85rem",
+             display:"flex",flexDirection:UI.left?"row-reverse":"row",alignItems:"stretch",gap:"0.8rem"} },
+      React.createElement("div", { style:{flex:1,minWidth:0,display:"flex",flexDirection:"column",gap:"0.45rem"} },
+        React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.45rem"} },
+          React.createElement(MenuIcon, { name:glyphFor(cur), size:18, col:cur.accent||S.chromeText }),
+          React.createElement("div", { style:{minWidth:0,flex:1} },
+            React.createElement("div", { style:{fontWeight:700,fontSize:"0.86rem",color:S.text,
+                   whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"} }, cur.name),
+            parentName(idx) && React.createElement("div", { style:{fontSize:"0.7rem",color:S.textMuted,
+                   whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"} }, "in "+parentName(idx))),
+          // A bordered button, so it reads as the way out of the controller
+          // rather than a label - the same treatment as the tutorial's EXIT.
+          React.createElement("button", { "data-ctrldone":true, onClick:function(){ setSel(null); },
+            style:{flexShrink:0,background:"none",border:"1.5px solid "+S.infoText,
+                   borderRadius:S.radius3,padding:"0.3rem 0.75rem",cursor:"pointer",
+                   color:S.infoText,fontFamily:S.fontBody,fontWeight:800,fontSize:"0.72rem",
+                   letterSpacing:"0.08em",WebkitTapHighlightColor:"transparent"} }, "DONE")),
+        roles.length>0 && React.createElement("div", { style:{fontSize:"0.62rem",color:S.textMuted,letterSpacing:"0.08em"} }, "NESTED AS"),
+        roles.length>0 && React.createElement("div", { style:{display:"flex",gap:"0.4rem"} },
+          rolePill("task","Task"), rolePill("project","Project")),
+        roleNote && React.createElement("div", { style:{fontSize:"0.66rem",color:S.textMuted,lineHeight:1.35} }, roleNote)
+      ),
+      React.createElement("div", { style:{position:"relative",width:"108px",height:"108px",flexShrink:0} },
+        padKey("up",   can.up,   function(){ apply(stepUp(rows, idx)); }),
+        padKey("down", can.down, function(){ apply(stepDown(rows, idx)); }),
+        padKey("left", can.out,  function(){ apply(stepOut(rows, idx)); }),
+        padKey("right",can.in_,  function(){ apply(stepIn(rows, idx, role)); })
+      )
+    ),
+    ask && React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", "data-outlineconfirm":true, onClick:ask.apply, style:MODAL_SAVE() }, "Move"),
+        React.createElement("button", { key:"a1", onClick:function(){ setAsk(null); }, style:MODAL_CANCEL() }, "Cancel")], title:"Move it?", onClose:function(){ setAsk(null); }, ownActions:true },
+      React.createElement("p", { style:{color:S.textDim,fontSize:"0.9rem",lineHeight:1.5,marginBottom:"1rem"} }, ask.label)
     )
   );
 }
@@ -3836,7 +5735,7 @@ function EditDistPresetsModal(props){
       React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted,marginBottom:"0.85rem"} }, "Edit names in the fields. Use arrows to reorder. Tap x to remove."),
       React.createElement(ModalActions, null,
         React.createElement("button", { onClick:function(){ onSave(items.filter(function(x){ return x.trim(); })); },
-          style:{flex:1,background:S.infoBg,border:"2.5px solid "+S.actionBdr,borderRadius:S.radius,padding:"0.85rem",color:S.infoText,fontWeight:700,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.95rem"} }, "Save List"),
+          style:{flex:1,background:S.infoBg,border:"2.5px solid "+S.actionBdr,borderRadius:S.radius,padding:"0.85rem",color:S.infoText,fontWeight:700,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.95rem"} }, "Save"),
         React.createElement("button", { onClick:onCancel,
           style:MODAL_CANCEL() }, "Cancel")
       )
@@ -3910,7 +5809,7 @@ function DaySummary(props){
     byProject[k].ms+=l.duration;
   });
 
-  var lines=["Day Summary - "+today+(testMode?" [TEST]":""),""];
+  var lines=["Day Summary - "+today+(testMode?" [TUTORIAL]":""),""];
   Object.values(byProject).filter(function(p){ return !p.parentId; }).sort(function(a,b){ return b.ms-a.ms; }).forEach(function(p){
     lines.push(p.name.padEnd(36)+fmtDur(p.ms,true).padStart(8));
     Object.values(byProject).filter(function(c){ return c.parentId; }).forEach(function(c){
@@ -3990,7 +5889,16 @@ function ReportsModal(props){
 
   // Plain-text version for pasting into a log or an email.
   function reportText(){
-    var out=["Time Report - "+periodLabel(range)+(props.testMode?" [TEST]":""),""];
+    var out=["Time Report - "+periodLabel(range)+(props.testMode?" [TUTORIAL]":""),""];
+    if(msRep.due>0 || msRep.next.length>0){
+      out.push("MILESTONES");
+      if(msRep.due>0) out.push("  Due "+msRep.due+"  -  met "+msRep.met+", late "+msRep.late+", missed "+msRep.missed
+        +(msRep.onTimePct!=null?"  ("+msRep.onTimePct+"% on time)":""));
+      msRep.missedList.forEach(function(pt){ out.push("  MISSED  "+pt.label+" - "+pt.owner+" - due "+fmtMsWhen(pt.at)); });
+      msRep.lateList.forEach(function(pt){ out.push("  LATE    "+pt.label+" - "+pt.owner+" - +"+fmtDur(pt.variance,true)); });
+      msRep.next.forEach(function(pt){ out.push("  NEXT    "+pt.label+" - "+pt.owner+" - "+fmtMsWhen(pt.at)); });
+      out.push("");
+    }
     roll.lanes.forEach(function(ln){
       out.push(ln.label.toUpperCase()+"  "+fmtDur(ln.ms,true));
       ln.projects.forEach(function(p){
@@ -4171,6 +6079,55 @@ function ReportsModal(props){
     stat("Days", String(roll.activeDays))
   );
 
+  // Milestones over the period. The line at full width with labels, then the
+  // account of it: what was due, how it went, and what is next. Only drawn
+  // when the period actually had milestones in it.
+  // A range carries start/end (end is exclusive), NOT from/to - passing the
+  // wrong names made the window undefined and the section never appeared.
+  var msRep=milestoneReport(props.projects||[], props.laneOrder||[], range.start, range.end-1, now);
+  function msStat(label, value, col){
+    return React.createElement("div", { key:label, style:{flex:"1 1 30%",minWidth:"74px",background:S.bg1,
+      border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.4rem 0.5rem"} },
+      React.createElement("div", { style:{fontSize:"0.6rem",color:S.textMuted,fontWeight:700,letterSpacing:"0.06em",textTransform:"uppercase"} }, label),
+      React.createElement(Mono, { style:{fontSize:"0.82rem",fontWeight:600,color:col||S.text} }, value));
+  }
+  function msLine(pt, tone){
+    return React.createElement("div", { key:pt.id, style:{display:"flex",alignItems:"baseline",gap:"0.5rem",padding:"0.22rem 0"} },
+      React.createElement("span", { style:{width:"8px",height:"8px",borderRadius:"50%",background:MS_STATUS_COLOR(pt.status),flexShrink:0} }),
+      React.createElement("span", { style:{flex:1,minWidth:0,color:S.text,fontSize:"0.82rem",fontWeight:600,
+        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"} }, pt.label),
+      React.createElement("span", { style:{fontSize:"0.7rem",color:S.textMuted,flexShrink:0,
+        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"38%"} }, pt.owner),
+      React.createElement(Mono, { style:{fontSize:"0.72rem",color:tone||S.textDim,flexShrink:0} },
+        pt.status==="late" ? "+"+fmtDur(pt.variance,true)
+        : pt.status==="missed" ? fmtMsWhen(pt.at)
+        : pt.status==="met" ? (pt.variance<0 ? "-"+fmtDur(-pt.variance,true) : "on time")
+        : fmtMsWhen(pt.at)));
+  }
+  var milestones = msRep.due===0 && msRep.next.length===0 ? null : React.createElement("div", { "data-msreport":msRep.due,
+    style:{marginBottom:"1rem"} },
+    React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.4rem",marginBottom:"0.5rem"} },
+      React.createElement(MenuIcon, { name:"milestone", size:16, col:S.chromeText }),
+      React.createElement("span", { style:{fontSize:"0.68rem",fontWeight:800,letterSpacing:"0.12em",color:S.chromeText} }, "MILESTONES")),
+    msRep.points.length>0 && React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,
+      borderRadius:S.radius3,padding:"0.3rem 0.2rem 0",marginBottom:"0.5rem"} },
+      React.createElement(MilestoneLine, { weekStart:weekStartOf(props.schedule), points:msRep.points, now:now, width:420, labels:true,
+        span:{ lo:range.start, hi:range.end-1 }, offDays:offDaysOf(props.schedule) })),
+    msRep.due>0 && React.createElement("div", { style:{display:"flex",gap:"0.4rem",flexWrap:"wrap",marginBottom:"0.6rem"} },
+      msStat("Due", String(msRep.due)),
+      msStat("On time", msRep.onTimePct==null?"--":msRep.onTimePct+"%", msRep.onTimePct==null?S.textMuted:(msRep.onTimePct>=80?S.msMet:S.msLate)),
+      msStat("Missed", String(msRep.missed), msRep.missed>0?S.msMissed:S.textMuted),
+      msRep.late>0 && msStat("Worst slip", fmtDur(msRep.worstSlip,true), S.msLate),
+      msRep.avgGain!=null && msStat("Avg early", fmtDur(msRep.avgGain,true), S.msMet)),
+    msRep.missedList.length>0 && React.createElement("div", { style:{marginBottom:"0.5rem"} },
+      React.createElement("div", { style:{fontSize:"0.64rem",color:S.msMissed,fontWeight:700,letterSpacing:"0.06em",marginBottom:"0.15rem"} }, "MISSED"),
+      msRep.missedList.map(function(pt){ return msLine(pt, S.msMissed); })),
+    msRep.lateList.length>0 && React.createElement("div", { style:{marginBottom:"0.5rem"} },
+      React.createElement("div", { style:{fontSize:"0.64rem",color:S.msLate,fontWeight:700,letterSpacing:"0.06em",marginBottom:"0.15rem"} }, "MET LATE"),
+      msRep.lateList.map(function(pt){ return msLine(pt, S.msLate); })),
+    msRep.next.length>0 && React.createElement("div", null,
+      React.createElement("div", { style:{fontSize:"0.64rem",color:S.textMuted,fontWeight:700,letterSpacing:"0.06em",marginBottom:"0.15rem"} }, "NEXT UP"),
+      msRep.next.map(function(pt){ return msLine(pt, S.textDim); })));
   function projRow(ln, p){
     var key=ln.key+":"+p.id;
     var hasKids=p.children.length>0;
@@ -4235,7 +6192,7 @@ function ReportsModal(props){
   });
 
   return React.createElement(Modal, { title:"Reports", onClose:props.onClose, wide:true, cancelLabel:"Close" },
-    seg, nav, summary, payCard, stats, body, modSections,
+    seg, nav, summary, payCard, stats, milestones, body, modSections,
     roll.trackedMs>0 && React.createElement("button", { "data-flat":true, onClick:copy,
       style:{width:"100%",marginTop:"0.4rem",background:copied?S.successBg2:S.bg1,
              border:"1px solid "+(copied?S.successBorder:S.border),borderRadius:S.radius,
@@ -4298,11 +6255,34 @@ function SubRow(props){
     return function(){ document.removeEventListener("mousedown",handler); document.removeEventListener("touchstart",handler); };
   },[stagesMenu]);
 
+  // Finished tasks stay as a greyed line rather than vanishing - the same
+  // rule the cards follow. Held to reopen. (After the hooks above, never
+  // before them.)
+  if(isClosed(sub)){
+    return React.createElement("div", { "data-donerow":sub.id, key:sub.id,
+      style:{display:"flex",alignItems:"center",gap:"0.45rem",opacity:0.62,
+             marginLeft:(depth*0.9)+"rem",padding:"0.3rem 0.5rem",
+             background:S.bg1,border:"1px dashed "+S.border,borderRadius:S.radius3,marginBottom:"0.25rem"} },
+      React.createElement(MenuIcon, { name:"task", size:12, col:S.textMuted }),
+      React.createElement("span", { style:{color:S.textDim,fontWeight:600,fontSize:"0.78rem",
+        textDecoration:"line-through",textDecorationColor:S.textMuted,
+        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:0} }, sub.name),
+      React.createElement("span", { "data-donetag":true, style:{flexShrink:0,fontSize:"0.56rem",fontWeight:800,
+        letterSpacing:"0.08em",color:S.msMet,textTransform:"uppercase"} },
+        sub.closedOutcome==="abandoned" ? "Abandoned" : sub.closedOutcome==="superseded" ? "Superseded" : "Completed"),
+      React.createElement(HoldButton, { onHold:function(){ if(props.onReopen) props.onReopen(sub); },
+        holdMs:HOLD_DELETE_MS, fill:rgba(S.actionBdr,0.32),
+        attrs:{ "data-reopen":sub.id, "aria-label":"Hold to reopen" },
+        style:{flex:"0 0 auto",background:S.bg2,border:"1px solid "+S.border,borderRadius:S.radius3,
+               padding:"0.18rem 0.4rem",color:S.textDim,fontFamily:S.fontBody,fontWeight:700,fontSize:"0.58rem"} },
+        React.createElement("span", null, "Reopen")));
+  }
   var hasStages=sub.stages&&sub.stages.length>0;
   var stagesDone=hasStages?sub.stages.filter(function(s){ return s.done; }).length:0;
   var stagesPct=hasStages?Math.round((stagesDone/sub.stages.length)*100):0;
   var stagesAllDone=hasStages&&stagesDone===sub.stages.length;
   var ACCENT=props.accent||S.chromeSubTask;
+  var LANECOL=readableInk(ACCENT, S.bg1, S.text);
 
   // Precompute styles
   var activeTint = S.fill==="solid" ? ACCENT+"55"
@@ -4313,12 +6293,17 @@ function SubRow(props){
   var rowBdr = isInterrupted ? S.distEdge : ACCENT;
   var glow = (isActive && S.glow) ? ("0 0 8px "+(isInterrupted?S.distGlow:ACCENT)+"33") : "none";
   var barBg = isActive ? (isInterrupted ? S.distTrack : S.chromeTrackOn) : S.chromeTrack;
-  // A running row is already tinted with its lane accent, so painting the title
-  // in that same accent leaves it barely legible. Identity is carried by the
-  // border and fill; the title stays high-contrast whatever the state.
+  // The title and its glyph carry the lane's accent, so a row reads as
+  // belonging to its lane without tracing the border.
+  //
+  // Except while it is running. A running row is filled with that same accent,
+  // and accent on accent is barely legible - that is why an earlier attempt at
+  // this was reverted outright. A running row keeps the high-contrast colour
+  // and lets the fill carry the lane, which is louder anyway.
+  //
   // The press affordance dims the title, but never below readable: textMuted
   // vanished against the glass card tint the moment it was touched.
-  var titleCol = hint ? S.textDim : S.titleText;
+  var titleCol = hint ? S.textDim : (isActive ? S.titleText : LANECOL);
   // Scheduled for later: greyed, but still pressable - the press is what opens
   // the question. Stopping is never gated, only starting.
   var pending = !isActive && isPending(sub);
@@ -4362,14 +6347,23 @@ function SubRow(props){
           },
           onClick:function(e){ if(swiped.current){ swiped.current=false; return; } taps(); },
           onMouseEnter:function(){ setHint(true); } },
-          React.createElement("div", { style:{fontWeight:600,fontSize:"0.92rem",color:titleCol,lineHeight:1.25,wordBreak:"break-word"} }, sub.name),
+          React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.35rem",fontWeight:600,fontSize:"0.92rem",color:titleCol,lineHeight:1.25,wordBreak:"break-word"} },
+            React.createElement(TitleGlyph, { name:"task", size:17, col:titleCol }),
+            React.createElement("span", { style:{minWidth:0,wordBreak:"break-word"} }, sub.name)
+          ),
           hint && React.createElement("div", { style:{fontSize:"0.66rem",color:S.titleText,marginTop:"0.1rem"} }, "tap: menu / double-tap: edit"),
           menu && React.createElement("div", { ref:menuAutoScroll, "data-surface":"menu", style:{position:"absolute",top:"calc(100% + 4px)",left:UI.left?"auto":0,right:UI.left?0:"auto",background:S.menuBg,border:"1px solid "+S.border,borderRadius:S.radius,minWidth:"160px",boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:70,overflow:"hidden"} },
-            React.createElement("button", { "data-flat":true, onClick:function(){ onEdit(sub); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.6rem 0.9rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.88rem"} }, "Edit Task"),
-            React.createElement("button", { "data-flat":true, onClick:function(){ onStages(sub); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.6rem 0.9rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.88rem"} }, hasStages?"View Stages":"Add Stages"),
-            canNest && onAddSub && React.createElement("button", { "data-flat":true, onClick:function(){ onAddSub(sub.id); setMenu(false); }, style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.6rem 0.9rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.88rem"} },
-              React.createElement("span", { style:{display:"inline-block",width:"7px",height:"7px",borderRadius:"50%",background:ACCENT} }),
-              "Nest Something Here"),
+            // The same rows the outline offers for a task. Nesting deeper is
+            // withheld at the depth cap, as it was.
+            React.createElement(MenuRows, { onPick:function(){ setMenu(false); },
+              items:rowMenuItems("node", projRole(sub), {
+                edit:function(){ onEdit(sub); },
+                addSibling:props.onAddSibling ? function(){ props.onAddSibling(sub.id); } : null,
+                addNestedTask:(canNest && onAddSub) ? function(){ onAddSub(sub.id); } : null,
+                addNestedProject:(canNest && props.onAddNested) ? function(){ props.onAddNested(sub.id); } : null,
+                addTask:(canNest && onAddSub) ? function(){ onAddSub(sub.id); } : null,
+                stages:function(){ onStages(sub); }
+              }) }),
             React.createElement("button", { "data-flat":true, onClick:function(){ onCloseOut(sub); setMenu(false); }, style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"0.6rem",width:"100%",textAlign:"left",background:readyToClose(sub)?S.successBg:"none",border:"none",padding:"0.6rem 0.9rem",color:readyToClose(sub)?S.successText:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.88rem"} },
               "Close Out",
               readyToClose(sub) ? React.createElement("span", { style:{fontSize:"0.64rem",fontWeight:800,letterSpacing:"0.05em"} }, "READY") : null)
@@ -4401,6 +6395,17 @@ function SubRow(props){
         todayMs>0 && React.createElement(Mono, { style:{fontSize:"0.76rem",color:timCol,fontWeight:700} }, fmtDur(todayMs,true)),
         React.createElement(DistBadge, { today:distToday, total:distTotal, small:true,
           onClick:function(){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} setDistPopup(true); } }),
+        // The same Complete a project card has, sized for a task row.
+        !hasStages && isOpen(sub) && onCloseOut && React.createElement(HoldButton, {
+          onHold:function(){ onCloseOut(sub); }, holdMs:HOLD_DELETE_MS, fill:rgba(S.successText,0.35),
+          attrs:{ "data-complete":sub.id, "aria-label":"Hold to complete" },
+          style:{flex:1,minWidth:"90px",display:"flex",alignItems:"center",justifyContent:"center",gap:"0.3rem",
+                 background:S.bg1,border:"2px solid "+S.chromeBdr,borderRadius:S.radius3,padding:"0.25rem 0.5rem",
+                 color:S.chromeText,fontFamily:S.fontBody,fontWeight:700,fontSize:"0.72rem"} },
+          React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.3rem"} },
+            React.createElement(MenuIcon, { name:"task", size:13, col:S.chromeText }),
+            "Complete",
+            React.createElement("span", { style:{fontSize:"0.6rem",fontWeight:600,opacity:0.7,marginLeft:"0.2rem"} }, "hold"))),
         hasStages && React.createElement("div", { ref:stagesRef, style:{position:"relative",flex:1,minWidth:"90px"} },
         React.createElement("button", { onClick:function(){ if(!stagesMenu){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setStagesMenu(function(x){ return !x; }); },
           style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.35rem",background:stagesAllDone?S.successBg:S.bg1,border:"2px solid "+(stagesAllDone?S.stageDoneBdr:S.chromeBdr),borderRadius:"8px",cursor:"pointer",padding:"0 0.55rem",height:"30px",minHeight:"30px",width:"100%"} },
@@ -4510,13 +6515,17 @@ function ProjectCard(props){
   var startBdr = pending ? S.border : (isActive ? (isInterrupted ? S.distStartBdr : meta.accent) : S.chromeBdr);
   var startGlow = (isActive && S.glow) ? ("0 0 10px "+(isInterrupted?S.distGlow:meta.accent)+"44") : "none";
   var startIconCol = pending ? S.textMuted : (isActive ? (isInterrupted ? S.distIcon : meta.accent) : S.chromeIcon);
+  var LANECOL=readableInk(meta.accent, S.bg1, S.text);
   var startLblCol = pending ? S.textMuted : (isActive ? (isInterrupted ? S.distLbl : meta.accent) : S.chromeText);
   var startPlay = pending ? S.mutedGlyph : S.chromeIcon;
   var startLbl = isActive ? (isInterrupted ? "Paused" : "Stop") : "Start";
   var timCol = isActive ? (isInterrupted ? S.distDim : meta.accent) : S.chromeTime;
+  // Lane accent for the title and its glyph; high-contrast while running,
+  // where the card is already filled with that same accent. See the sub-task
+  // row for the full reasoning.
   // The press affordance dims the title, but never below readable: textMuted
   // vanished against the glass card tint the moment it was touched.
-  var titleCol = hint ? S.textDim : S.titleText;
+  var titleCol = hint ? S.textDim : (isActive ? S.titleText : LANECOL);
   var stageBdr = stagesAllDone ? S.stageDoneBdr : meta.accent;
   var stageCol = stagesAllDone ? S.stageDoneText : meta.accent;
 
@@ -4527,14 +6536,62 @@ function ProjectCard(props){
   // Declared above the collapsed early return, not below it: the collapsed pill
   // reads childTasks and countLabel too, and `var` hoists the name without the
   // value, so from down there they were plain undefined.
-  var childTasks=subTasks.filter(isTaskRole);
-  var childProjects=subTasks.filter(isProjectRole).slice().sort(function(a,b){ return (a.order||0)-(b.order||0); });
-  var deepCount=getDescendantIds(allProjects||[], proj.id).filter(function(id){
-    return isTaskRole(findProj(allProjects||[], id));
-  }).length;
-  var nested = deepCount > childTasks.length;
-  var countLabel = nested ? (deepCount+" nested") : (childTasks.length+" task"+(childTasks.length!==1?"s":""));
+  // Counts are of LIVE work: a finished task still on the board as a pill is
+  // not outstanding, and counting it would overstate what is left.
+  function sinkClosed(a,b){
+    var ac=isClosed(a)?1:0, bc=isClosed(b)?1:0;
+    if(ac!==bc) return ac-bc;
+    if(ac) return (b.closedAt||0)-(a.closedAt||0);
+    return (a.order||0)-(b.order||0);
+  }
+  // Two lists on purpose: what is DRAWN (finished work included, at the end)
+  // and what is COUNTED (live work only - a finished task is not outstanding).
+  var childTasksAll=subTasks.filter(isTaskRole).slice().sort(sinkClosed);
+  var childTasks=childTasksAll.filter(isOpen);
+  var childProjects=subTasks.filter(isProjectRole).slice().sort(sinkClosed);
+  var deepAll=getDescendantIds(allProjects||[], proj.id).filter(function(id){
+    var d=findProj(allProjects||[], id); return d && isTaskRole(d);
+  });
+  var deepCount=deepAll.filter(function(id){ return isOpen(findProj(allProjects||[], id)); }).length;
+  var nested = deepAll.length > childTasksAll.length;
+  // The count is of what is THERE, not what is left: once every task is done
+  // an outstanding-only count read "0 tasks", the expander disappeared, and
+  // the finished tasks it was hiding could never be opened again. How many
+  // are done is said alongside it, so the pill still answers "what is left".
+  var totalTasks = nested ? deepAll.length : childTasksAll.length;
+  var openTasks  = nested ? deepCount : childTasks.length;
+  var doneTasks  = totalTasks - openTasks;
+  var countLabel = (nested ? (totalTasks+" nested") : (totalTasks+" task"+(totalTasks!==1?"s":"")))
+                 + (doneTasks>0 ? " \u00b7 "+doneTasks+" done" : "");
 
+  // ---- COMPLETED: minimised, greyed, held to reopen ----------------------
+  // A finished record stays where it was instead of disappearing: the same
+  // minimised shape a swipe gives, drained of colour, saying so next to its
+  // name. Reopening is HELD, like every other change that undoes something.
+  if(isClosed(proj)){
+    // No -12px tuck here: that headroom exists so a nested CARD can sit under
+    // its parent's title, and on a slim pill it pulled the pill onto the
+    // parent's bottom border.
+    return React.createElement("div", { "data-donecard":proj.id,
+      style:{ marginBottom:isNestedCard?"0.3rem":"0.45rem", opacity:0.62 } },
+      React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",
+        background:S.bg1, border:"1px dashed "+S.border, borderRadius:S.radius3,
+        padding:"0.42rem 0.6rem", marginLeft:isNestedCard?"0.9rem":0 } },
+        React.createElement(MenuIcon, { name:isProjectRole(proj)?"project":"task", size:14, col:S.textMuted }),
+        React.createElement("span", { style:{flex:1,minWidth:0,display:"flex",alignItems:"baseline",gap:"0.4rem",minWidth:0} },
+          React.createElement("span", { style:{color:S.textDim,fontWeight:700,fontSize:"0.84rem",
+            textDecoration:"line-through",textDecorationColor:S.textMuted,
+            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"} }, proj.name),
+          React.createElement("span", { "data-donetag":true, style:{flexShrink:0,fontSize:"0.6rem",fontWeight:800,
+            letterSpacing:"0.08em",color:S.msMet,textTransform:"uppercase"} },
+            proj.closedOutcome==="abandoned" ? "Abandoned" : proj.closedOutcome==="superseded" ? "Superseded" : "Completed")),
+        React.createElement(HoldButton, { onHold:function(){ if(props.onReopen) props.onReopen(proj); },
+          holdMs:HOLD_DELETE_MS, fill:rgba(S.actionBdr,0.32),
+          attrs:{ "data-reopen":proj.id, "aria-label":"Hold to reopen" },
+          style:{flex:"0 0 auto",background:S.bg2,border:"1px solid "+S.border,borderRadius:S.radius3,
+                 padding:"0.22rem 0.45rem",color:S.textDim,fontFamily:S.fontBody,fontWeight:700,fontSize:"0.62rem"} },
+          React.createElement("span", null, "Reopen"))));
+  }
   if(cardCollapsed){
     // The pill keeps live control: a bare icon+text (no button chrome, per the
     // space budget) mirroring the big card's three start states. When a
@@ -4587,7 +6644,7 @@ function ProjectCard(props){
           // Title anchored left, control anchored right - the pill's Stop
           // lands on the same edge as every expanded card's Start button.
           React.createElement("span", { style:{flex:"1 1 auto",textAlign:"left",fontSize:"0.74rem",fontWeight:700,color:meta.accent,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,fontFamily:S.fontBody} }, proj.name),
-          childTasks.length>0 && React.createElement("span", { style:{fontSize:"0.66rem",color:meta.accent,opacity:0.7,whiteSpace:"nowrap",fontFamily:S.fontBody} }, countLabel),
+          childTasksAll.length>0 && React.createElement("span", { style:{fontSize:"0.66rem",color:meta.accent,opacity:0.7,whiteSpace:"nowrap",fontFamily:S.fontBody} }, countLabel),
           (liveActive||todayMs>0) && React.createElement(Mono, { style:{fontSize:"0.7rem",color:timCol,fontWeight:700,whiteSpace:"nowrap"} }, fmtDur(todayMs,true)),
           React.createElement("span", { "data-pillctl":true, role:"button", "aria-label":pillLbl,
             onClick:function(e){ e.stopPropagation(); haptic(10); onToggle(pillTarget); },
@@ -4631,8 +6688,8 @@ function ProjectCard(props){
       var subKids=(allProjects||[]).filter(function(p){ return p.parentId===sub.id && isOpen(p); });
       var subIds=[sub.id].concat(getDescendantIds(allProjects||[], sub.id));
       return React.createElement(SubRow, {
-        key:sub.id, sub:sub, idx:idx, kids:subKids, depth:depth, renderKids:renderKids,
-        onAddSub:onAddSub,
+        key:sub.id, sub:sub, idx:idx, kids:subKids, depth:depth, renderKids:renderKids, onReopen:props.onReopen,
+        onAddSub:onAddSub, onAddSibling:props.onAddSibling, onAddNested:props.onAddNested,
         onEdit:onEdit, onStages:onStages, onStageToggle:onStageToggle, onToggle:onToggle,
         onCloseOut:onCloseOut,
         editMode:editMode, onDragStart:function(e,i){ /* drag placeholder */ },
@@ -4652,7 +6709,9 @@ function ProjectCard(props){
     if(!childProjects.length) return null;
     return React.createElement("div", { style:{marginLeft:"0.9rem"} },
       childProjects.map(function(child){
-        var kidTasks=(allProjects||[]).filter(function(p){ return p.parentId===child.id && isOpen(p); });
+        // Everything under it, finished included - the rule the parent uses.
+        var kidTasksAll=(allProjects||[]).filter(function(p){ return p.parentId===child.id; });
+        var kidTasks=kidTasksAll.filter(isOpen);
         var kidIds=[child.id].concat(getDescendantIds(allProjects||[], child.id));
         var kidActive=activeId===child.id;
         var kidToday=todayLogs.filter(function(l){ return kidIds.indexOf(l.projectId)>=0; })
@@ -4664,9 +6723,10 @@ function ProjectCard(props){
           distToday:distStats(todayDist, kidIds), distTotal:distStats(allDist, kidIds),
           projDisruptions:allDist.filter(function(d){ return kidIds.indexOf(d.projectId)>=0; }),
           onToggle:onToggle, onEdit:onEdit, onStages:onStages, onStageToggle:onStageToggle,
-          onAddSub:onAddSub, onCloseOut:onCloseOut,
+          onAddSub:onAddSub, onAddSibling:props.onAddSibling, onAddNested:props.onAddNested, onCloseOut:onCloseOut,
+          onMilestones:props.onMilestones, msProjects:props.msProjects, offDays:props.offDays,
           editMode:editMode, dragHandleProps:{},
-          subTasks:kidTasks, activeId:activeId,
+          subTasks:kidTasksAll, activeId:activeId, schedule:props.schedule,
           todayLogs:todayLogs, todayDist:todayDist, allDist:allDist,
           allProjects:allProjects, laneMeta:laneMeta
         });
@@ -4715,20 +6775,28 @@ function ProjectCard(props){
             },
             onClick:function(e){ if(swiped.current){ swiped.current=false; return; } taps(); },
             onMouseEnter:function(){ setHint(true); }, onMouseLeave:function(){ setHint(false); } },
-            React.createElement("div", { style:{fontWeight:700,fontSize:"1.05rem",color:titleCol,lineHeight:1.25,wordBreak:"break-word"} }, proj.name),
+            React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.4rem",fontWeight:700,fontSize:"1.05rem",color:titleCol,lineHeight:1.25,wordBreak:"break-word"} },
+              React.createElement(TitleGlyph, { name:"project", size:19, col:titleCol }),
+              React.createElement("span", { style:{minWidth:0,wordBreak:"break-word"} }, proj.name)
+            ),
             hint && React.createElement("div", { style:{fontSize:"0.7rem",color:S.titleText,marginTop:"0.12rem"} }, "tap: menu / double-tap: edit"),
             menu && React.createElement("div", {
               ref:menuAutoScroll,
               "data-surface":"menu",
               style:{position:"absolute",top:"calc(100% + 4px)",left:UI.left?"auto":0,right:UI.left?0:"auto",background:S.menuBg,border:"1px solid "+S.border,borderRadius:S.radius,minWidth:"190px",boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:70,overflow:"hidden"} },
-              childTasks.length>0 && React.createElement("button", { "data-flat":true, onClick:function(){ setExpanded(function(x){ return !x; }); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.65rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} }, (expanded?"Collapse ":"Expand ")+(nested?"Nested":"Tasks")),
-              React.createElement("button", { "data-flat":true, onClick:function(){ onEdit(proj); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.65rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} }, "Edit Project"),
-              // Lane identity rides on a dot: raw accents are border colours, and most of
-              // them fail as text on the menu surface.
-              React.createElement("button", { "data-flat":true, onClick:function(){ onAddSub(proj.id); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.65rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} },
-                React.createElement("span", { style:{display:"inline-block",width:"8px",height:"8px",borderRadius:"50%",background:meta.accent,marginRight:"0.55rem"} }),
-                "Add Task"),
-              React.createElement("button", { "data-flat":true, onClick:function(){ onStages(proj); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.65rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} }, hasStages?"View Stages":"Add Stages"),
+              childTasksAll.length>0 && React.createElement("button", { "data-flat":true, onClick:function(){ setExpanded(function(x){ return !x; }); setMenu(false); }, style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.65rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} }, (expanded?"Collapse ":"Expand ")+(nested?"Nested":"Tasks")),
+              // The same rows the outline offers for a project, from the same
+              // builder, so the two screens cannot drift. Close Out stays below:
+              // it is a board action the outline does not have.
+              React.createElement(MenuRows, { onPick:function(){ setMenu(false); },
+                items:rowMenuItems("node", projRole(proj), {
+                  edit:function(){ onEdit(proj); },
+                  addSibling:props.onAddSibling ? function(){ props.onAddSibling(proj.id); } : null,
+                  addNestedProject:props.onAddNested ? function(){ props.onAddNested(proj.id); } : null,
+                  addTask:function(){ onAddSub(proj.id); },
+                  stages:function(){ onStages(proj); },
+                  milestones:props.onMilestones ? function(){ props.onMilestones(proj.id); } : null
+                }) }),
               // Closing out is not deleting, so it sits with the ordinary rows
               // and reads in the project's own colour, not the danger one.
               React.createElement("button", { "data-flat":true, onClick:function(){ onCloseOut(proj); setMenu(false); }, style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"0.6rem",width:"100%",textAlign:"left",background:readyToClose(proj)?S.successBg:"none",border:"none",padding:"0.65rem 1rem",color:readyToClose(proj)?S.successText:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.9rem"} },
@@ -4760,13 +6828,26 @@ function ProjectCard(props){
           proj.notes && React.createElement("span", { style:{fontSize:"0.82rem",color:S.textDim} }, proj.notes),
           React.createElement(SchedChip, { proj:proj }),
           subActive&&!isActive && React.createElement("span", { style:{fontSize:"0.76rem",color:meta.accent,fontWeight:600} }, "> "+subActive.name),
-          childTasks.length>0 && React.createElement("button", { onClick:function(){ setExpanded(function(x){ return !x; }); },
+          childTasksAll.length>0 && React.createElement("button", { onClick:function(){ setExpanded(function(x){ return !x; }); },
             style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.3rem",background:S.bg0,border:"2px solid "+S.chromeBdr,borderRadius:"8px",cursor:"pointer",padding:"0 0.55rem",height:"30px",minHeight:"30px",flexShrink:0} },
             React.createElement("span", { style:{fontSize:"0.76rem",color:S.chromeText,fontWeight:700} }, (expanded?"\u2228 ":"\u203a ")+countLabel)
           ),
           todayMs>0 && React.createElement(Mono, { style:{fontSize:"0.82rem",color:timCol,fontWeight:700} }, fmtDur(todayMs,true)),
           React.createElement(DistBadge, { today:distToday, total:distTotal,
             onClick:function(){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} setDistPopup(true); } }),
+          // No stages: Complete sits where the gauge would. HELD, not tapped -
+          // the fill charges across it, and a release before it is full does
+          // nothing. Reaches the closure sheet, the same as Close Out does.
+          !hasStages && isOpen(proj) && onCloseOut && React.createElement(HoldButton, {
+            onHold:function(){ onCloseOut(proj); }, holdMs:HOLD_DELETE_MS, fill:rgba(S.successText,0.35),
+            attrs:{ "data-complete":proj.id, "aria-label":"Hold to complete" },
+            style:{flex:1,minWidth:"110px",display:"flex",alignItems:"center",justifyContent:"center",gap:"0.38rem",
+                   background:S.bg1,border:"2px solid "+S.chromeBdr,borderRadius:S.radius3,padding:"0.3rem 0.6rem",
+                   color:S.chromeText,fontFamily:S.fontBody,fontWeight:700,fontSize:"0.76rem"} },
+            React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.38rem"} },
+              React.createElement(MenuIcon, { name:"task", size:15, col:S.chromeText }),
+              "Complete",
+              React.createElement("span", { style:{fontSize:"0.64rem",fontWeight:600,opacity:0.7,marginLeft:"0.3rem"} }, "hold"))),
           hasStages && React.createElement("div", { ref:stagesRef, style:{position:"relative",flex:1,minWidth:"110px"} },
           React.createElement("button", { onClick:function(){ if(!stagesMenu){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setStagesMenu(function(x){ return !x; }); },
             style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.38rem",background:stagesAllDone?S.successBg:S.bg1,border:"2px solid "+stageBdr,borderRadius:"8px",cursor:"pointer",padding:"0 0.55rem",height:"30px",minHeight:"30px",width:"100%"} },
@@ -4781,9 +6862,25 @@ function ProjectCard(props){
           )
           )
         ),
+        // The milestone line, under the chips, when anything beneath this
+        // project carries steps. Tap opens the project's milestone editor.
+        (function(){
+          // msProjects is the FULL record set, closed ones included. The board
+          // hands cards only what is open, and a milestone's targets are the
+          // records that have been closed - filter them out and a met step
+          // could never register as met.
+          var all=props.msProjects||allProjects||[];
+          if(!props.onMilestones || !hasMilestonesBeneath(all, proj.id)) return null;
+          // Every step beneath it, the same rule a lane follows - not one
+          // aggregate mark per child, which hid the children's own steps.
+          var pts=subtreePoints(all, proj.id, Date.now());
+          return React.createElement("div", { style:{padding:"0 0.6rem"} },
+            React.createElement(MilestoneStrip, { weekStart:weekStartOf(props.schedule), kind:"project", points:pts,
+              offDays:props.offDays, onOpen:function(){ props.onMilestones(proj.id); } }));
+        })(),
         // Sub-tasks INSIDE the parent border
-        expanded && childTasks.length>0 && React.createElement("div", { style:{padding:"0.15rem 0.6rem 0.6rem 1.4rem",borderTop:"1px solid "+meta.dim,marginTop:"0.1rem",paddingTop:"0.55rem"} },
-          renderKids(childTasks, 1)
+        expanded && childTasksAll.length>0 && React.createElement("div", { style:{padding:"0.15rem 0.6rem 0.6rem 1.4rem",borderTop:"1px solid "+meta.dim,marginTop:"0.1rem",paddingTop:"0.55rem"} },
+          renderKids(childTasksAll, 1)
         )
       ),
       renderNestedProjects(),
@@ -4802,10 +6899,13 @@ function LaneSection(props){
   var laneMeta=props.laneMeta, onDeleteLane=props.onDeleteLane, onCloseOut=props.onCloseOut;
 
   var meta=getMeta(laneMeta,lane);
-  var isBuiltin=DEFAULT_ORDER.indexOf(lane)>=0;
+  var isBuiltin=DEFAULT_ORDER.indexOf(lane)>=0 || TEST_ORDER.indexOf(lane)>=0;
   var laneTaps=useTaps(
     function(){ if(!addOpen){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setAddOpen(function(x){ return !x; }); },
-    function(){ setAddOpen(false); props.onEditLanes(); }
+    // Double tap edits THIS lane, in the same form the outline opens. It used
+    // to open the all-lanes list, so the same gesture gave two different
+    // editors depending on where you started from.
+    function(){ setAddOpen(false); props.onEditLane(lane); }
   );
   var addOpenS=useState(false); var setAddOpen=addOpenS[1]; var addOpen=addOpenS[0];
   var removeArmS=useState(false); var setRemoveArm=removeArmS[1]; var removeArm=removeArmS[0];
@@ -4836,7 +6936,14 @@ function LaneSection(props){
   var laneOvalBg = S.fill==="solid" ? meta.accent
     : S.fill==="glass" ? meta.accent+"55"
     : (S.mode==="light" ? meta.accent+"22" : meta.bg);
-  var topLevel=allProjects.filter(function(p){ return p.lane===lane&&p.parentId===null; }).sort(function(a,b){ return (a.order||0)-(b.order||0); });
+  // Completed ones sink to the bottom of the lane: still there, out of the way.
+  var topLevel=allProjects.filter(function(p){ return p.lane===lane&&p.parentId===null; })
+    .sort(function(a,b){
+      var ac=isClosed(a)?1:0, bc=isClosed(b)?1:0;
+      if(ac!==bc) return ac-bc;
+      if(ac) return (b.closedAt||0)-(a.closedAt||0);   // most recently finished first
+      return (a.order||0)-(b.order||0);
+    });
   // The running project (or sub-task) inside this lane, for the collapsed
   // oval: it names the timer and drives the border pulse.
   var laneActiveProj = activeId!=null ? allProjects.find(function(p){ return p.id===activeId && p.lane===lane; }) : null;
@@ -4846,6 +6953,7 @@ function LaneSection(props){
     React.createElement("div", { "data-surface":"lane", style:{marginBottom:"1.25rem",position:"relative",zIndex:addOpen?90:"auto"} },
       React.createElement("div", { ref:addRef, style:{position:"relative",fontSize:"1.05rem",textTransform:"uppercase",letterSpacing:"0.1em",color:meta.accent,fontWeight:700,marginBottom:"0.6rem",display:"flex",alignItems:"center",gap:"0.5rem"} },
         editMode && React.createElement("span", { onMouseDown:laneHandle.onMouseDown, onTouchStart:laneHandle.onTouchStart, style:{cursor:"grab",color:S.dragGlyph,fontSize:"1.3rem",userSelect:"none",touchAction:"none"} }, "\u283f"),
+        React.createElement(TitleGlyph, { name:"lanes", size:19, col:meta.accent }),
         React.createElement("span", {
           style:{flex:1,cursor:"pointer",WebkitUserSelect:"none",userSelect:"none",touchAction:"pan-y"},
           onMouseDown:function(e){ swipeX.current=e.clientX; swiped.current=false; },
@@ -4860,32 +6968,33 @@ function LaneSection(props){
           },
           onClick:function(e){ if(swiped.current){ swiped.current=false; return; } laneTaps(); }
         }, meta.label),
-        React.createElement("span", { "data-lanecount":true, style:{flexShrink:0,fontSize:"0.78rem",fontWeight:700,
+        // The same rule the cards follow: count what is THERE, and say how
+        // many are finished. A count of only what is left read "0" for a lane
+        // full of completed work, which is not what the lane holds.
+        React.createElement("span", { "data-lanecount":topLevel.length, style:{flexShrink:0,fontSize:"0.78rem",fontWeight:700,
           color:meta.accent,opacity:0.65,fontFamily:S.fontMono,letterSpacing:"normal",textTransform:"none"} },
-          topLevel.length),
+          (function(){ var done=topLevel.filter(isClosed).length;
+            return done>0 ? (topLevel.length+" \u00b7 "+done+" done") : String(topLevel.length); })()),
         editMode&&!isBuiltin && React.createElement("button", { onClick:function(){ if(removeArm){ setRemoveArm(false); onDeleteLane(lane); } else { setRemoveArm(true); } },
           style:{background:removeArm?S.dangerBg2:"none",border:"1px solid "+(removeArm?S.dangerBright:S.dangerText),borderRadius:"6px",padding:"0.15rem 0.5rem",color:removeArm?S.dangerBright:S.dangerText,cursor:"pointer",fontSize:"0.72rem",fontWeight:removeArm?700:600,fontFamily:S.fontBody,textTransform:"none",letterSpacing:"normal"} }, removeArm?"Confirm remove?":"Remove"),
         addOpen && React.createElement("div", { ref:menuAutoScroll, "data-surface":"menu", "data-menu-open":"1", style:{position:"absolute",top:"calc(100% + 4px)",left:UI.left?"auto":0,right:UI.left?0:"auto",minWidth:"240px",background:S.menuBg,border:"1px solid "+S.border,borderRadius:S.radius2,overflow:"hidden",boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:150,textTransform:"none",letterSpacing:"normal"} },
-          laneOrder.map(function(laneKey){
-            var m=getMeta(laneMeta,laneKey);
-            return React.createElement("button", { "data-flat":true, key:laneKey, onClick:function(){ props.onPickLane(laneKey); setAddOpen(false); },
-              style:{display:"flex",alignItems:"center",gap:"0.65rem",width:"100%",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",cursor:"pointer",fontFamily:S.fontBody,textAlign:"left"} },
-              React.createElement("div", { style:{width:"10px",height:"10px",borderRadius:"50%",background:m.accent,flexShrink:0} }),
-              React.createElement("span", { style:{fontSize:"0.92rem",fontWeight:600,color:S.text} }, m.label)
-            );
-          }),
-          React.createElement("button", { "data-flat":true, onClick:function(){ props.onNewLane(); setAddOpen(false); },
-            style:{display:"flex",alignItems:"center",gap:"0.65rem",width:"100%",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",cursor:"pointer",fontFamily:S.fontBody,textAlign:"left"} },
-            React.createElement("div", { style:{width:"10px",height:"10px",borderRadius:"2px",border:"2px dashed #444",flexShrink:0} }),
-            React.createElement("span", { style:{fontSize:"0.92rem",fontWeight:600,color:S.mutedGlyph,whiteSpace:"nowrap"} }, "+ New Lane")
-          ),
-          React.createElement("button", { "data-flat":true, onClick:function(){ props.onEditLanes(); setAddOpen(false); },
-            style:{display:"flex",alignItems:"center",gap:"0.65rem",width:"100%",background:"none",border:"none",padding:"0.8rem 1rem",cursor:"pointer",fontFamily:S.fontBody,textAlign:"left"} },
-            React.createElement(GearSVG, { size:12, col:S.mutedGlyph }),
-            React.createElement("span", { style:{fontSize:"0.92rem",fontWeight:600,color:S.mutedGlyph,whiteSpace:"nowrap"} }, "Edit Lanes")
-          )
+          // The same three the outline offers for a lane, in the same order.
+          React.createElement(MenuRows, { onPick:function(){ setAddOpen(false); },
+            items:rowMenuItems("lane", null, {
+              edit:function(){ props.onEditLane(lane); },
+              newLane:function(){ props.onNewLane(); },
+              newProject:function(){ props.onPickLane(lane); },
+              milestones:props.onLaneMilestones ? function(){ props.onLaneMilestones(lane); } : null
+            }) })
         )
       ),
+      // The lane's line: one mark per project in it with milestones beneath.
+      // Under the header, above the cards, and only when there is something.
+      !collapsed && props.onLaneMilestones && (function(){
+        var pts=laneLine(props.msProjects||allProjects||[], lane, Date.now());
+        return React.createElement(MilestoneStrip, { weekStart:weekStartOf(props.schedule), kind:"lane", points:pts, offDays:props.offDays,
+          onOpen:function(){ props.onLaneMilestones(lane); } });
+      })(),
       collapsed
         ? React.createElement("div", {
             "data-pulse": lanePulse ? "1" : undefined,
@@ -4937,12 +7046,13 @@ function LaneSection(props){
             var distTotal=distStats(allDist, allIds);
             var projDisruptions=allDist.filter(function(d){ return allIds.indexOf(d.projectId)>=0; });
             return React.createElement(ProjectCard, {
-              key:proj.id, proj:proj, subTasks:subTasks,
+              key:proj.id, proj:proj, subTasks:subTasks, onReopen:props.onReopen, schedule:props.schedule,
               isActive:activeId===proj.id, interrupting:interrupting, elapsed:elapsed,
               todayMs:todayMs, distToday:distToday, distTotal:distTotal, projDisruptions:projDisruptions,
               onCloseOut:onCloseOut,
               onToggle:onToggle, onEdit:onEdit, onStages:onStages, onStageToggle:props.onStageToggle,
-              onAddSub:props.onAddSub,
+              onAddSub:props.onAddSub, onAddSibling:props.onAddSibling, onAddNested:props.onAddNested,
+              onMilestones:props.onMilestones, msProjects:props.msProjects, offDays:props.offDays, msProjects:props.msProjects, offDays:props.offDays,
               activeId:activeId, todayLogs:todayLogs, todayDist:todayDist, allDist:allDist, allProjects:allProjects,
               onCloseOut:onCloseOut,
               editMode:editMode, laneMeta:laneMeta,
@@ -4983,7 +7093,7 @@ function LaneSection(props){
 //                            normalizer runs once at boot, before first paint,
 //                            for enabled and disabled modules alike, and must
 //                            be idempotent and never throw.
-//   settingsPanel  optional  Component rendered inside Themes and Layout.
+//   settingsPanel  optional  Component rendered inside the Layout screen.
 //   reports        optional  { section(ctx), text(ctx) } - an extra Reports
 //                            block and extra lines in the copied report.
 //   Any other field is rejected: an unknown key is a typo, not a feature.
@@ -5873,7 +7983,67 @@ TT.define({
 // ==== TT MODULE tools END ====
 
 // ---- MAIN APP ---------------------------------------------------------------
-export default function App(){
+// ---- ERROR BOUNDARY ----------------------------------------------------------
+// A render crash used to reach window.onerror, which on the phone reported
+// "Script error." at line 0:0 and nothing else - unactionable. React hands a
+// boundary the real message and the component stack, so a crash now names
+// itself on screen and can be read back verbatim. It also keeps the rest of
+// the app from disappearing behind a white page.
+function TTErrorBoundary(props){ return props.children; }
+// ---- THE OPENING SCREEN ------------------------------------------------------
+// Name and version, about a second, then gone. Deliberately brief: this is an
+// app you open to start a timer, and a splash you have to sit through is a
+// splash that gets in the way. A tap dismisses it at once.
+//
+// APP_VERSION is the public number. The build stamp stays where it has always
+// been, in the boot div, because that is the thing that proves which deploy
+// landed; this is the thing a person reads.
+var APP_VERSION = "1.0";
+var SPLASH_SHOW_MS = 2500;   // fully opaque
+var SPLASH_FADE_MS = 320;    // then fades out over this
+function SplashScreen(props){
+  return React.createElement("div", { "data-splash":props.fading?"fading":"shown",
+    onPointerDown:props.onDismiss,
+    style:{position:"fixed",inset:0,zIndex:1000,background:S.bg0||S.bg1,
+           display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+           gap:"0.1rem",opacity:props.fading?0:1,
+           transition:"opacity "+SPLASH_FADE_MS+"ms ease-out",
+           pointerEvents:props.fading?"none":"auto"} },
+    React.createElement(MenuIcon, { name:"task", size:64, col:S.successText }),
+    React.createElement("div", { style:{marginTop:"1.1rem",color:S.text,fontFamily:S.fontBody,
+      fontWeight:800,fontSize:"1.55rem",letterSpacing:"0.01em"} }, "Time Tracker"),
+    React.createElement("div", { dir:"ltr", style:{marginTop:"0.35rem",color:S.textMuted,fontFamily:S.fontBody,
+      fontWeight:600,fontSize:"0.72rem",letterSpacing:"0.08em"} }, "v"+APP_VERSION));
+}
+var TTBoundary = (function(){
+  // Only a real React has Component. The test harnesses pass a stub, and a
+  // boundary is meaningless there anyway - fall back to drawing the children
+  // rather than taking the whole suite down at module load.
+  if(!React || typeof React.Component!=="function") return TTErrorBoundary;
+  function B(p){ React.Component.call(this, p); this.state={ err:null, info:null }; }
+  B.prototype = Object.create(React.Component.prototype);
+  B.prototype.constructor = B;
+  B.getDerivedStateFromError = function(err){ return { err:err }; };
+  B.prototype.componentDidCatch = function(err, info){ this.setState({ err:err, info:info }); };
+  B.prototype.render = function(){
+    if(!this.state.err) return this.props.children;
+    var e=this.state.err, info=this.state.info;
+    var text = (e && (e.message || String(e))) + "\n\n"
+      + ((e && e.stack) ? e.stack.split("\n").slice(0,6).join("\n") : "(no stack)")
+      + ((info && info.componentStack) ? "\n\nin:" + info.componentStack.split("\n").slice(0,6).join("\n") : "");
+    return React.createElement("div", { style:{padding:"1rem",fontFamily:"ui-monospace,Menlo,monospace",
+        color:"#FFB4B4",background:"#1A0505",minHeight:"100vh",fontSize:"12px",lineHeight:1.5} },
+      React.createElement("div", { style:{fontWeight:700,marginBottom:"0.6rem",fontSize:"14px"} },
+        "Something broke while drawing the screen"),
+      React.createElement("pre", { "data-crash":true,
+        style:{whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0} }, text),
+      React.createElement("button", { onClick:function(){ location.reload(); },
+        style:{marginTop:"1rem",padding:"0.7rem 1rem",background:"#2A1618",border:"1px solid #CC5050",
+               borderRadius:"10px",color:"#FFB4B4",fontWeight:700} }, "Reload"));
+  };
+  return B;
+})();
+function TTBoard(){
   // Module normalizers run once, in a lazy initializer, so every module's
   // saved shape is current before the first paint - the same guarantee
   // normalizeSchedule and normalizeNotifs give the core.
@@ -5887,17 +8057,24 @@ export default function App(){
   var rProjS=useState(function(){ return load("tt_projects",REAL_PROJECTS); }); var setRealProjects=rProjS[1]; var realProjects=rProjS[0];
   var tProjS=useState(function(){ return load("tt_test_projects",TEST_PROJECTS); }); var setTestProjects=tProjS[1]; var testProjects=tProjS[0];
   var rLogsS=useState(function(){ return load("tt_logs",[]); }); var setRealLogs=rLogsS[1]; var realLogs=rLogsS[0];
-  var tLogsS=useState(function(){ return load("tt_test_logs",[]); }); var setTestLogs=tLogsS[1]; var testLogs=tLogsS[0];
+  // The tutorial ships with history so Reports, the Day Summary and the
+  // disruption badges have something to show. Empty defaults meant the one
+  // place built for demonstrating the app demonstrated blank screens.
+  var tLogsS=useState(function(){ return load("tt_test_logs",TEST_LOGS); }); var setTestLogs=tLogsS[1]; var testLogs=tLogsS[0];
   var rDistS=useState(function(){ return load("tt_disruptions",[]); }); var setRealDist=rDistS[1]; var realDist=rDistS[0];
-  var tDistS=useState(function(){ return load("tt_test_disruptions",[]); }); var setTestDist=tDistS[1]; var testDist=tDistS[0];
+  var tDistS=useState(function(){ return load("tt_test_disruptions",TEST_DIST); }); var setTestDist=tDistS[1]; var testDist=tDistS[0];
   var rBreaksS=useState(function(){ return load("tt_breaks",[]); }); var setRealBreaks=rBreaksS[1]; var realBreaks=rBreaksS[0];
-  var tBreaksS=useState(function(){ return load("tt_test_breaks",[]); }); var setTestBreaks=tBreaksS[1]; var testBreaks=tBreaksS[0];
+  var tBreaksS=useState(function(){ return load("tt_test_breaks",TEST_BREAKS); }); var setTestBreaks=tBreaksS[1]; var testBreaks=tBreaksS[0];
 
   var projects=testMode?testProjects:realProjects;
   // The board, the pickers and everything that offers a project to start work
   // against see only what is open. Reports, logs and the Archive keep the lot,
   // which is what makes closing out non-destructive.
-  var liveProjects=openProjects(projects);
+  // The board KEEPS completed records: they collapse to a greyed pill rather
+  // than disappearing, because a record vanishing the moment you finish it
+  // gives no confirmation that anything happened. Anything that must ignore
+  // them (counts, gauges, timers) filters with isOpen where it is used.
+  var liveProjects=projects;
   var setProjects=testMode?setTestProjects:setRealProjects;
   var logs=testMode?testLogs:realLogs;
   var setLogs=testMode?setTestLogs:setRealLogs;
@@ -5907,8 +8084,74 @@ export default function App(){
   var setBreaks=testMode?setTestBreaks:setRealBreaks;
 
   // Lane meta
-  var laneOrderS=useState(function(){ return load("tt_laneorder",DEFAULT_ORDER); }); var setLaneOrder=laneOrderS[1]; var laneOrder=laneOrderS[0];
-  var laneMetaS=useState(function(){ return load("tt_lanemeta",DEFAULT_META); }); var setLaneMeta=laneMetaS[1]; var laneMeta=laneMetaS[0];
+  // Lanes are per-mode, like projects and logs. They were shared, which meant
+  // renaming, recolouring, reordering or deleting a lane while learning in the
+  // tutorial did it to the real board as well - the one part of the tutorial
+  // that was not a sandbox.
+  var laneOrderS=useState(function(){ return load("tt_laneorder",DEFAULT_ORDER); });
+  var setRealLaneOrder=laneOrderS[1]; var realLaneOrder=laneOrderS[0];
+  var laneMetaS=useState(function(){ return load("tt_lanemeta",DEFAULT_META); });
+  var setRealLaneMeta=laneMetaS[1]; var realLaneMeta=laneMetaS[0];
+  var tLaneOrderS=useState(function(){ return load("tt_test_laneorder",TEST_ORDER); });
+  var setTestLaneOrder=tLaneOrderS[1]; var testLaneOrder=tLaneOrderS[0];
+  var tLaneMetaS=useState(function(){ return load("tt_test_lanemeta",TEST_META); });
+  var setTestLaneMeta=tLaneMetaS[1]; var testLaneMeta=tLaneMetaS[0];
+  // Leaving the tutorial puts it back to the shipped baseline. The exit
+  // dialog always claimed this happened and it never did: leaving only
+  // flipped the mode flag, so the tutorial kept whatever the last visit left
+  // behind - including, after an update, a seed from an older version. A
+  // tutorial that has been rummaged through is no longer a demonstration, and
+  // the help pages need a state they can describe.
+  // The tutorial's stores persist between sessions, and they are only seeded
+  // when EMPTY - so a device that ran the tutorial once kept its old copy
+  // forever and never saw a single later change to the baseline. Bumping this
+  // re-seeds every tutorial store on next load. Bump it whenever TEST_* data
+  // changes, or the change reaches new installs only.
+  function resetTutorial(){
+    setTestProjects(TEST_PROJECTS);
+    setTestLogs(TEST_LOGS);
+    setTestDist(TEST_DIST);
+    setTestBreaks(TEST_BREAKS);
+    setTestLaneOrder(TEST_ORDER);
+    setTestLaneMeta(TEST_META);
+    try{ localStorage.setItem("tt_test_seed", TUTORIAL_SEED);
+         localStorage.removeItem("tt_test_touched"); }catch(e){}
+  }
+  // Leaving KEEPS whatever was built in the tutorial: it is a place to come
+  // back to and carry on, not a demo that wipes itself. Resetting is its own
+  // deliberate act (held, like every other irreversible one).
+  function leaveTutorial(){
+    setTestMode(false);
+    setShowTestConfirm(false);
+    closeAllPopups();
+  }
+  function resetTutorialNow(){
+    resetTutorial();
+    setShowTestConfirm(false);
+    closeAllPopups();
+    haptic(14);
+  }
+  // Tutorial data from an older build is replaced on load - but ONLY while it
+  // is still untouched. Once someone has built something in there it is
+  // theirs, and a version bump must never take it: they get the Reset button
+  // instead, which says what it will do.
+  useEffect(function(){
+    var seen=null, touched=null;
+    try{ seen=localStorage.getItem("tt_test_seed"); touched=localStorage.getItem("tt_test_touched"); }catch(e){}
+    if(seen!==TUTORIAL_SEED && touched!=="1") resetTutorial();
+  },[]);
+  // Anything changed inside the tutorial marks it as theirs.
+  useEffect(function(){
+    if(!testMode) return;
+    try{ localStorage.setItem("tt_test_touched","1"); }catch(e){}
+  },[testMode, testProjects, testLogs, testDist, testBreaks, testLaneOrder, testLaneMeta]);
+  // Declared AFTER the four states above: `var` hoists the name but not the
+  // value, so switching before them read undefined and the board rendered
+  // nothing at all.
+  var laneOrder=testMode?testLaneOrder:realLaneOrder;
+  var setLaneOrder=testMode?setTestLaneOrder:setRealLaneOrder;
+  var laneMeta=testMode?testLaneMeta:realLaneMeta;
+  var setLaneMeta=testMode?setTestLaneMeta:setRealLaneMeta;
 
   // ---- Session restore ----
   // Every timer below is stored as an absolute start timestamp, never as an
@@ -5996,12 +8239,20 @@ export default function App(){
   // that makes ttModuleNav() and the Reports hooks read the store again.
   var modTickS=useState(0); var setModTick=modTickS[1];
   var showNewLaneS=useState(false); var setShowNewLane=showNewLaneS[1]; var showNewLane=showNewLaneS[0];
-  var showEditLanesS=useState(false); var setShowEditLanes=showEditLanesS[1]; var showEditLanes=showEditLanesS[0];
   var confirmDeleteS=useState(null); var setConfirmDelete=confirmDeleteS[1]; var confirmDelete=confirmDeleteS[0];
   var closeOutS=useState(null); var setCloseOut=closeOutS[1]; var closeOut=closeOutS[0];
   var matchAskS=useState(null); var setMatchAsk=matchAskS[1]; var matchAsk=matchAskS[0];
   var startAskS=useState(null); var setStartAsk=startAskS[1]; var startAsk=startAskS[0];
-  var addNewS=useState(null); var setAddNew=addNewS[1]; var addNew=addNewS[0];
+  // Which period Reports opens on. The modal reads it once on mount, so every
+  // entry point states its own rather than inheriting whatever was last used.
+  var editLaneS=useState(null); var setEditLane=editLaneS[1]; var editLane=editLaneS[0];
+  // Milestones: which project's editor is open, and which lane's roll-up view.
+  var msProjS=useState(null); var setMsProj=msProjS[1]; var msProj=msProjS[0];
+  var msLaneS=useState(null); var setMsLane=msLaneS[1]; var msLane=msLaneS[0];
+  var msBoardS=useState(false); var setMsBoard=msBoardS[1]; var msBoard=msBoardS[0];
+  var stagesDoneS=useState(null); var setStagesDone=stagesDoneS[1]; var stagesDone=stagesDoneS[0];
+  var showOutlineS=useState(false); var setShowOutline=showOutlineS[1]; var showOutline=showOutlineS[0];
+  var reportsKindS=useState("week"); var setReportsKind=reportsKindS[1]; var reportsKind=reportsKindS[0];
   var showArchiveS=useState(false); var setShowArchive=showArchiveS[1]; var showArchive=showArchiveS[0];
   var settingsS=useState(function(){
     var st = load("tt_settings",{ layout:"comfortable", tracking:"timer", colorScheme:"bright-pastels", theme:"neon-dream", schemes:{}, fonts:{}, mode:"dark", handedness:"right", headerPos:"top" });
@@ -6019,10 +8270,14 @@ export default function App(){
   // deriving first would paint the previous render's palette. The 1s tick used
   // to mask this; the first paint after a load was still wrong.
   applyTokens(settings);
-  var showSettingsS=useState(false); var setShowSettings=showSettingsS[1]; var showSettings=showSettingsS[0];
+  var showThemesS=useState(false); var setShowThemes=showThemesS[1]; var showThemes=showThemesS[0];
+  var showLayoutS=useState(false); var setShowLayout=showLayoutS[1]; var showLayout=showLayoutS[0];
   var showScheduleS=useState(false); var setShowSchedule=showScheduleS[1]; var showSchedule=showScheduleS[0];
   var showTrackingS=useState(false); var setShowTracking=showTrackingS[1]; var showTracking=showTrackingS[0];
-  var timeMenuOpenS=useState(false); var setTimeMenuOpen=timeMenuOpenS[1]; var timeMenuOpen=timeMenuOpenS[0];
+  // Which menu group is showing its modal, by key, or null. One value rather
+  // than a flag per group: only one can be open, and a shared key makes that
+  // true by construction instead of by remembering to close the other.
+  var menuGroupS=useState(null); var setMenuGroup=menuGroupS[1]; var menuGroup=menuGroupS[0];
   var distPresetsS=useState(function(){ return load("tt_distpresets",DEFAULT_DIST_PRESETS); });
   var setDistPresets=distPresetsS[1]; var distPresets=distPresetsS[0];
   var distMenuOpenS=useState(false); var setDistMenuOpen=distMenuOpenS[1]; var distMenuOpen=distMenuOpenS[0];
@@ -6156,10 +8411,10 @@ export default function App(){
   // Close every popup - modals and all dropdown menus - before opening a new one
   function closeAllPopups(){
     setShowAdd(null); setEditProj(null); setStagesProj(null); setShowDisrupt(false);
-    setShowBreak(false); setShowDay(false); setShowNewLane(false); setShowEditLanes(false);
+    setShowBreak(false); setShowDay(false); setShowNewLane(false);
     setShowReports(false); setShowBackup(false); setShowExtensions(false); setModScreen(null);
     setConfirmDelete(null); setShowTestConfirm(false); setStartAsk(null);
-    setMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowSettings(false); setShowSchedule(false); setShowTracking(false); setTimeMenuOpen(false);
+    setMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowThemes(false); setShowLayout(false); setShowSchedule(false); setShowTracking(false); setMenuGroup(null); setShowOutline(false); setEditLane(null); setMsProj(null); setMsLane(null); setMsBoard(false); setStagesDone(null);
     try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){}
   }
   // ---- Module nav ----
@@ -6176,7 +8431,7 @@ export default function App(){
   function openModule(entry){ closeAllPopups(); setModScreen({ id:entry.id, screen:entry.screen }); }
 
   useEffect(function(){
-    function closeHeaderMenus(){ setMenuOpen(false); setDistMenuOpen(false); setTimeMenuOpen(false); }
+    function closeHeaderMenus(){ setMenuOpen(false); setDistMenuOpen(false); setMenuGroup(null); }
     window.addEventListener("ttCloseMenus",closeHeaderMenus);
     return function(){ window.removeEventListener("ttCloseMenus",closeHeaderMenus); };
   },[]);
@@ -6186,11 +8441,26 @@ export default function App(){
   // scheduled window it is obvious and nothing is asked; outside it the prompt
   // opens and clockIn does nothing at all until an answer comes back, so a
   // half-started session can never exist.
-  function clockIn(){
+  // Clocking in may need a question answered first. `then` is what the user
+  // was actually trying to do, and it runs once the day is settled - on both
+  // paths, so the caller never has to know which one it took.
+  //
+  // Without it, tapping a project outside a shift asked which shift, took the
+  // answer, clocked in, and dropped the tap on the floor: the board came back
+  // with nothing running and no sign anything had been missed.
+  //
+  // `then` is handed the clock-in moment, not the moment the question was
+  // answered, so the project and the At Work log start on the same timestamp
+  // rather than seconds apart.
+  function clockIn(then){
     var now=Date.now();
     var auto=autoWorkDay(settings.workSchedule, now, normalizeGrace(settings.shiftGrace));
-    if(auto===null){ askWorkDay(now, function(day, ot){ commitClockIn(now, day, ot); }); return false; }
+    if(auto===null){
+      askWorkDay(now, function(day, ot){ commitClockIn(now, day, ot); if(then) then(now); });
+      return false;
+    }
     commitClockIn(now, auto, null);
+    if(then) then(now);
     return true;
   }
   function commitClockIn(now, day, ot){
@@ -6241,10 +8511,14 @@ export default function App(){
     if(startAction(projects, activeId, id, force)==="ask"){
       setStartAsk(findProj(projects, id)); return;
     }
-    // If clocking in opened the prompt, stop here: the project would otherwise
-    // start against a work day nobody has chosen yet.
-    if(!atWorkStart && !clockIn()) return;
-    var now=Date.now();
+    // Not clocked in yet: clock in first and carry the tap through, so that
+    // answering the shift question does the thing that was asked for. Both
+    // clock-in paths call back, so there is one route through here.
+    if(!atWorkStart){ clockIn(function(at){ runToggle(id, at); }); return; }
+    runToggle(id, Date.now());
+  }
+  // The start/stop itself, once the work day is settled.
+  function runToggle(id, now){
     if(activeId===id){
       if(interrupting){ resumeProject(); return; }
       finalizeProject(now);
@@ -6278,8 +8552,50 @@ export default function App(){
     if(onBreak) endBreak();
     setLogs(function(prev){ return prev.map(function(l){ return (!l.endTime&&l.type==="atwork")?Object.assign({},l,{endTime:now,duration:now-l.startTime}):l; }); });
     setAtWorkStart(null); setAtWorkElapsed(0);
+    // Land on Reports for the day just finished. The question at the end of a
+    // shift is what the day came to, and Reports answers it with the schedule
+    // and pay context beside it; the copy-out sheet answered a narrower one.
+    // Day Summary is still reachable from the ticker.
+    openReports("day");
+  }
+  // Reports, opened on a stated period.
+  function openReports(kind){
     closeAllPopups();
-    setShowDay(true);
+    setReportsKind(kind||"week");
+    setShowReports(true);
+  }
+  // The outline is the source of truth on save: lane, parent and order all
+  // come from where each row ended up, so a record cannot keep a lane its
+  // position no longer agrees with.
+  function saveOutline(rows){
+    var c=outlineCommit(rows);
+    // Stage rows carry only what the outline needed; the real stage objects
+    // are looked up by id so notes and done-state survive a move.
+    var stageById={};
+    projects.forEach(function(p){ (p.stages||[]).forEach(function(st){ stageById[st.id]=st; }); });
+    setLaneOrder(c.laneOrder.slice());
+    setProjects(function(prev){ return prev.map(function(p){
+      if(c.laneOf[p.id]===undefined) return p;   // untouched by this outline
+      return Object.assign({}, p, {
+        lane:c.laneOf[p.id], parentId:c.parentOf[p.id], order:c.orderOf[p.id],
+        stages:(c.stagesOf[p.id]||[]).map(function(r){ return stageById[r.id]; })
+                 .filter(function(x){ return !!x; })
+      });
+    }); });
+    setShowOutline(false);
+    haptic(18);
+  }
+  // Tapping a row in the outline opens that item's own editor.
+  // Tapping a row's name opens that item's own editor ON TOP of the outline,
+  // which stays mounted. Closing the editor lands back in the outline with
+  // whatever rearranging was already done still there, rather than dumping
+  // the user back on the board.
+  function openFromOutline(row){
+    if(row.kind==="lane"){ setEditLane(row.id); return; }
+    var proj=findProj(projects, row.kind==="stage" ? row.hostId : row.id);
+    if(!proj) return;
+    if(row.kind==="stage"){ setStagesProj(proj); return; }
+    setEditProj(proj);
   }
   function openDisrupt(proj){
     closeAllPopups();
@@ -6364,15 +8680,33 @@ export default function App(){
     closeAllPopups();
     setCloseOut({ proj:proj, blockers:closeBlockers(projects, proj) });
   }
-  function doCloseOut(proj, note){
-    var ids=getDescendantIds(projects,proj.id).concat([proj.id]);
+  // opts: { at, outcome, note, children:"close"|"move" }. Closing stamps the
+  // record with when it was completed - editable, so a close-out done the
+  // next morning can carry yesterday's time - and what the outcome was. Open
+  // children are closed with it or moved up a level; never silently hidden.
+  // opts: { at, outcome, note, resolutions:{ childId:{kind:"move",lane,parentId}|{kind:"delete"} } }.
+  // Every open child has been decided by the sheet: a moved child takes its
+  // new lane and parent (its own subtree comes along, parents unchanged); a
+  // deleted child goes with its subtree. Nothing is closed over silently, and
+  // an undecided child means the sheet never let this run.
+  function doCloseOut(proj, opts){
+    opts = (opts && typeof opts==="object") ? opts : { note:opts };
+    var at = opts.at || Date.now(), res = opts.resolutions || {};
+    var kids = getDescendantIds(projects, proj.id);
+    var ids = kids.concat([proj.id]);
     if(activeId!==null&&ids.indexOf(activeId)>=0){ finalizeProject(Date.now()); }
-    var at=Date.now();
-    setProjects(function(prev){ return prev.map(function(p){
-      return p.id===proj.id ? Object.assign({},p,{ closedAt:at, closedNote:note||"" }) : p;
+    var openKids = kids.filter(function(id){ var k=findProj(projects,id); return k && isOpen(k) && k.parentId===proj.id; });
+    if(openKids.some(function(id){ return !res[id]; })) return;   // the sheet blocks this; belt and braces
+    var gone = {};
+    openKids.forEach(function(id){ if(res[id].kind==="delete"){ gone[id]=true; getDescendantIds(projects,id).forEach(function(d){ gone[d]=true; }); } });
+    setProjects(function(prev){ return prev.filter(function(p){ return !gone[p.id]; }).map(function(p){
+      if(p.id===proj.id) return Object.assign({},p,{ closedAt:at, closedNote:opts.note||"", closedOutcome:opts.outcome||"done" });
+      var r=res[p.id];
+      if(r && r.kind==="move" && p.parentId===proj.id) return Object.assign({},p,{ parentId:r.parentId||null, lane:r.lane||p.lane });
+      return p;
     }); });
     haptic(14);
-    setCloseOut(null);
+    setCloseOut(null); setStagesDone(null);
   }
   // Reopening a task whose parent is closed would put it on a board its parent
   // has left, so the parent comes back with it.
@@ -6418,8 +8752,10 @@ export default function App(){
     // close it. An offer, not an action: the modal still has to be confirmed,
     // and unticking a stage never asks anything. Ongoing projects never ask,
     // however many stages they have - that is what makes them ongoing.
-    if(next && readyToClose(next) && closeBlockers(projects, next).length===0){
-      setCloseOut({ proj:next, blockers:[] });
+    // An offer with a choice: complete it, or add the stages still to come.
+    // Ongoing or finite alike - all stages ticked is the question either way.
+    if(next && isOpen(next) && stagesAllDone(next)){
+      setStagesDone(next);
     }
   }
   function addLane(label, col){
@@ -6427,15 +8763,20 @@ export default function App(){
     setLaneMeta(function(prev){ var n=Object.assign({},prev); n[key]={label:label,accent:col.accent,bg:col.bg,dim:col.dim}; return n; });
     setLaneOrder(function(prev){ return prev.concat([key]); });
   }
-  function saveLaneEdits(draft){
+  // Milestone steps are written to their project. Nothing is written for a
+  // lane: its line is computed.
+  function saveMilestones(pid, steps){
+    setProjects(function(prev){ return prev.map(function(p){ return p.id===pid ? Object.assign({}, p, { milestones:steps }) : p; }); });
+    setMsProj(null); haptic(14);
+  }
+  // One lane, renamed and recoloured in its own editor.
+  function saveLaneEdit(key, label, col){
     setLaneMeta(function(prev){
       var n=Object.assign({},prev);
-      Object.keys(draft).forEach(function(k){
-        n[k]=Object.assign({},n[k]||{},{label:draft[k].label.trim()||((n[k]&&n[k].label)||k),accent:draft[k].accent,bg:draft[k].bg,dim:draft[k].dim});
-      });
+      n[key]=Object.assign({}, n[key]||{}, { label:label, accent:col.accent, bg:col.bg, dim:col.dim });
       return n;
     });
-    setShowEditLanes(false);
+    setEditLane(null); haptic(14);
   }
   function deleteLaneWithProjects(key, mode, target){
     var affectedIds = projects.filter(function(p){ return p.lane===key; }).map(function(p){ return p.id; });
@@ -6492,22 +8833,32 @@ export default function App(){
   var ckSub = clocked ? fmtDur(atWorkElapsed,true) : "start day";
 
   // Test-mode frame
-  var FW = testMode ? 24 : 0;
-  var frameLbl = { color:S.testFrameInk, fontSize:"0.66rem", fontWeight:800, letterSpacing:"0.3em", fontFamily:S.fontBody, whiteSpace:"nowrap" };
+  // The tutorial used to be a 24px frame on all four sides, which inset the
+  // whole app by 48px each way - so the tutorial and the real board did not
+  // lay out identically, and help-page screenshots would not match what a
+  // user sees. It is one bar at the head now, and nothing else moves.
+  var FW = 0;
+  var TUT_H = testMode ? 30 : 0;
 
   // Handedness + header position
   var isLeft = settings.handedness==="left";
   UI.left = isLeft;
   var hdrBottom = settings.headerPos==="bottom";
+  // The header runs opposite to the board behind it. The whole page mirrors on
+  // handedness via dir, so the bar is reversed on top of that: the menu button
+  // lands on the right for a right-handed user and on the left for a left-
+  // handed one. row-reverse achieves it under both dir values, because in RTL
+  // a reversed row already reads left-to-right.
+  var hdrMenuRight = !isLeft;
   UI.bottom = hdrBottom;
   var hdrStyle = hdrBottom
-    ? { position:"fixed", bottom:FW, left:FW, right:FW, zIndex:300, boxShadow:"0 -4px 24px rgba(0,0,0,0.55)" }
-    : { position:"fixed", top:FW, left:FW, right:FW, zIndex:300, boxShadow:"0 4px 24px rgba(0,0,0,0.55)" };
-  var spacerH = hdrBottom ? (testMode ? "32px" : "8px") : (testMode ? "132px" : "104px");
+    ? { position:"fixed", bottom:0, left:0, right:0, zIndex:300, boxShadow:"0 -4px 24px rgba(0,0,0,0.55)" }
+    : { position:"fixed", top:TUT_H, left:0, right:0, zIndex:300, boxShadow:"0 4px 24px rgba(0,0,0,0.55)" };
+  var spacerH = hdrBottom ? (testMode ? (8+TUT_H)+"px" : "8px") : (testMode ? (104+TUT_H)+"px" : "104px");
   var rootPadBottom = hdrBottom ? "178px" : "4rem";
   var ddTop = hdrBottom ? "auto" : "calc(100% + 6px)";
   var ddBottom = hdrBottom ? "calc(100% + 6px)" : "auto";
-  UI.bottomClear = hdrBottom ? (114 + FW) : 0;
+  UI.bottomClear = hdrBottom ? 114 : 0;
   UI.topClear = hdrBottom ? FW : (114 + FW);
 
   // ---- Screen ticker: date/time + live status ----
@@ -6564,6 +8915,9 @@ export default function App(){
     React.createElement("div", { dir:isLeft?"rtl":"ltr", style:{minHeight:"100vh",background:S.bg0,color:S.text,fontFamily:S.fontBody,paddingBottom:rootPadBottom,paddingLeft:FW,paddingRight:FW} },
       React.createElement("style", null,
         "@import url('"+S.fontImport+"'); "+
+        // No elastic bounce at the document edges: in an installed app the
+        // bounce is noise, and losing pull-to-refresh is a feature.
+        "html,body{overscroll-behavior:none;} "+
         // A disrupted project breathes rather than blinks: same 2.4s cycle as
         // the running-project border, so the two cues feel like one language.
         "@keyframes ttGlow { 0%,100% { text-shadow:0 0 6px var(--glow-s1); } 50% { text-shadow:0 0 22px var(--glow-s2), 0 0 10px var(--glow-s2), 0 0 3px var(--glow-s2); } } "+
@@ -6591,91 +8945,93 @@ export default function App(){
         "background:transparent; color:inherit; -webkit-text-fill-color:currentColor; padding:0; } "+
         S.themeCss),
 
-      // ---- TEST MODE FRAME ----
-      testMode && React.createElement("div", { style:{pointerEvents:"none"} },
-        React.createElement("div", { style:{position:"fixed",top:0,left:0,right:0,height:"24px",background:S.testFrameBg,borderBottom:"2px solid "+S.testFrameInk+"",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center"} },
-          React.createElement("span", { style:frameLbl }, "TEST MODE")
-        ),
-        React.createElement("div", { style:{position:"fixed",bottom:0,left:0,right:0,height:"24px",background:S.testFrameBg,borderTop:"2px solid "+S.testFrameInk+"",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center"} },
-          React.createElement("span", { style:frameLbl }, "TEST MODE")
-        ),
-        React.createElement("div", { style:{position:"fixed",top:0,bottom:0,left:0,width:"24px",background:S.testFrameBg,borderRight:"2px solid "+S.testFrameInk+"",zIndex:399,display:"flex",alignItems:"center",justifyContent:"center"} },
-          React.createElement("span", { style:Object.assign({},frameLbl,{transform:"rotate(-90deg)"}) }, "TEST MODE")
-        ),
-        React.createElement("div", { style:{position:"fixed",top:0,bottom:0,right:0,width:"24px",background:S.testFrameBg,borderLeft:"2px solid "+S.testFrameInk+"",zIndex:399,display:"flex",alignItems:"center",justifyContent:"center"} },
-          React.createElement("span", { style:Object.assign({},frameLbl,{transform:"rotate(90deg)"}) }, "TEST MODE")
-        )
+      // ---- TUTORIAL BAR ----
+      // One bar, always at the head - never mirrored by handedness, never
+      // moved by the header-position setting. Two reasons: it is a state you
+      // are IN rather than a control you reach for, so it should be somewhere
+      // constant; and the head is the one place a thumb does not land while
+      // working the board, so Exit cannot be hit by accident.
+      testMode && React.createElement("div", { dir:"ltr", "data-tutorialbar":true,
+        style:{position:"fixed",top:0,left:0,right:0,height:TUT_H+"px",
+               background:S.testFrameBg,borderBottom:"2px solid "+S.testFrameInk,
+               zIndex:400,display:"flex",alignItems:"center",
+               padding:"0 0.4rem 0 0.85rem",gap:"0.6rem"} },
+        React.createElement(MenuIcon, { name:"test", size:17, col:S.testFrameInk }),
+        React.createElement("span", { style:{flex:1,color:S.testFrameInk,fontSize:"0.66rem",
+               fontWeight:800,letterSpacing:"0.22em",fontFamily:S.fontBody,whiteSpace:"nowrap"} },
+          "INTERACTIVE TUTORIAL"),
+        React.createElement("button", { "data-tutorialexit":true,
+          onClick:function(){ closeAllPopups(); setShowTestConfirm(true); },
+          style:{flexShrink:0,background:"none",border:"1.5px solid "+S.testFrameInk,
+                 borderRadius:S.radius3,padding:"0.2rem 0.7rem",color:S.testFrameInk,
+                 cursor:"pointer",fontFamily:S.fontBody,fontWeight:800,fontSize:"0.64rem",
+                 letterSpacing:"0.1em",WebkitTapHighlightColor:"transparent"} }, "EXIT")
       ),
 
       // ---- STICKY HEADER ----
       React.createElement("div", { style:hdrStyle },
         hdrBottom ? null : tickerEl,
-        // Top bar: More | Add | Disruption
-        React.createElement("div", { style:{display:"flex",alignItems:"stretch",background:S.bg1,borderBottom:"2px solid "+S.border,padding:"0.5rem 0.75rem",gap:"0.5rem"} },
+        // Written Menu | Clock | Disruption; row-reverse paints it the other
+        // way round, so the menu sits opposite the side the board mirrors to.
+        React.createElement("div", { style:{display:"flex",flexDirection:"row-reverse",alignItems:"stretch",background:S.bg1,borderBottom:"2px solid "+S.border,padding:"0.5rem 0.75rem",gap:"0.5rem"} },
           // SETTINGS MENU button (gear) + stacked dropdown
           React.createElement("div", { ref:menuRef, style:{position:"relative",flex:"0 0 64px"} },
             React.createElement("button", { onClick:function(){ if(!menuOpen){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setMenuOpen(function(x){ return !x; }); },
               style:{width:"100%",minHeight:"56px",display:"flex",alignItems:"center",justifyContent:"center",background:menuOpen?S.bg3:S.bg0,border:"2.5px solid "+(menuOpen?S.chromeBdrOn:S.chromeBdr),borderRadius:S.radius2,cursor:"pointer"} },
-              React.createElement(GearSVG, { size:30, col:mnIcon })
+              React.createElement(MenuIcon, { name:"more", size:30, col:mnIcon })
             ),
-            menuOpen && React.createElement("div", { dir:"ltr", "data-surface":"menu", "data-menu-open":"1", style:{position:"absolute",top:ddTop,bottom:ddBottom,left:isLeft?"auto":0,right:isLeft?0:"auto",minWidth:"290px",maxWidth:"94vw",maxHeight:"72vh",overflowY:"auto",background:S.menuBg,border:"1px solid "+S.border,borderRadius:S.radius2,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:200} },
-              // Add New: one entry point that asks what, then where. This used
-              // to be a nested accordion that only ever offered lanes, so there
-              // was no way to add a task from here at all.
-              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setAddNew({stage:"what"}); },
-                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.successMid,cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:"0.95rem",whiteSpace:"nowrap"} },
-                React.createElement("svg", { width:14, height:14, viewBox:"0 0 14 14", fill:"none" },
-                  React.createElement("path", { d:"M7 2 L7 12 M2 7 L12 7", stroke:S.successMid, strokeWidth:"2.5", strokeLinecap:"round" })
-                ),
-                React.createElement("span", { style:{flex:1} }, "Add New\u2026")
+            menuOpen && React.createElement("div", { dir:"ltr", "data-surface":"menu", "data-menu-open":"1", style:{position:"absolute",top:ddTop,bottom:ddBottom,left:hdrMenuRight?"auto":0,right:hdrMenuRight?0:"auto",minWidth:"290px",maxWidth:"94vw",maxHeight:"72vh",overflowY:"auto",background:S.menuBg,border:"1px solid "+S.border,borderRadius:S.radius2,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:200} },
+              // Both ways out of the tutorial go through the confirm, which
+              // resets it - so neither can quietly leave it rummaged through.
+              React.createElement("button", { "data-flat":true, onClick:function(){ if(testMode){ closeAllPopups(); setShowTestConfirm(true); } else { setTestMode(true); setMenuOpen(false); } },
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:testMode?S.warnBg:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:testMode?S.warnText:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:testMode?700:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+                React.createElement(MenuIcon, { name:"test", col:testMode?S.warnText:S.chromeText }),
+                React.createElement("span", { style:{flex:1} }, testMode?"Exit Tutorial":"Interactive Tutorial")
               ),
-              // Edit Lanes lived inside that accordion. It is not an "add", so
-              // it stands on its own rather than hiding under one.
-              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowEditLanes(true); },
-                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
-                React.createElement(GearSVG, { size:14, col:S.chromeText }),
-                React.createElement("span", { style:{flex:1} }, "Edit Lanes")
+              // Edit Lanes and Arrange both left this menu when Edit... arrived:
+              // the outline lists every lane and reorders everything, so two
+              // more ways to do the same thing were two more to keep in step.
+              // The lanes list is still reachable from a lane header on the
+              // board (long-press, or its + menu).
+              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowOutline(true); },
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+                React.createElement(MenuIcon, { name:"arrange", col:S.chromeText }),
+                React.createElement("span", { style:{flex:1} }, "Edit\u2026")
               ),
-              // Time Settings (accordion): the schedule and how time is captured
-              React.createElement("button", { "data-flat":true, onClick:function(){ setTimeMenuOpen(function(x){ return !x; }); },
-                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:timeMenuOpen?rgba(S.bg0,0.5):"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
-                React.createElement("svg", { width:14, height:14, viewBox:"0 0 28 28", fill:"none" },
-                  React.createElement("circle", { cx:"14", cy:"14", r:"11", stroke:S.chromeText, strokeWidth:"2.5" }),
-                  React.createElement("path", { d:"M14 8 L14 14 L18 17", stroke:S.chromeText, strokeWidth:"2.5", strokeLinecap:"round", strokeLinejoin:"round" })
-                ),
+              // Time Settings: the schedule and how time is captured. Opens a
+              // modal rather than expanding here - see MenuGroupModal.
+              React.createElement("button", { "data-flat":true, "data-menugroup":"time",
+                onClick:function(){ setMenuOpen(false); setMenuGroup("time"); },
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+                React.createElement(MenuIcon, { name:"clock", col:S.chromeText }),
                 React.createElement("span", { style:{flex:1} }, "Time Settings"),
-                React.createElement("span", { style:{fontSize:"0.8rem",color:S.textDim} }, timeMenuOpen?"v":">")
+                React.createElement("span", { style:{fontSize:"0.9rem",color:S.textDim} }, "\u203A")
               ),
-              timeMenuOpen && React.createElement("div", { style:{background:rgba(S.bg0,0.5),borderBottom:"1px solid "+S.border} },
-                React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowSchedule(true); },
-                  style:{display:"flex",alignItems:"center",gap:"0.65rem",width:"100%",background:"none",border:"none",padding:"0.7rem 1rem 0.7rem 2rem",cursor:"pointer",fontFamily:S.fontBody,textAlign:"left"} },
-                  React.createElement("span", { style:{fontSize:"0.92rem",fontWeight:600,color:S.text,whiteSpace:"nowrap"} }, "Work Schedule")
-                ),
-                React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowTracking(true); },
-                  style:{display:"flex",alignItems:"center",gap:"0.65rem",width:"100%",background:"none",border:"none",padding:"0.7rem 1rem 0.7rem 2rem",cursor:"pointer",fontFamily:S.fontBody,textAlign:"left"} },
-                  React.createElement("span", { style:{fontSize:"0.92rem",fontWeight:600,color:S.text,whiteSpace:"nowrap"} }, "Tracking")
-                )
-              ),
-              // Settings
-              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowSettings(true); },
-                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
-                React.createElement(GearSVG, { size:14, col:S.chromeText }),
-                React.createElement("span", null, "Themes and Layout")
+              // Interface: how the app looks and how it is reached.
+              React.createElement("button", { "data-flat":true, "data-menugroup":"interface",
+                onClick:function(){ setMenuOpen(false); setMenuGroup("interface"); },
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+                React.createElement(TouchSVG, { size:MENU_ICON, col:S.chromeText }),
+                React.createElement("span", { style:{flex:1} }, "Interface"),
+                React.createElement("span", { style:{fontSize:"0.9rem",color:S.textDim} }, "\u203A")
               ),
               // Summary
               React.createElement("button", { "data-flat":true, onClick:function(){ if(todayLogs.length){ closeAllPopups(); setShowDay(true); } },
-                style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:summaryCol,cursor:todayLogs.length?"pointer":"default",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:summaryCol,cursor:todayLogs.length?"pointer":"default",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+                React.createElement(MenuIcon, { name:"summary", col:summaryCol }),
                 "Summary"
               ),
               // Reports
-              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowReports(true); },
-                style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+              React.createElement("button", { "data-flat":true, onClick:function(){ openReports("week"); },
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+                React.createElement(MenuIcon, { name:"reports", col:S.text }),
                 "Reports"
               ),
               // Archive: everything closed out, with its history intact.
               React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowArchive(true); },
-                style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"0.75rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
-                "Archive",
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+                React.createElement(MenuIcon, { name:"archive", col:S.chromeText }),
+                React.createElement("span", { style:{flex:1} }, "Archive"),
                 (function(){
                   var n=projects.filter(isClosed).length;
                   return n ? React.createElement(Mono, { style:{color:S.textDim,fontSize:"0.8rem",fontWeight:700} }, String(n)) : null;
@@ -6683,12 +9039,14 @@ export default function App(){
               ),
               // Backup & Restore
               React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowBackup(true); },
-                style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+                React.createElement(MenuIcon, { name:"backup", col:S.text }),
                 "Backup & Restore"
               ),
               // Extensions
               React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowExtensions(true); },
-                style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+                React.createElement(MenuIcon, { name:"extensions", col:S.text }),
                 "Extensions"
               ),
               // Module rows: one group header, then one row per enabled module
@@ -6699,21 +9057,11 @@ export default function App(){
                   g.items.map(function(entry){
                     return React.createElement("button", { "data-flat":true, key:entry.id+":"+entry.screen,
                       onClick:function(){ openModule(entry); },
-                      style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
+                      style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
                       entry.label);
                   })
                 );
               }),
-              // Arrange
-              React.createElement("button", { "data-flat":true, onClick:function(){ setEditMode(function(x){ return !x; }); setMenuOpen(false); },
-                style:{display:"block",width:"100%",textAlign:"left",background:editMode?S.bg3:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:editMode?S.arrangeText:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:editMode?700:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
-                editMode?"Done Arranging":"Arrange"
-              ),
-              // Test mode
-              React.createElement("button", { "data-flat":true, onClick:function(){ if(testMode){ closeAllPopups(); setShowTestConfirm(true); } else { setTestMode(true); setMenuOpen(false); } },
-                style:{display:"block",width:"100%",textAlign:"left",background:testMode?S.warnBg:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:testMode?S.warnText:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:testMode?700:600,fontSize:"0.95rem",whiteSpace:"nowrap"} },
-                testMode?"Exit Test Mode":"Test Mode"
-              ),
               // Work status + break (clock in/out live in header)
               clocked && React.createElement("div", null,
                 React.createElement("div", { style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"0.75rem",padding:"0.7rem 1rem",borderBottom:"1px solid "+S.border,background:wsBg,whiteSpace:"nowrap"} },
@@ -6745,15 +9093,16 @@ export default function App(){
                 ),
                 onBreak
                   ? React.createElement("button", { "data-flat":true, onClick:function(){ endBreak(); },
-                      style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.successText,cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:"0.95rem",whiteSpace:"nowrap"} },
-                      "End Break"
+                      style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.successText,cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+                      React.createElement(MenuIcon, { name:"break", col:S.successText }),
+                      React.createElement("span", { style:{flex:1} }, "End Break")
                     )
                   : React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowBreak(true); },
-                      style:{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.warnText,cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:"0.95rem",whiteSpace:"nowrap"} },
-                      "Break"
+                      style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.warnText,cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+                      React.createElement(MenuIcon, { name:"break", col:S.warnText }),
+                      React.createElement("span", { style:{flex:1} }, "Break")
                     )
               ),
-              editMode && React.createElement("div", { style:{padding:"0.55rem 1rem",background:S.bg3,color:S.arrangeHint,fontSize:"0.74rem",whiteSpace:"nowrap"} }, "Drag handles to reorder lanes and cards")
             )
           ),
           // CLOCK button
@@ -6785,7 +9134,7 @@ export default function App(){
                 React.createElement(Mono, { style:{fontSize:"0.72rem",color:S.dangerText,opacity:0.75,lineHeight:1,whiteSpace:"nowrap"} }, dSubLbl)
               )
             ),
-            distMenuOpen && React.createElement("div", { style:{position:"absolute",top:ddTop,bottom:ddBottom,right:isLeft?"auto":0,left:isLeft?0:"auto",minWidth:"250px",maxWidth:"94vw",maxHeight:"72vh",overflowY:"auto",background:S.menuBg,border:"1px solid #4A1A1A",borderRadius:S.radius2,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:200,padding:"0.5rem",display:"flex",flexDirection:"column",gap:"0.4rem"} },
+            distMenuOpen && React.createElement("div", { style:{position:"absolute",top:ddTop,bottom:ddBottom,right:hdrMenuRight?"auto":0,left:hdrMenuRight?0:"auto",minWidth:"250px",maxWidth:"94vw",maxHeight:"72vh",overflowY:"auto",background:S.menuBg,border:"1px solid #4A1A1A",borderRadius:S.radius2,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:200,padding:"0.5rem",display:"flex",flexDirection:"column",gap:"0.4rem"} },
               distPresets.map(function(label,i){
                 return React.createElement("button", { key:i, onClick:function(){ setDistMenuOpen(false); startDisruptionWith(label, activeProj||null); },
                   style:{display:"flex",alignItems:"center",gap:"0.55rem",width:"100%",textAlign:"left",background:S.dangerBg,border:"2.5px solid #AA4040",borderRadius:"10px",padding:"0.6rem 0.85rem",cursor:"pointer",fontFamily:S.fontBody} },
@@ -6814,21 +9163,42 @@ export default function App(){
 
       // ---- LANES ----
       React.createElement("div", { style:{padding:"1rem 0.85rem 0"} },
+        // The board's own line: one mark per lane, above the first lane, in
+        // the board's colour rather than any lane's. Tap opens the board view.
+        (function(){
+          var pts=boardLine(projects, laneOrder, laneMeta, Date.now());
+          if(!pts.length) return null;
+          return React.createElement("div", { "data-msboard":true, style:{marginBottom:"0.75rem"} },
+            React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.4rem",marginBottom:"0.15rem"} },
+              React.createElement(MenuIcon, { name:"milestone", size:16, col:S.chromeText }),
+              React.createElement("span", { style:{fontSize:"0.64rem",fontWeight:800,letterSpacing:"0.14em",color:S.chromeText} }, "BOARD")),
+            React.createElement(MilestoneStrip, { weekStart:weekStartOf(settings.workSchedule), kind:"board", points:pts, offDays:offDaysOf(settings.workSchedule), tight:true,
+              onOpen:function(){ closeAllPopups(); setMsBoard(true); } }));
+        })(),
         laneOrder.map(function(lane, laneIdx){
-          return React.createElement(LaneSection, {
+          return React.createElement(LaneSection, { schedule:settings.workSchedule,
             key:lane, lane:lane, allProjects:liveProjects, activeId:activeId,
-            onCloseOut:askCloseOut,
+            msProjects:projects, offDays:offDaysOf(settings.workSchedule),
+            onCloseOut:askCloseOut, onReopen:doReopen,
             interrupting:interrupting, elapsed:elapsed,
             todayLogs:todayLogs, todayDist:todayDist, allDist:disruptions,
             onToggle:toggleProject,
             onEdit:function(p){ closeAllPopups(); setEditProj(p); },
             onStages:function(p){ closeAllPopups(); setStagesProj(p); },
             onStageToggle:toggleStageInline,
-            onAddSub:function(parentId){ closeAllPopups(); setShowAdd({lane:lane,parentId:parentId}); },
+            onAddSub:function(parentId){ closeAllPopups(); setShowAdd({lane:lane,parentId:parentId,role:"task"}); },
+            // The same two the outline has: a sibling beside the record, or a
+            // project nested inside it.
+            onAddSibling:function(pid){ var pr=findProj(projects,pid); closeAllPopups();
+              if(pr) setShowAdd({lane:pr.lane,parentId:pr.parentId||null,role:projRole(pr)}); },
+            onAddNested:function(pid){ var pr=findProj(projects,pid); closeAllPopups();
+              if(pr) setShowAdd({lane:pr.lane,parentId:pid,role:"project"}); },
+            onMilestones:function(pid){ closeAllPopups(); setMsProj(pid); },
+            onLaneMilestones:function(k){ closeAllPopups(); setMsLane(k); },
             laneOrder:laneOrder,
             onPickLane:function(k){ closeAllPopups(); setShowAdd({lane:k,parentId:null}); },
             onNewLane:function(){ closeAllPopups(); setShowNewLane(true); },
-            onEditLanes:function(){ closeAllPopups(); setShowEditLanes(true); },
+            onEditLane:function(k){ closeAllPopups(); setEditLane(k); },
             editMode:editMode, laneMeta:laneMeta, onDeleteLane:deleteLane,
             onDragStart:function(e,idx){ /* lane-level drag placeholder */ },
             laneHandle:{ onMouseDown:function(e){ e.preventDefault(); }, onTouchStart:function(e){ e.preventDefault(); } }
@@ -6837,11 +9207,46 @@ export default function App(){
       ),
 
       // ---- MODALS ----
-      showAdd && React.createElement(Modal, { title:showAdd.parentId?"Add Task":"Add to "+(getMeta(laneMeta,showAdd.lane).label), onClose:function(){ setShowAdd(null); } , ownActions:true },
-        React.createElement(ProjectForm, { onSave:addProject, onCancel:function(){ setShowAdd(null); }, defaultLane:showAdd.lane, defaultParentId:showAdd.parentId, parents:liveProjects, laneMeta:laneMeta, laneOrder:laneOrder })
+      showOutline && React.createElement(OutlineModal, { laneOrder:laneOrder, laneMeta:laneMeta,
+        projects:liveProjects, msProjects:projects, offDays:offDaysOf(settings.workSchedule),
+        onOpen:openFromOutline, onSave:saveOutline,
+        // The row menu's add actions. The outline stays open behind them, the
+        // same as its edit actions do.
+        onAddProject:function(lane){ setShowAdd({lane:lane,parentId:null}); },
+        onAddTask:function(pid){ var pr=findProj(projects,pid); if(pr) setShowAdd({lane:pr.lane,parentId:pid,role:"task"}); },
+        onAddProjectUnder:function(pid){ var pr=findProj(projects,pid); if(pr) setShowAdd({lane:pr.lane,parentId:pid,role:"project"}); },
+        // A sibling sits beside the record: same lane, same parent, same kind.
+        onAddSibling:function(pid){ var pr=findProj(projects,pid);
+          if(pr) setShowAdd({lane:pr.lane,parentId:pr.parentId||null,role:projRole(pr)}); },
+        onEditStages:function(pid){ var pr=findProj(projects,pid); if(pr) setStagesProj(pr); },
+        onNewLane:function(){ setShowNewLane(true); },
+        onMilestones:function(pid){ setMsProj(pid); },
+        onLaneMilestones:function(k){ setMsLane(k); },
+        suspended:!!(editProj||stagesProj||editLane||showAdd||showNewLane||msProj||msLane),
+        onClose:function(){ setShowOutline(false); } }),
+// Add sheets mount after the outline so they lay over it, not behind.
+      showAdd && React.createElement(Modal, { title:!showAdd.parentId ? ("Add to "+(getMeta(laneMeta,showAdd.lane).label))
+          : (showAdd.role==="project" ? "Add Nested Project" : "Add Task"),
+        onClose:function(){ setShowAdd(null); } , ownActions:true },
+        React.createElement(ProjectForm, { onSave:addProject, onCancel:function(){ setShowAdd(null); },
+          defaultLane:showAdd.lane, defaultParentId:showAdd.parentId, defaultRole:showAdd.role,
+          parents:liveProjects, laneMeta:laneMeta, laneOrder:laneOrder })
       ),
+      msBoard && React.createElement(BoardMilestonesModal, { laneOrder:laneOrder, laneMeta:laneMeta, projects:projects,
+        offDays:offDaysOf(settings.workSchedule),
+        onOpenLane:function(k){ setMsLane(k); }, onClose:function(){ setMsBoard(false); } }),
+      msLane && React.createElement(LaneMilestonesModal, { lane:msLane, laneMeta:laneMeta, projects:projects,
+        offDays:offDaysOf(settings.workSchedule),
+        onOpenProject:function(p){ setMsProj(p.id); }, onClose:function(){ setMsLane(null); } }),
+      msProj && findProj(projects,msProj) && React.createElement(MilestoneEditModal, { project:findProj(projects,msProj),
+        projects:projects, offDays:offDaysOf(settings.workSchedule),
+        onSave:saveMilestones, onClose:function(){ setMsProj(null); } }),
+      editLane && React.createElement(LaneEditModal, { laneKey:editLane, laneMeta:laneMeta,
+        projects:projects, laneOrder:laneOrder, onSave:saveLaneEdit,
+        onDeleteLane:function(key,mode,target){ deleteLaneWithProjects(key,mode,target); setEditLane(null); },
+        onCancel:function(){ setEditLane(null); } }),
       editProj && React.createElement(Modal, { title:editProj.parentId?"Edit Task":"Edit Project", onClose:function(){ setEditProj(null); } , ownActions:true },
-        React.createElement(ProjectForm, { project:editProj, onSave:saveEdit, onCancel:function(){ setEditProj(null); }, onDelete:deleteProject, parents:liveProjects, laneMeta:laneMeta, laneOrder:laneOrder })
+        React.createElement(ProjectForm, { project:editProj, onSave:saveEdit, onCancel:function(){ setEditProj(null); }, onDelete:deleteProject, parents:liveProjects, laneMeta:laneMeta, laneOrder:laneOrder, structure:!showOutline })
       ),
       stagesProj && React.createElement(StagesModal, { proj:stagesProj, onClose:function(){ setStagesProj(null); }, onUpdate:updateStages }),
       dayAsk && React.createElement(ClockDayModal, { when:dayAsk.when, position:dayAsk.position,
@@ -6881,19 +9286,8 @@ export default function App(){
           })),
       showReports && React.createElement(ReportsModal, { logs:logs, projects:projects, disruptions:disruptions,
         breaks:breaks, laneMeta:laneMeta, laneOrder:laneOrder, schedule:settings.workSchedule, testMode:testMode,
-        liveLogs:liveLogs(), onClose:function(){ setShowReports(false); } }),
+        liveLogs:liveLogs(), initialKind:reportsKind, onClose:function(){ setShowReports(false); } }),
       showNewLane && React.createElement(NewLaneModal, { onSave:function(label,col){ addLane(label,col); setShowNewLane(false); }, onCancel:function(){ setShowNewLane(false); } }),
-      showEditLanes && React.createElement(EditLanesModal, { laneOrder:laneOrder, laneMeta:laneMeta, projects:projects, onDeleteLane:deleteLaneWithProjects, onSave:saveLaneEdits, onCancel:function(){ setShowEditLanes(false); } }),
-      addNew && React.createElement(AddNewModal, { stage:addNew.stage, laneOrder:laneOrder,
-        laneMeta:laneMeta, projects:liveProjects,
-        onClose:function(){ setAddNew(null); },
-        onPick:function(pick){
-          if(pick.what==="chooseLane"){ setAddNew({stage:"lane"}); return; }
-          if(pick.what==="chooseProject"){ setAddNew({stage:"project"}); return; }
-          setAddNew(null);
-          if(pick.what==="lane"){ setShowNewLane(true); return; }
-          setShowAdd({ lane:pick.lane, parentId:pick.parentId||null });
-        } }),
       matchAsk && React.createElement(MatchTasksModal, { proj:matchAsk.proj, tasks:matchAsk.tasks,
         onMatch:function(chosen){ doMatchTasks(matchAsk.proj, chosen); },
         onLeave:function(){ setMatchAsk(null); } }),
@@ -6902,25 +9296,73 @@ export default function App(){
         onReschedule:function(ts){ reschedulePending(startAsk, ts); },
         onWait:function(){ setStartAsk(null); } }),
       closeOut && React.createElement(CloseProjectModal, { proj:closeOut.proj, blockers:closeOut.blockers,
-        onConfirm:function(note){ doCloseOut(closeOut.proj, note); },
+        allProjects:projects, laneMeta:laneMeta, laneOrder:laneOrder,
+        onConfirm:function(opts){ doCloseOut(closeOut.proj, opts); },
         onClose:function(){ setCloseOut(null); } }),
+      stagesDone && !closeOut && React.createElement(StagesDoneModal, { proj:stagesDone,
+        onCloseOut:function(){ var pr=findProj(projects,stagesDone.id)||stagesDone; setStagesDone(null); askCloseOut(pr); },
+        onMoreStages:function(){ var pr=findProj(projects,stagesDone.id)||stagesDone; setStagesDone(null); setStagesProj(pr); },
+        onLater:function(){ setStagesDone(null); } }),
       showArchive && React.createElement(ArchiveModal, { projects:projects, logs:logs, laneMeta:laneMeta,
         onReopen:doReopen, onClose:function(){ setShowArchive(false); } }),
       confirmDelete && React.createElement(DeleteProjectModal, { proj:confirmDelete, allProjects:projects, laneMeta:laneMeta, onMoveTasks:doMoveTasks, onDeleteAll:doDeleteAll, onCancel:function(){ setConfirmDelete(null); } }),
-      showSettings && React.createElement(SettingsModal, { settings:settings, onChange:setSettings, onClose:function(){ setShowSettings(false); } }),
+      // The menu groups. Selecting an item runs closeAllPopups first, which
+      // clears the group itself, then opens the screen that was chosen.
+      menuGroup==="time" && React.createElement(MenuGroupModal, { title:"Time Settings",
+        onClose:function(){ setMenuGroup(null); },
+        items:[
+          { label:"Work Schedule", onSelect:function(){ closeAllPopups(); setShowSchedule(true); } },
+          { label:"Tracking", onSelect:function(){ closeAllPopups(); setShowTracking(true); } }
+        ] }),
+      menuGroup==="interface" && React.createElement(MenuGroupModal, { title:"Interface",
+        onClose:function(){ setMenuGroup(null); },
+        items:[
+          { label:"Themes", onSelect:function(){ closeAllPopups(); setShowThemes(true); } },
+          { label:"Layout", onSelect:function(){ closeAllPopups(); setShowLayout(true); } }
+        ] }),
+      showThemes && React.createElement(ThemesModal, { settings:settings, onChange:setSettings, onClose:function(){ setShowThemes(false); } }),
+      showLayout && React.createElement(LayoutModal, { settings:settings, onChange:setSettings, onClose:function(){ setShowLayout(false); } }),
       showSchedule && React.createElement(WorkScheduleModal, { schedule:settings.workSchedule,
         onSave:function(sch){ setSettings(Object.assign({},settings,{workSchedule:sch})); setShowSchedule(false); },
         onClose:function(){ setShowSchedule(false); } }),
       showTracking && React.createElement(TrackingModal, { settings:settings, onChange:setSettings,
         onClose:function(){ setShowTracking(false); } }),
       showEditPresets && React.createElement(EditDistPresetsModal, { presets:distPresets, onSave:function(items){ setDistPresets(items.length?items:DEFAULT_DIST_PRESETS); setShowEditPresets(false); }, onCancel:function(){ setShowEditPresets(false); } }),
-      showTestConfirm && React.createElement(Modal, { title:"Exit Test Mode", onClose:function(){ setShowTestConfirm(false); } },
-        React.createElement("p", { style:{color:S.textDim,marginBottom:"1rem",fontSize:"0.9rem"} }, "Exit test mode? Test data will be cleared."),
-        React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
-          React.createElement("button", { onClick:function(){ setTestMode(false); setShowTestConfirm(false); }, style:{flex:1,background:S.warnBg,border:"1px solid "+S.warnText,borderRadius:S.radius,padding:"0.85rem",color:S.warnText,cursor:"pointer",fontWeight:700,fontFamily:S.fontBody} }, "Exit Test Mode"),
-          React.createElement("button", { onClick:function(){ setShowTestConfirm(false); }, style:{flex:1,background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.85rem",color:S.textDim,cursor:"pointer",fontFamily:S.fontBody} }, "Stay in Test")
-        )
+      showTestConfirm && React.createElement(Modal, { title:"Exit Tutorial", onClose:function(){ setShowTestConfirm(false); },
+        actions:[
+          React.createElement("button", { key:"a0", "data-confirmexit":true, onClick:leaveTutorial, style:MODAL_SAVE() }, "Leave"),
+          React.createElement("button", { key:"a1", onClick:function(){ setShowTestConfirm(false); }, style:MODAL_CANCEL() }, "Stay")
+        ] },
+        React.createElement("p", { style:{color:S.textDim,marginBottom:"0.9rem",fontSize:"0.9rem",lineHeight:1.5} },
+          "Leaving keeps everything you have built in the tutorial, so you can come back and carry on. Your own board is untouched either way."),
+        // Reset is its own act, and held: it throws away practice work.
+        React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.7rem 0.8rem"} },
+          React.createElement("div", { style:{color:S.textDim,fontSize:"0.78rem",marginBottom:"0.5rem",lineHeight:1.45} },
+            "Start the tutorial over from how it ships? Everything you added or changed inside it goes."),
+          React.createElement(HoldButton, { onHold:resetTutorialNow, holdMs:HOLD_DELETE_MS, fill:rgba(S.dangerText,0.38),
+            attrs:{ "data-tutorialreset":true, "data-holddelete":true },
+            style:{width:"100%",background:S.dangerBg,border:"1px solid "+S.dangerText,borderRadius:S.radius,
+                   padding:"0.65rem",color:S.dangerText,fontFamily:S.fontBody,fontWeight:700,fontSize:"0.84rem"} },
+            React.createElement("span", null, "Reset tutorial \u00b7 hold")))
       )
     )
   );
+}
+
+// The exported entry is the boundary, so nothing has to remember to wrap it.
+export default function App(){
+  // The splash rides OUTSIDE the error boundary's child, so a crash in the
+  // board still shows the crash report rather than a frozen opening screen.
+  var splashS=useState(true); var setSplash=splashS[1]; var splash=splashS[0];
+  var fadeS=useState(false); var setFade=fadeS[1]; var fade=fadeS[0];
+  useEffect(function(){
+    if(!splash) return;
+    var a=setTimeout(function(){ setFade(true); }, SPLASH_SHOW_MS);
+    var b=setTimeout(function(){ setSplash(false); }, SPLASH_SHOW_MS+SPLASH_FADE_MS);
+    return function(){ clearTimeout(a); clearTimeout(b); };
+  },[splash]);
+  return React.createElement(React.Fragment, null,
+    React.createElement(TTBoundary, null, React.createElement(TTBoard)),
+    splash && React.createElement(SplashScreen, { fading:fade,
+      onDismiss:function(){ setFade(true); setTimeout(function(){ setSplash(false); }, SPLASH_FADE_MS); } }));
 }

@@ -713,10 +713,11 @@ test("the platform block is delimited exactly once", () => {
 // ---- boot --------------------------------------------------------------------
 test("module normalizers run at boot, before the first paint", () => {
   has(/useState\(function\(\)\{ return ttBootModules\(\); \}\)/, "boot runs in a lazy state initializer");
-  // The build strips `export default`, so anchor on a form both files share.
-  const appDecl = /(export default )?function App\(\)\{/.exec(s);
-  ok(appDecl, "App is declared");
-  ok(appDecl.index < s.indexOf("ttBootModules()"), "boot is inside App");
+  // The exported App is a thin wrapper round an error boundary; the board
+  // itself is TTBoard, and that is what has to run the boot.
+  const appDecl = /function TTBoard\(\)\{/.exec(s);
+  ok(appDecl, "the board component is declared");
+  ok(appDecl.index < s.indexOf("ttBootModules()"), "boot is inside it");
   const appBody = s.slice(appDecl.index);
   const bootAt = appBody.indexOf("ttBootModules()");
   const firstLoad = appBody.indexOf('load("tt_');
@@ -729,7 +730,9 @@ test("enabled module nav entries render as menu rows", () => {
   has(/modGroups\.map\(function\(g\)\{/, "grouped rows rendered in the menu");
   has(/function openModule\(entry\)\{ closeAllPopups\(\);/, "opening a module closes every other popup first");
   order("Backup & Restore", "modGroups.map", "module rows sit below the core rows");
-  order("modGroups.map", "// Arrange", "and above Arrange");
+  // The tutorial row moved to the TOP of the menu at Brent's request, so the
+  // module rows now sit below it rather than above.
+  order("// Both ways out of the tutorial", "modGroups.map", "the tutorial row sits above the module rows");
 });
 
 test("opening a module screen goes through the menu bus", () => {
@@ -757,14 +760,1051 @@ test("Reports collects module sections and report lines", () => {
   has(/function modReportCtx\(\)\{/, "a shared context is built once");
   has(/var modLines=ttReportText\(modReportCtx\(\)\);/, "text hook feeds the copied report");
   has(/var modSections=ttReportSections\(modReportCtx\(\)\)/, "section hook feeds the modal");
-  has(/seg, nav, summary, payCard, stats, body, modSections,/, "sections render after the core rollup");
+  // A range is {start,end}; from/to do not exist on it, and passing those
+  // names made the milestone window undefined and the section invisible.
+  has(/milestoneReport\(props\.projects\|\|\[\], props\.laneOrder\|\|\[\], range\.start, range\.end-1, now\)/,
+    "the milestone window comes from the range's real fields");
+  has(/seg, nav, summary, payCard, stats, milestones, body, modSections,/,
+    "milestones sit between the stats and the project breakdown; module sections after the core rollup");
   order("out.push(\"Days with time: \"", "var modLines=ttReportText", "module lines come after the core lines");
 });
 
-test("module settings panels mount inside Themes and Layout", () => {
+test("module settings panels mount inside the Layout screen", () => {
   has(/ttSettingsPanels\(\)\.map\(function\(m\)\{/, "panels are enumerated");
   has(/React\.createElement\(m\.settingsPanel, ttModuleContext\(m\.id,/, "each gets a module context");
-  order("ttSettingsPanels()", '}, "Close")', "panels sit above the Close button");
+  // Scoped to LayoutModal: Themes has its own Close button earlier in the file,
+  // so an unscoped search would measure against the wrong one and pass on
+  // whichever modal happened to come first.
+  const lay = s.slice(s.indexOf("function LayoutModal(props){"),
+                      s.indexOf("// ---- EDIT DISRUPTION PRESETS MODAL"));
+  ok(lay.indexOf("ttSettingsPanels()") >= 0, "they are enumerated in Layout, not Themes");
+  ok(lay.indexOf("ttSettingsPanels()") < lay.indexOf('}, "Close")'),
+    "panels sit above the Close button");
+  const thm = s.slice(s.indexOf("function ThemesModal(props){"),
+                      s.indexOf("function LayoutModal(props){"));
+  ok(thm.indexOf("ttSettingsPanels") < 0, "and Themes does not mount them a second time");
+});
+
+test("Themes and Layout are two separate screens", () => {
+  eq(count(/function ThemesModal\(props\)\{/g), 1, "a Themes modal exists");
+  eq(count(/function LayoutModal\(props\)\{/g), 1, "a Layout modal exists");
+  eq(count(/function SettingsModal\(props\)\{/g), 0, "and the combined one is gone");
+  eq(count(/setShowThemes\(true\)/g), 1, "exactly one way into Themes");
+  eq(count(/setShowLayout\(true\)/g), 1, "exactly one way into Layout");
+  has(/setShowThemes\(false\); setShowLayout\(false\);/, "closeAllPopups closes both");
+  // The appearance controls belong to Themes and the reach controls to Layout;
+  // a control in both would fight itself through two live copies of settings.
+  const thm = s.slice(s.indexOf("function ThemesModal(props){"),
+                      s.indexOf("function LayoutModal(props){"));
+  const lay = s.slice(s.indexOf("function LayoutModal(props){"),
+                      s.indexOf("// ---- EDIT DISRUPTION PRESETS MODAL"));
+  ["theme","palette","typeface","mode"].forEach((n) => {
+    ok(thm.indexOf('name:"' + n + '"') >= 0, n + " is on the Themes screen");
+    ok(lay.indexOf('name:"' + n + '"') < 0, n + " is not also on Layout");
+  });
+  ["hand","header"].forEach((n) => {
+    ok(lay.indexOf('name:"' + n + '"') >= 0, n + " is on the Layout screen");
+    ok(thm.indexOf('name:"' + n + '"') < 0, n + " is not also on Themes");
+  });
+  ok(thm.indexOf('title:"Themes"') >= 0, "the Themes modal is titled Themes");
+  ok(lay.indexOf('title:"Layout"') >= 0, "the Layout modal is titled Layout");
+  // Labelling now lives with the group items rather than with flat menu rows;
+  // "both groups list their screens" pairs each label to the screen it opens.
+});
+
+test("the menu groups open modals, not inline accordions", () => {
+  // Inline expansion pushed everything below a group down and off the bottom
+  // of a 72vh scroller. These must stay modals.
+  eq(count(/function MenuGroupModal\(props\)\{/g), 1, "one group modal serves both groups");
+  eq(count(/timeMenuOpen/g), 0, "the Time Settings accordion is gone");
+  eq(count(/uiMenuOpen/g), 0, "and so is the Interface one");
+  eq(count(/React\.createElement\(MenuGroupModal, \{ title:"Time Settings"/g), 1, "Time Settings mounts one");
+  eq(count(/React\.createElement\(MenuGroupModal, \{ title:"Interface"/g), 1, "Interface mounts one");
+  // One key, not a flag each: two flags can both be true at once.
+  has(/var menuGroupS=useState\(null\)/, "which group is open is a single value");
+  has(/setMenuGroup\("time"\)/, "the Time Settings row sets it");
+  has(/setMenuGroup\("interface"\)/, "and the Interface row sets it");
+  // Opening a group closes the dropdown it came from, or the menu is left
+  // hanging behind a modal that covers it.
+  ["time","interface"].forEach((k) => {
+    const i = s.indexOf('"data-menugroup":"' + k + '"');
+    ok(i >= 0, k + " row is tagged");
+    const row = s.slice(i, s.indexOf("},", s.indexOf("onClick:", i)));
+    ok(row.indexOf("setMenuOpen(false)") >= 0, "opening " + k + " closes the menu");
+    ok(row.indexOf("setMenuGroup(") >= 0, "and opens its group");
+  });
+  const fn = (name) => {
+    const i = s.indexOf("function " + name + "(");
+    return i < 0 ? "" : s.slice(i, i + 700);
+  };
+  ok(/setMenuGroup\(null\)/.test(fn("closeHeaderMenus")), "closeHeaderMenus clears it");
+  ok(/setMenuGroup\(null\)/.test(fn("closeAllPopups")), "and so does closeAllPopups");
+});
+
+test("every group modal carries a Close button", () => {
+  const m = s.slice(s.indexOf("function MenuGroupModal(props){"),
+                    s.indexOf("// ---- STAGES MODAL"));
+  ok(m.indexOf("ownActions:true") >= 0, "it supplies its own action row");
+  ok(m.indexOf('}, "Close")') >= 0, "which is a Close button");
+  ok(m.indexOf("onClick:onClose") >= 0, "wired to close the modal");
+  // ownActions suppresses Modal's built-in Cancel, so forgetting the button
+  // would leave the modal with no visible way out but the scrim.
+  ok(m.indexOf("items.map(function(it){") >= 0, "the items are rendered from the list");
+  ok(m.indexOf("onClick:it.onSelect") >= 0, "each one selectable");
+  // Exactly one, and below the items. lastIndexOf alone would find the bottom
+  // one and pass with a stray Close sitting above the list as well.
+  eq((m.match(/\}, "Close"\)/g) || []).length, 1, "exactly one Close button");
+  ok(m.indexOf('}, "Close")') > m.indexOf("items.map(function(it){"),
+    "and it sits below the items");
+});
+
+test("both groups list their screens, and nothing else reaches them", () => {
+  const grp = (title) => {
+    const i = s.indexOf('React.createElement(MenuGroupModal, { title:"' + title + '"');
+    return i < 0 ? "" : s.slice(i, s.indexOf("] })", i));
+  };
+  const t = grp("Time Settings"), u = grp("Interface");
+  ok(/label:"Work Schedule"/.test(t) && /label:"Tracking"/.test(t), "Time Settings offers both its screens");
+  ok(/label:"Themes"/.test(u) && /label:"Layout"/.test(u), "Interface offers both of its");
+  // The group modal is the only route in; a row left at the top level of the
+  // menu would still work and would quietly undo the grouping.
+  ["setShowSchedule(true)","setShowTracking(true)"].forEach((c) => {
+    eq(count(new RegExp(c.replace(/[()]/g, "\\$&"), "g")), 1, c + " has one caller");
+    ok(t.indexOf(c) >= 0, "and it is inside Time Settings");
+  });
+  ["setShowThemes(true)","setShowLayout(true)"].forEach((c) => {
+    eq(count(new RegExp(c.replace(/[()]/g, "\\$&"), "g")), 1, c + " has one caller");
+    ok(u.indexOf(c) >= 0, "and it is inside Interface");
+  });
+});
+
+test("the settings menu is sized like the header buttons", () => {
+  // 28px glyphs and 1rem labels, matching the Clock and Disruption buttons the
+  // menu drops out of.
+  has(/var MENU_FONT = "1rem";/, "one label size for the whole menu");
+  has(/var MENU_ICON = 28;/, "and one glyph size");
+  const i = s.indexOf('menuOpen && React.createElement("div", { dir:"ltr", "data-surface":"menu"');
+  const menu = s.slice(i, s.indexOf("// CLOCK button", i));
+  eq((menu.match(/fontSize:"0\.9[0-9]rem"/g) || []).length, 0,
+    "no row is left at the old smaller size");
+  ok((menu.match(/fontSize:MENU_FONT/g) || []).length >= 12, "every row uses the shared size");
+  eq((menu.match(/size:14/g) || []).length, 0, "no 14px glyph is left behind");
+  // Every glyph in the menu comes from the shared table or is TouchSVG. A
+  // hand-written <svg> here is how the set drifted apart in the first place:
+  // it carries its own size and weight and answers to nothing.
+  eq((menu.match(/React\.createElement\("svg"/g) || []).length, 0,
+    "no glyph is hand-written inside the menu");
+  ok((menu.match(/React\.createElement\(MenuIcon,/g) || []).length >= 10,
+    "the menu rows draw from the glyph table");
+  ok(menu.indexOf("React.createElement(TouchSVG,") >= 0, "and Interface uses its own component");
+  // MenuIcon defaults to MENU_ICON, so a row that names a size is opting out.
+  eq((menu.match(/React\.createElement\(MenuIcon, \{ name:"[a-z]+", size:/g) || []).length, 0,
+    "and none of them override the shared size");
+});
+
+test("every menu row carries a glyph, and they all come from one table", () => {
+  eq(count(/var MENU_GLYPHS = \{/g), 1, "one table");
+  eq(count(/function MenuIcon\(props\)\{/g), 1, "one component draws it");
+  const tbl = s.slice(s.indexOf("var MENU_GLYPHS = {"), s.indexOf("function MenuIcon(props){"));
+  // "add" left the list with the Add New row: the glyph stays in the table
+  // (row menus may want it again) but nothing draws it, and this loop asserts
+  // every listed glyph is actually used.
+  ["lanes","clock","summary","reports","archive","backup","extensions",
+   "arrange","test","break","more"].forEach((k) => {
+    ok(new RegExp('(^|\\s)"?' + k + '"?:').test(tbl), k + " has a glyph");
+    ok(s.indexOf('name:"' + k + '"') >= 0, "and something draws " + k);
+  });
+  // The 28-unit grid and the 2.5 house weight are the whole point of the table.
+  eq((tbl.match(/viewBox/g) || []).length, 0, "the table is geometry only, no markup");
+  // Read the table for real rather than pattern-matching numbers out of it.
+  // The last number in an entry is a stroke width for some kinds and a corner
+  // radius for others, and a regex cannot tell them apart - it read a fill's
+  // rx as a 0.6 stroke and failed a correct glyph.
+  const literal = tbl.slice(tbl.indexOf("{"), tbl.lastIndexOf("}") + 1);
+  let GLY = null;
+  try { GLY = Function("return " + literal)(); } catch (e) { GLY = null; }
+  ok(!!GLY, "the table is a plain literal, readable on its own");
+  const ARITY = { p: 3, c: 5, r: 7, f: 6 };
+  const strokes = [];
+  Object.keys(GLY || {}).forEach((k) => {
+    GLY[k].forEach((el) => {
+      ok(ARITY[el[0]] !== undefined, k + ": every part declares a known kind");
+      eq(el.length, ARITY[el[0]], k + ": a " + el[0] + " part has the right number of values");
+      if (el[0] === "p") strokes.push(el[2]);
+      if (el[0] === "c") strokes.push(el[4]);
+      if (el[0] === "r") strokes.push(el[6]);
+    });
+  });
+  ok(strokes.length > 0, "weights are declared");
+  ok(strokes.every((w) => w >= 1.4 && w <= 2.5),
+    "nothing heavier than the shared 2.5, nothing so light it greys out");
+  ok(strokes.filter((w) => w === 2.5).length > strokes.length / 3,
+    "and the house weight dominates - lighter strokes are for parts that recede");
+  // Only the gauge level is filled. Everything else in the set is an outline.
+  const filled = Object.keys(GLY || {}).filter((k) => GLY[k].some((el) => el[0] === "f"));
+  eq(filled.length, 1, "exactly one glyph uses a solid area");
+  eq(filled[0], "stages", "and it is the gauge, whose level cannot be a stroke");
+  const mi = s.slice(s.indexOf("function MenuIcon(props){"), s.indexOf("// A hand tapping"));
+  ok(/viewBox:"0 0 28 28"/.test(mi), "everything renders on the shared grid");
+  ok(/size=props.size\|\|MENU_ICON/.test(mi), "and at the shared size by default");
+  ok(/fill:"none"/.test(mi), "stroked, never filled");
+  ok(/strokeLinecap:"round"/.test(mi) && /strokeLinejoin:"round"/.test(mi), "round caps and joins");
+});
+
+test("no hook is ever called inside a loop", () => {
+  // useTaps inside rows.map() took the app down the first time the row count
+  // changed. This catches the class: any use* call whose nearest enclosing
+  // construct is a .map( / .forEach( callback rather than a component.
+  const hooks = ["useState", "useEffect", "useRef", "useTaps", "useMemo", "useCallback"];
+  const re = /\.(map|forEach|filter)\(function\([^)]*\)\{/g;
+  let m, offenders = [];
+  while ((m = re.exec(s))) {
+    // walk to the matching close of this callback body
+    let depth = 1, i = re.lastIndex;
+    while (i < s.length && depth > 0) { if (s[i] === "{") depth++; else if (s[i] === "}") depth--; i++; }
+    const body = s.slice(re.lastIndex, i);
+    hooks.forEach((h) => { if (new RegExp("\\b" + h + "\\(").test(body)) offenders.push(h + " inside ." + m[1] + "( near " + s.slice(m.index - 40, m.index).trim().split("\n").pop()); });
+  }
+  eq(offenders.length, 0, "no hook inside a loop callback" + (offenders.length ? ": " + offenders.join("; ") : ""));
+});
+
+test("milestones are reachable from every menu that should offer them", () => {
+  // The entry comes from the shared builder, so the board and the outline
+  // offer it in the same place: last on a lane and on a project, never on a
+  // task - trackers live on projects only.
+  const mi = s.slice(s.indexOf("function rowMenuItems(kind, role, a){"), s.indexOf("function MenuRows(props){"));
+  ok(/add\("Milestones",  "milestone", a\.milestones\);/.test(mi.slice(mi.indexOf('if(kind==="lane")'), mi.indexOf('else if(kind==="stage")'))), "a lane offers Milestones");
+  ok(/add\("Milestones",         "milestone", a\.milestones\);/.test(mi.slice(mi.indexOf('add("Edit project"'))), "and so does a project");
+  ok(!/Milestones/.test(mi.slice(mi.indexOf('else if(role==="task")'), mi.indexOf('add("Edit project"'))), "but not a task");
+  ok(/milestones: r\.kind==="lane" \? function\(\)\{ props\.onLaneMilestones\(r\.id\); \}/.test(s), "the outline routes a lane to the lane view");
+  ok(/\(r\.role!=="task" \? function\(\)\{ props\.onMilestones\(r\.id\); \} : null\)/.test(s), "and a project to its editor, a task to nothing");
+  ok(/milestones:props\.onLaneMilestones \? function\(\)\{ props\.onLaneMilestones\(lane\); \} : null/.test(s), "the board's lane header does the same");
+  ok(/milestones:props\.onMilestones \? function\(\)\{ props\.onMilestones\(proj\.id\); \} : null/.test(s), "and its project card");
+  // The three sheets exist, and the glyph is in the family.
+  ["MilestoneLine", "MilestoneStepModal", "MilestoneEditModal", "LaneMilestonesModal", "offDaysOf"].forEach((fn) => {
+    eq(count(new RegExp("^function " + fn + "\\b", "gm")), 1, fn + " is defined once");
+  });
+  has(/milestone: \[\["p","M3\.5 24\.5H24\.5",2\.5\], \["p","M8 24\.5V21 M20 24\.5V21",2\.2\],/, "the milestone glyph is in MENU_GLYPHS");
+  // Steps are written to their project and nowhere else.
+  has(/function saveMilestones\(pid, steps\)\{/, "one save");
+  has(/return p\.id===pid \? Object\.assign\(\{\}, p, \{ milestones:steps \}\) : p;/, "which writes the project's milestones field");
+  // The step sheet carries a notes field.
+  has(/"data-msnote":true/, "a step has notes");
+  // Off days come from the schedule, not an assumption.
+  has(/offDays:offDaysOf\(settings\.workSchedule\)/, "off days are read from the work schedule");
+});
+
+test("Complete is held, and the closure sheet asks what, when, and about children", () => {
+  // No stages: Complete sits where the gauge would, worked by the same hold
+  // as Delete, so a brush cannot close a project.
+  has(/!hasStages && isOpen\(proj\) && onCloseOut && React\.createElement\(HoldButton, \{\s*onHold:function\(\)\{ onCloseOut\(proj\); \}, holdMs:HOLD_DELETE_MS/,
+    "Complete is a HoldButton where the gauge would sit");
+  has(/"data-complete":proj\.id/, "on the project card");
+  has(/"data-complete":sub\.id/, "and on the task card");
+  // The sheet.
+  const cs = s.slice(s.indexOf("function CloseProjectModal(props){"), s.indexOf("function StagesDoneModal(props){"));
+  has(/var CLOSE_OUTCOMES = \[\["done","Done"\],\["abandoned","Abandoned"\],\["superseded","Superseded"\]\];/, "three outcomes");
+  ok(/"data-closedate":true/.test(cs) && /"data-closetime":true/.test(cs), "when it was completed, editable");
+  ok(/var future = at!==null && at>Date\.now\(\)\+60000;/.test(cs), "a future time is refused");
+  ok(/"data-closenote":true/.test(cs), "closure notes");
+  // Every open child is MOVED to a chosen parent or DELETED - one at a time
+  // on its row, or all at once - and until each is decided, Complete is
+  // blocked. Nothing is ever closed over silently.
+  ok(/"data-closekids":true/.test(cs), "open children get their own section");
+  ok(/"data-kidmove":b\.id/.test(cs) && /"data-kiddelete":b\.id/.test(cs), "a Move and a Delete per child");
+  ok(/"data-kidsall":"move"/.test(cs) && /"data-kidsall":"delete"/.test(cs), "and an All line for the lot");
+  ok(/var unresolved=blockers\.filter\(function\(b\)\{ return !res\[b\.id\]; \}\);/.test(cs), "undecided children are counted");
+  ok(/var ok = at!==null && !future && unresolved\.length===0;/.test(cs), "and block Complete while any remain");
+  ok(/var future = at!==null && at>Date\.now\(\)\+60000;/.test(cs) && /future && React\.createElement\("div"/.test(cs),
+    "the in-the-future warning keys on the time alone, not on undecided children");
+  ok(cs.indexOf("Close them too") < 0, "there is no closing-over option any more");
+  ok(cs.indexOf("so close them first") < 0, "and no refusal either - the sheet carries the decision");
+  ok(/onConfirm\(\{ at:at, outcome:outcome, note:note\.trim\(\), resolutions:res \}\)/.test(cs), "the sheet hands the resolutions to the close");
+  eq(count(/^function MoveTargetModal\(props\)\{/gm), 1, "Move opens a picker of real destinations");
+  const mt = s.slice(s.indexOf("function MoveTargetModal(props){"), s.indexOf("\nfunction ", s.indexOf("function MoveTargetModal(props){") + 10));
+  ok(/var banned=getDescendantIds\(projects, exclude\)\.concat\(\[exclude\]\);/.test(mt), "which excludes the closing record and everything beneath it");
+  ok(/label:"Top of "\+getMeta\(laneMeta,k\)\.label/.test(mt), "and offers the top of every lane");
+});
+
+test("no sheet draws its own action row - every one rides in the sticky box", () => {
+  // Save / Cancel / Delete / a hold go through Modal's `actions`, which
+  // renders ModalActions: sticky, mirrored for handedness, at the header's
+  // end (top or bottom). A row drawn inline scrolls away on a long sheet.
+  eq(count(/style:ACTION_ROW\(\)/g), 0, "no inline ACTION_ROW is left anywhere");
+  has(/props\.actions && React\.createElement\(ModalActions, null, props\.actions\),/, "Modal routes `actions` through ModalActions");
+  const ma = s.slice(s.indexOf("function ModalActions(props){"), s.indexOf("\nfunction ", s.indexOf("function ModalActions(props){") + 10));
+  ok(/position:"sticky"/.test(ma), "which is sticky");
+  ok(/flexDirection: ACTION_DIR\(\)/.test(ma), "mirrored for handedness");
+  ok(/if\(UI\.bottom\)\{ st\.bottom=/.test(ma) && /else \{ st\.top=/.test(ma), "and follows the header to the top or the bottom");
+  eq(count(/React\.createElement\(Modal, \{ actions:\[/g), 12, "twelve sheets hand their buttons to it");
+  // The step sheet's mark rides in the box too, its own row above the three.
+  ok(/React\.createElement\(Modal, \{ actions:\[\s*React\.createElement\("div", \{ key:"col", style:\{display:"flex",flexDirection:"column"/.test(s)
+     && /markBtn,\s*React\.createElement\("div", \{ style:\{display:"flex",gap:"0\.6rem",flexDirection:ACTION_DIR\(\)\} \},/.test(s),
+    "the step's mark sits above its Save / Cancel / Delete in the same box");
+  eq(count(/"data-outlineactions"/g), 0, "the outline's private sticky wrapper is gone - it uses the shared box");
+});
+
+test("every Delete that opens something is held, not tapped", () => {
+  // A couple of seconds of fill before the confirmation even opens: a stray
+  // tap on the way to Save cannot start a delete. The milestone step's Delete
+  // had no confirmation at all, so there the hold IS the guard.
+  has(/var HOLD_DELETE_MS = 1500;/, "the delete hold is a couple of seconds");
+  eq(count(/"data-holddelete":true/g), 4,
+    "four destructive entry points hold: project form, lane editor, milestone step, tutorial reset");
+  ["onHold:onDelete, holdMs:HOLD_DELETE_MS", "onHold:function(){ setConfirm(true); }, holdMs:HOLD_DELETE_MS",
+   "onHold:function(){ onDelete(step.id); }, holdMs:HOLD_DELETE_MS"].forEach((frag) => {
+    ok(s.indexOf(frag) >= 0, "held: " + frag.slice(7, 40));
+  });
+  // No Delete entry point is a plain tap any more.
+  eq(count(/onClick:onDelete[,} ]/g), 0, "the project form's Delete is not a tap");
+  eq(count(/onClick:function\(\)\{ setConfirm\(true\); \}/g), 0, "nor the lane editor's");
+  eq(count(/onClick:function\(\)\{ onDelete\(step\.id\); \}/g), 0, "nor the step's");
+});
+
+test("holding the mark sets when it was met; tapping marks now", () => {
+  // A mark made after the fact would record the tap, not the moment, and turn
+  // an on-time step amber. Hold opens a sheet for the real time.
+  eq(count(/^function useHold\(onTap, onHold, holdMs\)\{/gm), 1, "one hold hook");
+  const uh = s.slice(s.indexOf("function useHold("), s.indexOf("function useTaps("));
+  ok(/held\.current=true; setHolding\(false\); haptic\(18\); if\(holdRef\.current\) holdRef\.current\(\);/.test(uh), "the hold fires on its timer");
+  // Every hold draws the same charging fill; the hook reports `holding` and
+  // no control decides for itself whether to show one.
+  ok(/holding:holding, holdMs:holdMs,/.test(uh), "the hook reports whether a hold is in progress");
+  eq(count(/^function HoldFill\(props\)\{/gm), 1, "one fill");
+  ok(/width:props\.holding\?"100%":"0%"/.test(s) && /transition:props\.holding\?\("width "\+props\.ms\+"ms linear"\):"none"/.test(s),
+    "which grows for the length of the hold and snaps back when released");
+  // Every user of useHold draws it.
+  // One HoldButton wraps the hook and the fill; nothing else may call the
+  // hook directly, so a hold cannot exist without its fill.
+  eq(count(/^function HoldButton\(props\)\{/gm), 1, "one HoldButton");
+  eq((s.match(/=useHold\(/g) || []).length, 1, "useHold is called only inside it");
+  eq((s.match(/React\.createElement\(HoldFill, /g) || []).length, 1, "and it is the only thing that draws the fill");
+  ok(/if\(wasTimed && !held\.current && tapRef\.current\) tapRef\.current\(\);/.test(uh), "a release before it is a tap, a release after it is not");
+  ok(/Math\.abs\(e\.clientX-start\.current\.x\)>8/.test(uh), "movement cancels the hold, so a scroll is not read as one");
+  const st = s.slice(s.indexOf("function MilestoneStepModal(props){"), s.indexOf("function MilestoneWhenModal(props){"));
+  ok(/onTap:function\(\)\{ setDone\(done\?null:Date\.now\(\)\); \},/.test(st), "tap toggles a mark at now");
+  ok(/onHold:function\(\)\{ setWhen\(\{ date:toDateInput\(done\|\|Date\.now\(\)\), time:toTimeInput\(done\|\|Date\.now\(\)\) \}\); \}/.test(st), "hold opens the when-sheet, seeded from the existing mark");
+  ok(/hold to set when it was met/.test(st), "and the button says so");
+  eq(count(/^function MilestoneWhenModal\(props\)\{/gm), 1, "the when-sheet exists");
+  const wm = s.slice(s.indexOf("function MilestoneWhenModal(props){"), s.indexOf("function MilestoneEditModal(props){"));
+  ok(/ok=ms!==null && ms<=Date\.now\(\)\+60000/.test(wm), "a future time is refused");
+  ok(/onSave:function\(ms\)\{ setDone\(ms\); setWhen\(null\); \}/.test(st), "and a past one becomes the mark");
+});
+
+test("the mark is a full-width row, and inputs fit their sheets", () => {
+  // Mark met now was a small button in the corner over Delete - the one
+  // neighbour a mark should never have. It is its own action-sized row now.
+  const st = s.slice(s.indexOf("function MilestoneStepModal(props){"), s.indexOf("function MilestoneEditModal(props){"));
+  ok(/"data-msmarkmet":true[\s\S]{0,400}width:"100%"/.test(st), "the mark spans the sheet");
+  ok(/"data-msmarkmet":true[\s\S]{0,500}padding:"0\.85rem"/.test(st), "at action-button height");
+  ok(/"data-msmarkmet":true[\s\S]{0,600}fontSize:MODAL_BTN_FONT/.test(st), "and action-button size");
+  ok(st.indexOf("var markBtn=") < st.indexOf('React.createElement(Modal, { actions:['), "defined for the sticky box, not the content");
+  ok(st.indexOf("alignSelf") < 0, "no longer tucked into a corner");
+  // width:100% + padding + border overflowed every sheet by ~30px.
+  has(/var INPUT_STYLE = \{ direction:"ltr",textAlign:"left",width:"100%",boxSizing:"border-box",/, "inputs are border-box");
+});
+
+test("milestone strips draw from the FULL record set, and one component", () => {
+  // The board hands cards only OPEN records. A milestone's targets are the
+  // records that have been CLOSED - filter them out and a met step could never
+  // register as met. So every strip reads msProjects, the unfiltered set.
+  eq(count(/^function MilestoneStrip\(props\)\{/gm), 1, "one strip component");
+  // three fixed kinds on the board, and the outline picks lane or project per row
+  eq(count(/React\.createElement\(MilestoneStrip, \{ weekStart:weekStartOf\([^)]*\), kind:"(project|lane|board)"/g), 3,
+    "used on the card, the lane header and the board, each told where the week starts");
+  has(/MilestoneStrip, \{ weekStart:weekStartOf\([^)]*\), kind:r\.kind==="lane"\?"lane":"project"/,
+    "and once in the outline, per row kind");
+  has(/msProjects:projects, offDays:offDaysOf\(settings\.workSchedule\),/, "the board passes the full set down");
+  has(/var all=props\.msProjects\|\|allProjects\|\|\[\];\s*if\(!props\.onMilestones \|\| !hasMilestonesBeneath\(all, proj\.id\)\) return null;/,
+    "the card reads it");
+  has(/laneLine\(props\.msProjects\|\|allProjects\|\|\[\], lane, Date\.now\(\)\)/, "so does the lane header");
+  has(/var pts=boardLine\(projects, laneOrder, laneMeta, Date\.now\(\)\);/, "and the board strip reads projects, not liveProjects");
+  has(/projects:liveProjects, msProjects:projects, offDays:offDaysOf\(settings\.workSchedule\),\s*onOpen:openFromOutline/,
+    "the outline gets both: open records to list, the full set for lines");
+  has(/var all=props\.msProjects\|\|projects;\s*var pts = r\.kind==="lane" \? laneLine\(all,/, "and uses the full set for its strips");
+  // A strip with nothing to show is not drawn.
+  const ms = s.slice(s.indexOf("function MilestoneStrip(props){"), s.indexOf("\n\n// ---- THE OUTLINE"));
+  ok(/if\(!points\.length\) return null;/.test(ms), "an empty line draws nothing");
+  // ...and that return sits AFTER the hooks. A conditional return before them
+  // is the same class of bug as a hook in a loop: the hook count changes
+  // between renders and React throws #310, taking the app down.
+  ok(ms.indexOf("useState(0)") < ms.indexOf("if(!points.length) return null;"),
+    "and the early return is after every hook, never before one");
+  // Each strip opens the right sheet.
+  has(/onOpen:function\(\)\{ closeAllPopups\(\); setMsBoard\(true\); \}/, "the board strip opens the board view");
+  eq(count(/^function BoardMilestonesModal\(props\)\{/gm), 1, "which exists");
+  has(/onOpenLane:function\(k\)\{ setMsLane\(k\); \}/, "and hands off to a lane's view");
+});
+
+test("the line zooms and pans, without borrowing the hold-to-confirm signal", () => {
+  // A parent line shows every step beneath it, which over months crowds. Zoom
+  // steps through real units; the charging fill is NOT used to set the level -
+  // in this app a charge means something irreversible is about to happen.
+  has(/var MS_ZOOMS = \[/, "the levels are a table");
+  has(/\{ id:"fit",    label:"Fit",    ms:null \}/, "starting at Fit");
+  has(/function nextZoom\(i\)\{ return \(i\+1\) % MS_ZOOMS\.length; \}/, "and tapping wraps");
+  const ms = s.slice(s.indexOf("function MilestoneStrip(props){"), s.indexOf("\n\n// ---- THE OUTLINE"));
+  ok(/onTap:step, onHold:toFit/.test(ms), "tap steps the level, hold snaps back to Fit");
+  ok(/"data-mszoom":zoomAt\(zoom\)\.id/.test(ms), "the control names its level");
+  // Written control-then-line; the app root's dir="rtl" mirrors it for a
+  // left-hander. Setting flexDirection here as well cancelled that out and
+  // put the control left of the line for BOTH hands - the same double-mirror
+  // that once put Save on the wrong side.
+  ok(ms.indexOf("flexDirection:UI.left") < 0, "the strip does not mirror itself - the root already does");
+  // Written line-then-control: under LTR that puts the control at the right,
+  // and the root's dir="rtl" moves it to the left for a left-hander - the
+  // thumb edge either way.
+  ok(ms.indexOf('"data-mspan"') < ms.indexOf('"data-mszoom"'), "the control is written last, so it lands at the thumb edge");
+  // Equal weight at every level: at Fit it was a dim outline on a dim panel.
+  ok(/background:S\.infoBg,border:"1px solid "\+S\.actionBdr,/.test(ms), "the control looks the same at every level");
+  // The control's PLACEMENT mirrors; its TEXT must not - the rtl root
+  // reversed the words and "3 months" read as "months 3".
+  ok(ms.indexOf('React.createElement("span", { dir:"ltr" }, zoomAt(zoom).label)') >= 0,
+    "and its label reads the same way round in both hands");
+  ok(!/background:zoomed\?/.test(ms) && !/color:zoomed\?/.test(ms), "Fit is not a faded state");
+  // Panning: only when zoomed, and a drag that never moved is a tap.
+  ok(/var panHandlers = zoomed \? \{/.test(ms), "the line pans only when zoomed in");
+  ok(/touchAction:zoomed\?"pan-y":"auto"/.test(ms), "leaving vertical scrolling to the page");
+  ok(/if\(d && !d\.moved && props\.onOpen\) props\.onOpen\(\);/.test(ms), "and a drag that never moved still opens the sheet");
+  // The line draws only what is inside the window.
+  has(/var visible=points\.filter\(function\(p\)\{ return p\.at>=span\.lo && p\.at<=span\.hi; \}\)/,
+    "marks outside the window are not drawn");
+  has(/var span=props\.span \|\| lineSpan\(points, now\)/, "and the line takes the window it is given");
+  // Two signals that the line runs past the window, and only when it does.
+  // The fade alone reads as decoration; the bar alone does not show that the
+  // line continues. Together: that it scrolls, where you are, how much you see.
+  has(/if\(full && \(full\.hi-full\.lo\) > \(span\.hi-span\.lo\)\+1\)\{/, "shown only when there is more line than window");
+  has(/React\.createElement\("linearGradient", \{ id:fid\+"l" \}/, "the leading edge fades");
+  has(/React\.createElement\("linearGradient", \{ id:fid\+"r" \}/, "and the trailing edge");
+  has(/var thumbW=Math\.max\(16, w\*\(\(span\.hi-span\.lo\)\/fw\)\);/, "the bar's width is the share of the line in view");
+  has(/var thumbX=left\+\(w-thumbW\)\*Math\.max\(0, Math\.min\(1, \(span\.lo-full\.lo\)\/Math\.max\(1, fw-\(span\.hi-span\.lo\)\)\)\);/,
+    "and its position is where the window sits in the whole");
+  has(/fullSpan: zoomed \? lineSpan\(points, now\) : null,/, "the strip passes the full extent only when zoomed");
+  has(/var H = \(labels \? 58 : 34\) \+ \(bar\?6:0\)/, "and the line makes room for the bar when it draws one");
+  // A parent shows the full extent of what is beneath it.
+  has(/function subtreePoints\(projects, id, now\)\{/, "every step beneath a record is a point");
+  has(/out=out\.concat\(subtreePoints\(projects, p\.id, now\)\);/, "a lane line gathers them all");
+  // A PROJECT line follows the same rule - it used to collapse each child to
+  // one aggregate mark, which hid the children's own steps.
+  eq(count(/subtreePoints\(all, (proj|r)\.id, Date\.now\(\)\)/g), 2, "the card and the outline both expand fully");
+  has(/var points=subtreePoints\(scored, proj\.id, now\);/, "and so does the editor's line");
+  has(/\(laneOrder\|\|\[\]\)\.forEach\(function\(k\)\{ out=out\.concat\(laneLine\(projects, k, now\)\); \}\);/, "and the board line gathers the lanes");
+});
+
+test("the line's ticks slide with the zoom and follow the user's own week", () => {
+  // Two sizes at every level, and what each unit MEANS changes with the
+  // window, so the line is never a solid comb or a bare rule.
+  has(/function tickScale\(span\)\{/, "one place decides what a tick means");
+  has(/if\(w > 31\*MS_DAY\)  return \{ minor:"week", major:"month" \};/, "months and longer: weeks under months");
+  has(/if\(w > 2\*MS_DAY\)   return \{ minor:"day",  major:"week"  \};/, "a week to a month: days under week starts");
+  has(/return \{ minor:"hour", major:"day" \};/, "and down at a day or two: hours under days");
+  has(/function lineTicks\(span, weekStart\)\{/, "the ticks themselves are computed, not drawn inline");
+  has(/"data-tick":k\.major\?"major":"minor"/, "each says which it is");
+  has(/y2:axisY-\(k\.major\?8:3\),/, "the major tick is taller");
+  has(/strokeWidth:k\.major\?2:1/, "and thicker, so it reads as a boundary");
+  // The week boundary is the user's own, from Pay & Work Week.
+  has(/function weekStartOf\(schedule\)\{/, "one place reads the configured first day");
+  has(/return \(pr&&pr\.weekStart\) \|\| "mon";/, "defaulting to Monday when none is set");
+  has(/else if\(sc\.major==="week"\) major = startOfWeek\(d, weekStart\)/, "and week majors land on it");
+  has(/guard<2000/, "with a guard so a bad span cannot flood the line");
+});
+
+test("a met step is drawn where it HAPPENED, with a ghost at the target", () => {
+  // The brightest mark is the truth: where the work actually landed. A ghost
+  // at the target and an arc between say what was planned and how far it
+  // moved. Missed steps have nothing to connect to and get neither.
+  has(/var DRIFT_MIN_PX = 7;/, "a drift too small to bow stays one mark");
+  has(/var DRIFT_MAX_H  = 34;/, "and the arc has a ceiling");
+  has(/return Math\.min\(DRIFT_MAX_H, 9 \+ Math\.sqrt\(Math\.abs\(spanPx\)\)\*3\.4\);/,
+    "height is sqrt-compressed, so small drifts still bow and big ones stop running away");
+  has(/if\(p\.actual==null \|\| \(p\.status!=="met" && p\.status!=="late"\)\) return false;/, "only met and late steps drift");
+  // An arc is kept when any PART of it crosses the window: dropping it when
+  // the TARGET was off-screen made arcs wink out as you panned towards them.
+  has(/return b>=span\.lo && a<=span\.hi;/, "an arc that crosses the window is kept, wherever its ends are");
+  // Height is measured over EVERY drift at this zoom, so panning cannot
+  // change it - the line held one height instead of jumping as arcs scrolled
+  // in and out.
+  has(/driftArcs\(points, \{ lo:drawSpan\.lo, hi:drawSpan\.hi \}, w, true\)/,
+    "and the height is measured over the whole line, not just what is on screen");
+  has(/out\.sort\(function\(a,b\)\{ return Math\.abs\(b\.ax-b\.x\)-Math\.abs\(a\.ax-a\.x\); \}\);/,
+    "widest first, so a short arc is never buried");
+  // The line grows by exactly the headroom the tallest arc needs.
+  has(/var head = props\.drift===false \? 0 : Math\.round\(driftHeadroom\(/, "the tallest arc sets the headroom");
+  has(/var H = \(labels \? 58 : 34\) \+ \(bar\?6:0\) \+ head, axisY = \(labels \? 34 : 26\) \+ head;/,
+    "and the line grows by it - by nothing at all when there is no drift");
+  has(/"data-driftarc":a\.id/, "each arc is identifiable");
+  has(/"data-driftghost":a\.id/, "so is each ghost");
+  has(/var real = \(p\.actual!=null && \(p\.status==="met"\|\|p\.status==="late"\)\) \? p\.actual : p\.at;/,
+    "and the bright mark sits on the date that happened");
+});
+
+test("the opening screen names the app and gets out of the way", () => {
+  // An app you open to start a timer: a splash you have to sit through is a
+  // splash in the way. About a second, then it fades, and a tap kills it.
+  eq(count(/^function SplashScreen\(props\)\{/gm), 1, "one splash component");
+  has(/var APP_VERSION = "/, "a public version number, separate from the build stamp");
+  has(/var SPLASH_SHOW_MS = 2500;/, "held long enough to read, at Brent's pacing");
+  has(/var SPLASH_FADE_MS = 320;/, "then faded out");
+  has(/onPointerDown:props\.onDismiss/, "and a tap dismisses it at once");
+  has(/"data-splash":props\.fading\?"fading":"shown"/, "it says which state it is in");
+  has(/zIndex:1000/, "above every other layer, including modals");
+  has(/pointerEvents:props\.fading\?"none":"auto"/, "and stops intercepting taps the moment it starts fading");
+  // The timers are cleaned up, or a remount leaves them firing into a dead tree.
+  has(/return function\(\)\{ clearTimeout\(a\); clearTimeout\(b\); \};/, "its timers are cleared on unmount");
+  // The build stamp is untouched: that is what proves which deploy landed.
+  ok(/Time Tracker build/.test(require("fs").readFileSync("index.html","utf8")),
+    "the build stamp still lives in the shell");
+});
+
+test("every milestone token reaches S", () => {
+  // applyTokens copies tokens by name. A token in the scheme tables that is
+  // not copied here is undefined at runtime, and the line draws black.
+  const ap = s.slice(s.indexOf("function applyTokens("), s.indexOf("\nfunction ", s.indexOf("function applyTokens(") + 10));
+  ["msMet", "msLate", "msMissed", "msUpcoming", "msOffDay"].forEach((k) => {
+    ok(new RegExp("S\\." + k + "=c\\." + k + ";").test(ap), k + " is copied into S");
+    eq(count(new RegExp(k + ':"', "g")), 8, k + " is defined in all eight token sets");
+  });
+});
+
+test("milestones live on projects, and only there", () => {
+  // Steps are entered in exactly one place. Lanes and the board own nothing;
+  // their lines are computed from the level beneath, so nothing can drift.
+  const ms = s.slice(s.indexOf("// ---- MILESTONES ---"), s.indexOf("// ---- THE OUTLINE ---"));
+  has(/var MS_RANK = \{ missed:3, late:2, upcoming:1, met:0 \};/, "worst wins in the agreed order");
+  ok(/function laneLine\(projects, lane, now\)\{/.test(ms) && /function boardLine\(projects, laneOrder, laneMeta, now\)\{/.test(ms),
+    "lane and board lines are functions of projects");
+  ok(ms.indexOf("laneMeta[") < 0 || !/milestones/.test(ms.slice(ms.indexOf("function laneLine"))),
+    "and read no milestones from a lane");
+  ok(/function recordClosedAt\(projects, id\)\{/.test(ms) && /p\.closedAt/.test(ms),
+    "complete means closed out, nothing else");
+  ok(/tickUnit\(span\)\{ return \(span\.hi-span\.lo\) > 31\*MS_DAY \? "week" : "day"; \}/.test(ms),
+    "ticks are days under a month, weeks past it");
+});
+
+test("every function the outline calls is actually defined", () => {
+  // This suite reads source, so it happily passed a build in which the whole
+  // outline model had been deleted: the CALL SITES still matched. Only the
+  // evaluated harness caught it. Assert the definitions exist, not just uses.
+  ["outlineRows", "outlineSpan", "outlineCommit", "mergeOutline", "blockEnd", "parentIndex",
+   "prevSibling", "nextSibling", "replant", "firstChildAt", "stepUp", "stepDown", "stepIn",
+   "stepOut", "stepOptions", "nestRoles", "RowGrip", "OutlineName", "LaneEditModal", "OutlineModal",
+   "worstStatus", "stepActual", "stepStatus", "stepPoint", "aggregatePoint", "hasMilestonesBeneath",
+   "projectLine", "projectCurrent", "laneLine", "laneCurrent", "boardLine", "lineSpan", "tickUnit", "groupMarks",
+   "MilestoneStrip", "BoardMilestonesModal", "MilestoneWhenModal", "useHold", "HoldButton", "HoldFill", "StagesDoneModal", "MoveTargetModal",
+   "MenuIcon", "ModalGlyph", "TitleGlyph", "readableInk"].forEach((fn) => {
+    eq(count(new RegExp("^function " + fn + "\\b", "gm")), 1, fn + " is defined exactly once");
+  });
+  // And nothing calls a name that no longer exists. Cheap structural check:
+  // every identifier called as fn(...) at top level of the outline model.
+  const model = s.slice(s.indexOf("// ---- THE OUTLINE"), s.indexOf("function LaneEditModal") >= 0
+    ? s.indexOf("// ---- CAROUSEL") : s.length);
+  ["moveOutline", "dropAtY", "nestInto", "dragShift", "dropIndex"].forEach((gone) => {
+    eq((model.match(new RegExp(gone + "\\(", "g")) || []).length, 0,
+      "nothing calls the removed " + gone);
+  });
+});
+
+test("rows are selected and stepped, and nothing drags any more", () => {
+  // Dragging on iOS lost a week to Safari claiming the gesture for scrolling
+  // before the first touchmove, with touch-action ignored on the handle. None
+  // of that apparatus may come back.
+  ["bindTouch", "freezePage", "lockDocument", "DRAG_TRACE", "dropAtY", "nestInto", "moveOutline",
+   "HOLD_MS", "dragShift", "dropIndex", "DRAG_HANDLE_STYLE", "lockScroll", "beginHold", "touchOff",
+   "tt-drag", "data-lanedrag", "data-outlinedrag"].forEach((w) => {
+    eq(count(new RegExp(w.replace(/[-]/g, "\\$&"), "g")), 0, w + " is gone");
+  });
+  // Touch handlers survive in the Carousel, whose swipe predates all of this
+  // and is not row dragging. Assert they are absent from the two edit sheets
+  // rather than from the whole file.
+  const lanesSrc = s.slice(s.indexOf("function EditLanesModal(props){"), s.indexOf("// ---- CAROUSEL"));
+  const outSrc = s.slice(s.indexOf("function OutlineModal(props){"), s.indexOf("// ---- EDIT DISRUPTION PRESETS MODAL"));
+  [["the lanes sheet", lanesSrc], ["the outline", outSrc]].forEach(([what, src]) => {
+    ["onTouchStart", "onTouchMove", "onTouchEnd", "onMouseDown"].forEach((h) => {
+      eq((src.match(new RegExp(h, "g")) || []).length, 0, what + " has no " + h);
+    });
+  });
+  const om = s.slice(s.indexOf("function OutlineModal(props){"), s.indexOf("// ---- EDIT DISRUPTION PRESETS MODAL"));
+  // A row's glyph selects it; its name opens the editor. Two targets, two jobs.
+  ok(/"data-outlinepick":r\.key/.test(om), "the glyph selects the row");
+  // Single tap opens the row's menu, double tap edits - the same pair the
+  // board uses for lanes, projects and tasks, so the gesture means one thing
+  // wherever you are.
+  ok(/React\.createElement\(OutlineName, \{ row:r,/.test(om), "the name is its own component");
+  // useTaps is a hook. Inside rows.map() it was a hook in a loop, which held
+  // together until the row count changed - adding a record - and then React
+  // threw #310 and the whole app died. It lives at OutlineName's top level now.
+  ok(om.indexOf("useTaps(") < 0, "and no hook is called inside the row loop");
+  const on = s.slice(s.indexOf("function OutlineName(props){"), s.indexOf("function OutlineModal(props){"));
+  ok(/var onTap=useTaps\(props\.onSingle, props\.onDouble\);/.test(on), "the tap hook sits at a component's top level");
+  ok(/"data-outlineopen":r\.key, onClick:onTap/.test(on), "and drives the name");
+  ok(/setRowMenu\(function\(x\)\{ return x===r\.key \? null : r\.key; \}\)/.test(om),
+    "one tap toggles that row's menu");
+  ok(/setRowMenu\(null\); onOpen\(r\);/.test(om), "two taps close it and open the editor");
+  ok(/function outlineMenuItems\(r\)\{/.test(om), "the menu's entries come from one place");
+  // A popup hanging off the row, like the board's - not an inline list that
+  // shoves the rows below it down the page.
+  ok(/position:"absolute",top:"calc\(100% \+ 4px\)"/.test(om), "it hangs under its own row");
+  ok(/left:UI\.left\?"auto":/.test(om) && /right:UI\.left\?/.test(om), "and flips with handedness");
+  ok(/zIndex:rowMenu===r\.key\?60:undefined/.test(om),
+    "the row it belongs to stacks above the rows after it, or later siblings paint over the popup");
+  ok(om.indexOf('"data-surface":"menu"') < 0,
+    "it is not glass - that rule reads as muddy over the rows of its own sheet");
+  ok(/background:S\.bg2,border:"1px solid "\+S\.borderBright/.test(om), "solid fill, brighter edge");
+  // Each kind's menu, in a fixed order: edit first, then what can be added
+  // from here, same level inward. Assert the exact sequence per kind.
+  // ONE builder serves the outline AND the board, so the two cannot drift.
+  const mi = s.slice(s.indexOf("function rowMenuItems(kind, role, a){"), s.indexOf("function MenuRows(props){"));
+  const labelsIn = (block) => (block.match(/add\("([^"]+)"/g) || []).map((x) => x.slice(5, -1));
+  const seg = (from, to) => mi.slice(mi.indexOf(from), to ? mi.indexOf(to) : undefined);
+  eq(labelsIn(seg('if(kind==="lane")', 'else if(kind==="stage")')).join("|"),
+    "Edit lane|New lane|New project|Milestones", "a lane's menu");
+  eq(labelsIn(seg('else if(kind==="stage")', 'else if(role==="task")')).join("|"),
+    "Edit stage|Add stage", "a stage's menu");
+  eq(labelsIn(seg('else if(role==="task")', 'add("Edit project"')).join("|"),
+    "Edit task|Add task|Add nested task|Add stages", "a task's menu");
+  eq(labelsIn(seg('add("Edit project"')).join("|"),
+    "Edit project|Add project|Add nested project|Add task|Add stages|Milestones", "a project's menu");
+  // and every menu on the board is built from it too
+  const board = s.slice(s.indexOf("function SubRow(props){"), s.indexOf("// ---- MODULE PLATFORM"));
+  eq((board.match(/rowMenuItems\("node", projRole\((proj|sub)\)/g) || []).length, 2,
+    "both card menus come from the shared builder");
+  ok(/rowMenuItems\("lane", null, \{/.test(board), "and so does the lane header's");
+  eq((board.match(/React\.createElement\(MenuRows, /g) || []).length, 3, "drawn by the shared renderer");
+  ["Edit Project", "Add Task", "View Stages", "Add Stages", "+ New Lane", "Nest Something Here"].forEach((l) => {
+    eq((board.match(new RegExp('"' + l.replace(/[+]/g, "\\$&") + '"', "g")) || []).length, 0,
+      'no hand-rolled "' + l + '" row survives on the board');
+  });
+  // "Add project" / "Add task" on a record is a SIBLING: same lane, same
+  // parent, same kind. "Add nested" goes inside.
+  has(/onAddSibling:function\(pid\)\{ var pr=findProj\(projects,pid\);\s*if\(pr\) setShowAdd\(\{lane:pr\.lane,parentId:pr\.parentId\|\|null,role:projRole\(pr\)\}\); \}/,
+    "a sibling shares the record's lane, parent and role");
+  const om2 = s.slice(s.indexOf("function outlineMenuItems(r){"), s.indexOf("function apply(res){"));
+  ok(/addNestedProject:function\(\)\{ props\.onAddProjectUnder\(r\.id\)/.test(om2),
+    "a nested project goes under the record");
+  ok(/addNestedTask:function\(\)\{ props\.onAddTask\(r\.id\)/.test(om2), "and so does a nested task");
+  ok(/add\("Edit stage",  "stages",  a\.edit\)/.test(mi) && /add\("Add stage",   "stages",  a\.edit\)/.test(mi),
+    "both stage entries open the host's stage list");
+  // The board's Add Task / Add nested / sibling reach the same sheet with the
+  // same role the outline asks for.
+  has(/onAddSub:function\(parentId\)\{ closeAllPopups\(\); setShowAdd\(\{lane:lane,parentId:parentId,role:"task"\}\); \}/,
+    "the board's task add says it is a task");
+  has(/onAddNested:function\(pid\)\{[\s\S]{0,120}role:"project"\}\); \}/, "and its nested add says project");
+  ok(/setSel\(picked\?null:r\.key\)/.test(om), "and tapping the glyph again deselects");
+  // A second target on the trailing edge, shaped like the controller it opens.
+  eq(count(/function RowGrip\(props\)\{/g), 1, "one grip component");
+  const rg = s.slice(s.indexOf("function RowGrip(props){"), s.indexOf("function OutlineModal(props){"));
+  ok(/var GRIP_BOX = 40, GRIP_REST = 32, GRIP_SEL = 38;/.test(s),
+    "it grows on selection, inside a fixed box so the row cannot reflow");
+  ok(/width:GRIP_BOX\+"px",height:GRIP_BOX\+"px"/.test(rg), "the box is the fixed size");
+  ok(/props\.on\?GRIP_SEL:GRIP_REST/.test(rg), "and the drawing is what changes");
+  ok(/props\.on\?S\.text:S\.textDim/.test(rg),
+    "resting takes textDim, selected the full text colour - both invert with the theme");
+  // The glyph must fit the 28-unit box INCLUDING its stroke. It shipped once
+  // reaching -1.85 to 29.85, with all four outer walls clipped off, which
+  // turned the cross into what read as a lattice. Check the arithmetic, not a
+  // literal: reach = offset + half the key + half the stroke.
+  const gm = /var GRIP_OFF = ([\d.]+), GRIP_KEY = ([\d.]+), GRIP_SW = ([\d.]+);/.exec(rg);
+  ok(!!gm, "the grip's geometry is named, not scattered through the markup");
+  if (gm) {
+    const off = Number(gm[1]), key = Number(gm[2]), sw = Number(gm[3]);
+    const reach = off + key / 2 + sw / 2;
+    ok(reach <= 14, "every key fits the box with its stroke (reach " + reach.toFixed(2) + " <= 14)");
+    ok(reach > 12, "and fills it rather than floating in the middle");
+    const gap = 2 * off - key;
+    ok(gap >= 5, "the keys stay visibly separate (gap " + gap.toFixed(1) + ")");
+  }
+  eq((rg.match(/rx:GRIP_KEY\*0\.29/g) || []).length, 1, "four keys drawn from one spec, as the pad is");
+  ok(rg.indexOf("UI.left") < 0, "no handedness conditional - dir mirrors it");
+  // The grip and the row glyph do the same thing, from one function.
+  ok(/var pick=function\(\)\{ setSel\(picked\?null:r\.key\); haptic\(10\); \};/.test(om),
+    "one pick handler");
+  ok(/"data-outlinepick":r\.key, onClick:pick/.test(om), "the row glyph calls it");
+  ok(/RowGrip, \{ rowKey:r\.key, on:picked, onPick:pick \}/.test(om), "and so does the grip");
+  ok(om.indexOf('"data-outlinekey":r.key') < om.indexOf("RowGrip, {"),
+    "the grip is written after the row box, so it sits outside it");
+  // The controller appears only with a row selected, and asks the model what
+  // that row can do rather than deciding for itself.
+  ok(/cur && !props\.suspended && React\.createElement\("div", \{ "data-controller":true/.test(om),
+    "the controller needs a selection, and stands down while a child editor is open");
+  ok(/var can=cur \? stepOptions\(rows, idx, role\) : null;/.test(om), "it asks the model what is possible");
+  ["up", "down", "left", "right"].forEach((d) => ok(om.indexOf('padKey("' + d + '"') >= 0, "the pad has a " + d + " key"));
+  ok(/disabled:!on/.test(om), "an impossible direction is disabled, not silently ignored");
+  // A dead key keeps its outline. At 0.28 with no border the pad stopped
+  // reading as a pad once most directions were unavailable.
+  ok(/border:"2px solid "\+\(on\?S\.textDim:S\.textMuted\)/.test(om),
+    "a disabled key still has a border, just a dimmer one");
+  ok(/background:on\?S\.bg3:"transparent"/.test(om), "the fill is what marks a key live");
+  ok(/opacity:on\?1:0\.6/.test(om), "and it stays legible at 0.6, not 0.28");
+  // The all-lanes list is gone: both routes to it - the board's lane header
+  // and the settings menu - now open the single-lane editor instead, so the
+  // same gesture no longer gave two different editors.
+  eq(count(/EditLanesModal/g), 0, "the all-lanes list is gone, not left orphaned");
+  eq(count(/saveLaneEdits/g), 0, "and the multi-lane save with it");
+  ok(/flexDirection:UI\.left\?"row-reverse":"row"/.test(om), "the pad mirrors with handedness, under the thumb");
+  // The nesting role is chosen, and only offered where it exists.
+  ok(/stepIn\(rows, idx, role\)/.test(om), "nesting in uses the chosen role");
+  ok(/roles\.length>0 && React\.createElement\("div", \{ style:\{display:"flex",gap:"0\.4rem"\}/.test(om),
+    "the role pills only appear when there is a choice to make");
+  ok(/rolePill\("task","Task"\), rolePill\("project","Project"\)/.test(om), "task or project");
+  ok(/if\(roles\.length && roles\.indexOf\(role\)<0\) setRole\(roles\[0\]\);/.test(om),
+    "and a role the host cannot hold is corrected, not left selected");
+  ok(/A task can only hold tasks\./.test(om), "the reason a choice is missing is stated");
+  // Moves that leave the parent or convert the record still ask first.
+  ok(/if\(res\.crossed\)\{\s*setAsk\(/.test(om), "a crossing asks");
+  ok(/ask && React\.createElement\(Modal, \{ actions:\[[\s\S]{0,900}title:"Move it\?"/.test(om), "as its own sibling modal");
+  ok(/scrollIntoView\(\{ block:"nearest", behavior:"smooth" \}\)/.test(om),
+    "and the selected row stays in view above the controller");
+  // Save and Cancel are pinned to the foot of the sheet, so an edit at the top
+  // of a long list can be saved without scrolling to the bottom first.
+  ok(/React\.createElement\(Modal, \{ actions:\[React\.createElement\("button", \{ key:"a0", onClick:function\(\)\{ onSave\(rows\); \}/.test(om),
+    "the action row rides in the shared sticky box");
+  ok(om.indexOf('"data-outlineactions"') < 0, "and no private sticky wrapper of its own");
+  // The controller floats OVER the foot of the sheet, Save/Cancel included.
+  // Moving and saving are separate moments: DONE puts the controller away.
+  ok(om.indexOf("shrinkBy") < 0 && om.indexOf("padBottom") < 0,
+    "the sheet neither shrinks nor pads for the controller");
+  ok(/marginBottom:cur\?"11rem":"0\.5rem"/.test(om),
+    "but the list keeps room under it, so a selected row near the foot can scroll clear");
+  // DONE is a bordered button, not a word - the same treatment as EXIT.
+  ok(/"data-ctrldone":true[\s\S]{0,200}border:"1\.5px solid "\+S\.infoText/.test(om), "DONE is a bordered button");
+  ok(/\} \}, "DONE"\)\)/.test(om), "and says so");
+  // The lanes sheet steps too.
+  // Lane order is the outline's job now - it lists every lane with the same
+  // controller as everything else.
+});
+
+test("the header runs opposite to the board behind it", () => {
+  // The page mirrors on handedness via dir; the header bar is reversed on top
+  // of that, so the menu button is on the right for a right-handed user and on
+  // the left for a left-handed one. row-reverse does it under both dir values,
+  // because in RTL a reversed row already reads left to right.
+  eq(count(/var hdrMenuRight = !isLeft;/g), 1, "one flag names which side the menu is on");
+  const i = s.indexOf("// Written Menu | Clock | Disruption");
+  const bar = s.slice(i, s.indexOf("SETTINGS MENU button", i));
+  ok(bar.indexOf('flexDirection:"row-reverse"') >= 0, "the bar is reversed");
+  ok(bar.indexOf("isLeft") < 0, "unconditionally - it must invert on both hands, not one");
+  // Each dropdown hangs off its own button. If an anchor keeps following
+  // isLeft it opens off the edge of the screen on both settings.
+  ok(s.indexOf('left:hdrMenuRight?"auto":0,right:hdrMenuRight?0:"auto",minWidth:"290px"') >= 0,
+    "the menu dropdown follows the menu button");
+  ok(s.indexOf('right:hdrMenuRight?"auto":0,left:hdrMenuRight?0:"auto",minWidth:"250px"') >= 0,
+    "and the disruption dropdown follows its own, on the opposite side");
+  const dd = s.match(/position:"absolute",top:ddTop,bottom:ddBottom,[^}]*/g) || [];
+  eq(dd.filter((d) => /isLeft/.test(d)).length, 0,
+    "no header dropdown is still anchored off the page mirror");
+});
+
+test("leaving the tutorial keeps your work; resetting is its own, held act", () => {
+  // It used to reset on the way out, which is wrong for somewhere you come
+  // back to and carry on building. Leaving keeps everything; Reset is a
+  // separate control, held, and it says what it throws away.
+  eq(count(/function leaveTutorial\(\)\{/g), 1, "one way out");
+  const lv = s.slice(s.indexOf("function leaveTutorial(){"), s.indexOf("function resetTutorialNow("));
+  ok(lv.indexOf("resetTutorial()") < 0, "leaving does not reset");
+  ok(/setTestMode\(false\);/.test(lv), "it just leaves");
+  eq(count(/function resetTutorial\(\)\{/g), 1, "one reset");
+  const rs = s.slice(s.indexOf("function resetTutorial(){"), s.indexOf("function leaveTutorial(){"));
+  [["setTestProjects","TEST_PROJECTS"],["setTestLogs","TEST_LOGS"],["setTestDist","TEST_DIST"],
+   ["setTestBreaks","TEST_BREAKS"],["setTestLaneOrder","TEST_ORDER"],["setTestLaneMeta","TEST_META"]]
+    .forEach(([fn, seed]) => {
+      ok(rs.indexOf(fn + "(" + seed + ")") >= 0, fn + " goes back to its shipped seed");
+    });
+  has(/"data-tutorialreset":true/, "the reset is offered where you leave");
+  has(/onHold:resetTutorialNow, holdMs:HOLD_DELETE_MS/, "and it is held, never tapped");
+  // Versioned baseline, but never at the cost of someone's practice work.
+  has(/var TUTORIAL_SEED = "/, "the baseline carries a version");
+  has(/if\(seen!==TUTORIAL_SEED && touched!=="1"\) resetTutorial\(\);/,
+    "stale tutorial data is replaced on load ONLY while it is untouched");
+  has(/localStorage\.setItem\("tt_test_touched","1"\);/, "anything changed in there marks it as theirs");
+  has(/localStorage\.removeItem\("tt_test_touched"\);/, "and a reset makes it the shipped copy again");
+});
+test("a render crash names itself instead of saying Script error", () => {
+  // From the phone: "Uncaught Error: Script error." at line 0:0 - no message,
+  // no stack, nothing to act on. window.onerror cannot see inside a React
+  // render; a boundary gets the real error and the component stack.
+  eq(count(/var TTBoundary = \(function\(\)\{/g), 1, "there is a boundary");
+  const bd = s.slice(s.indexOf("var TTBoundary"), s.indexOf("function TTBoard()"));
+  ok(/getDerivedStateFromError/.test(bd) && /componentDidCatch/.test(bd),
+    "it catches both ways React reports a crash");
+  ok(/e\.message/.test(bd) && /e\.stack/.test(bd) && /info\.componentStack/.test(bd),
+    "and shows the message, the stack and the component it happened in");
+  ok(/"data-crash":true/.test(bd), "in a readable block");
+  ok(/typeof React\.Component!=="function"\) return TTErrorBoundary;/.test(bd),
+    "degrading to a pass-through where React is a stub, so the harnesses still run");
+  // The board is still wrapped; the splash is a SIBLING of the boundary, so a
+  // crash in the board shows the crash report rather than a frozen splash.
+  has(/React\.createElement\(TTBoundary, null, React\.createElement\(TTBoard\)\),/,
+    "and the exported entry is already wrapped");
+});
+
+test("the tutorial is a sandbox - nothing in it touches the real board", () => {
+  // Lanes were the one thing shared between the two modes: renaming,
+  // recolouring, reordering or deleting a lane while learning did it to the
+  // real board too. Every collection is now per-mode.
+  [["projects","tt_test_projects"],["logs","tt_test_logs"],
+   ["disruptions","tt_test_disruptions"],["breaks","tt_test_breaks"],
+   ["lane order","tt_test_laneorder"],["lane meta","tt_test_lanemeta"]].forEach(([what, key]) => {
+    has(new RegExp('load\\("' + key + '"'), what + " has its own tutorial store");
+  });
+  // Both setters switch on the mode, or a write lands in the wrong world.
+  has(/var laneOrder=testMode\?testLaneOrder:realLaneOrder;/, "lane order reads the current mode");
+  has(/var setLaneOrder=testMode\?setTestLaneOrder:setRealLaneOrder;/, "and writes to it");
+  has(/var laneMeta=testMode\?testLaneMeta:realLaneMeta;/, "lane meta too");
+  has(/var setLaneMeta=testMode\?setTestLaneMeta:setRealLaneMeta;/, "both ways");
+  // Nothing may reach past the switch to a mode-specific setter directly.
+  const app = s.slice(s.indexOf("var setLaneMeta=testMode"));
+  ["setRealLaneOrder", "setRealLaneMeta", "setTestLaneOrder", "setTestLaneMeta"].forEach((fn) => {
+    eq((app.match(new RegExp(fn + "\\(", "g")) || []).length, 0,
+      "nothing calls " + fn + " directly after the switch");
+  });
+});
+
+test("the two baselines say what they are for", () => {
+  // First run is skeletal and names each record after WHAT IT IS, so the
+  // vocabulary arrives before any example does.
+  const real = s.slice(s.indexOf("var REAL_PROJECTS"), s.indexOf("var DAY_MS"));
+  ["First Project", "First Stage", "Second Project", "Second Task", "Second Stage"].forEach((n) => {
+    ok(real.indexOf('"' + n + '"') >= 0, "first run has " + n);
+  });
+  eq((real.match(/\{ id:\d+,/g) || []).length, 3, "and only three records");
+  has(/"Daily Activity":  \{ label:"First Lane"/, "with First Lane");
+  has(/"Projects":        \{ label:"Second Lane"/, "and Second Lane");
+  eq(count(/var DEFAULT_ORDER = \["Daily Activity","Projects"\];/g), 1, "two lanes, not three");
+  // The tutorial is the full demonstration, with history so nothing is blank.
+  const tut = s.slice(s.indexOf("var TEST_PROJECTS"), s.indexOf("// ---- HOOKS"));
+  ok(/role:"task"/.test(tut) && /role:"project"/.test(tut), "it shows a task and a project");
+  ok(/kind:"finite"/.test(tut) && /kind:"ongoing"/.test(tut), "finite and ongoing");
+  ok(/startAt:/.test(tut) && /endAt:/.test(tut), "a scheduled start and an end date");
+  ok(/done:true/.test(tut) && /done:false/.test(tut), "stages part finished");
+  ok(/var TEST_LOGS = \[/.test(tut) && /var TEST_DIST = \[/.test(tut) && /var TEST_BREAKS = \[/.test(tut),
+    "and seeded history, so Reports and the badges are not empty");
+  has(/load\("tt_test_logs",TEST_LOGS\)/, "which is actually wired up");
+  has(/load\("tt_test_disruptions",TEST_DIST\)/, "disruptions too");
+  has(/load\("tt_test_breaks",TEST_BREAKS\)/, "and breaks");
+});
+
+test("the tutorial is one bar at the head, and nothing else moves", () => {
+  // It used to be a 24px frame on all four sides, insetting the app by 48px
+  // each way - so the tutorial and the real board did not lay out the same,
+  // and help-page screenshots would not match what a user sees.
+  eq(count(/S\.testFrameBg/g), 1, "one frame element, not four");
+  has(/var FW = 0;/, "and it costs the layout nothing");
+  has(/var TUT_H = testMode \? 30 : 0;/, "only a bar's height at the head");
+  const bar = s.slice(s.indexOf('"data-tutorialbar":true'), s.indexOf('"data-tutorialexit"'));
+  ok(/position:"fixed",top:0,left:0,right:0/.test(bar), "pinned to the head");
+  ok(/dir:"ltr"/.test(s.slice(s.indexOf("testMode && React.createElement"), s.indexOf('"data-tutorialexit"'))),
+    "and forced LTR, so handedness cannot mirror it");
+  ok(bar.indexOf("hdrBottom") < 0, "the header-position setting does not move it");
+  ok(/INTERACTIVE TUTORIAL/.test(s), "it says what it is");
+  // Exit is a real button, and it asks first - leaving clears the tutorial data.
+  const ex = s.slice(s.indexOf('"data-tutorialexit"'), s.indexOf('"data-tutorialexit"') + 600);
+  ok(/border:"1\.5px solid "\+S\.testFrameInk/.test(ex), "Exit is a button, not a label");
+  ok(/setShowTestConfirm\(true\)/.test(ex), "and it asks before leaving");
+  ok(ex.indexOf("setTestMode(false)") < 0, "never leaving without asking");
+  // Nothing still calls it test mode where a user can see it.
+  ["TEST MODE", "Exit Test Mode", "Stay in Test", "[TEST]"].forEach((w) => {
+    eq(count(new RegExp(w.replace(/[[\]]/g, "\\$&"), "g")), 0, '"' + w + '" is gone');
+  });
+  has(/\[TUTORIAL\]/, "the copy-out says TUTORIAL instead");
+  has(/testMode\?"Exit Tutorial":"Interactive Tutorial"/, "and so does the menu row");
+});
+
+test("a lane is edited in its own full-size form", () => {
+  const le = s.slice(s.indexOf("function LaneEditModal(props){"), s.indexOf("// ---- EDIT LANES MODAL"));
+  // The edit twin of New Lane: same field, same swatches, same live preview.
+  ok(/"data-lanename":true/.test(le), "a real name field, not an inline cell");
+  ok(/laneColors\(\).map/.test(le), "the full swatch grid");
+  ok(/gridTemplateColumns:"repeat\(4,1fr\)"/.test(le), "laid out four across, as New Lane is");
+  ok(/"data-lanepreview":true/.test(le), "and a live preview");
+  ok(le.indexOf('"data-lanepreview"') < le.indexOf('LABEL_STYLE }, "Color"'),
+    "the preview sits under the name, where a rename shows as it is typed");
+  // Delete must never be a neighbour of Save.
+  // The row now lives in the Modal's `actions` (the sticky box); the order
+  // written there is what ACTION_DIR() mirrors.
+  const row = le.slice(le.indexOf("React.createElement(Modal, { actions:["), le.indexOf("], title:"));
+  const iSave = row.indexOf('"data-lanesave"'), iCancel = row.indexOf(">Cancel") >= 0 ? row.indexOf("Cancel") : row.indexOf("Cancel");
+  const iDel = row.indexOf('"data-lanedelete"');
+  ok(iSave >= 0 && iDel >= 0, "both are in the one action row");
+  ok(iSave < iCancel && iCancel < iDel,
+    "written Save, Cancel, Delete - so the mirror puts Delete in the far corner");
+  ok(/flex:"0 0 auto"/.test(row), "and Delete does not claim an equal share of the row");
+  // Deleting a lane asks, and offers somewhere for its projects to go.
+  ok(/setConfirm\(true\)/.test(le), "delete asks first");
+  ok(/"data-movelane":k/.test(le), "offering to move the projects into another lane");
+  ok(/onDeleteLane\(laneKey,"delete",null\)/.test(le), "or to take them with it, said plainly");
+  ok(/inside\.length===0 \? "This lane is empty\."/.test(le), "and it says how many are inside");
+});
+
+test("Save sits under the thumb and Cancel away from it", () => {
+  // Children are always written Save first, Cancel second; the flex direction
+  // does the mirroring. Right-handed puts Save on the right, left-handed on
+  // the left. It was the other way round, which put Cancel under the thumb.
+  eq(count(/function ACTION_DIR\(\)\{/g), 1, "one rule for the direction");
+  // The app root flips to dir="rtl" for a left-hander and that mirrors every
+  // flex row already. ACTION_DIR used to flip too, and the two cancelled: Save
+  // sat on the right for BOTH hands. It is a constant row-reverse now.
+  has(/function ACTION_DIR\(\)\{ return "row-reverse"; \}/, "and it is the right way round - one mirror, not two");
+  const ma = s.slice(s.indexOf("function ModalActions(props){"), s.indexOf("function MODAL_CANCEL"));
+  ok(ma.indexOf("flexDirection: ACTION_DIR()") >= 0, "the shared action bar reads the rule");
+  eq((ma.match(/UI\.left/g) || []).length, 0, "and does not decide for itself");
+  // Hand-rolled Save+Cancel rows must read it too, or they mirror the wrong way
+  // on one hand while the shared bar mirrors the right way.
+  // Grows as new modals supply their own action row; what matters is that
+  // every Save+Cancel pair reads the shared rule rather than hardcoding one.
+  // No hand-rolled pairs remain: every sheet hands its buttons to Modal's
+  // `actions`, and ModalActions applies ACTION_DIR() once for all of them.
+  eq(count(/style:ACTION_ROW\(\)/g), 0, "no hand-rolled pair remains");
+  ok(/flexDirection: ACTION_DIR\(\)/.test(s.slice(s.indexOf("function ModalActions(props){"))), "the shared box reads the rule");
+  const pairs = [...s.matchAll(/React\.createElement\("div", \{ style:\{display:"flex",gap:"0\.5rem"\}/g)];
+  pairs.forEach((m) => {
+    const tail = s.slice(m.index, m.index + 1400);
+    // A flex row that is NOT an action row (a date/time pair, say) may sit
+    // above a proper ACTION_ROW(); only a MODAL_CANCEL with no ACTION_ROW
+    // before it is a hardcoded pair.
+    const c = tail.indexOf("MODAL_CANCEL()"), a = tail.indexOf("ACTION_ROW()");
+    ok(c < 0 || (a >= 0 && a < c),
+      "no Save+Cancel pair is left with a hardcoded direction");
+  });
+  // Save must come first in source everywhere, or the mirroring inverts it.
+  ["ModalActions"].forEach(() => {
+    const bar = s.indexOf("!props.ownActions && React.createElement(ModalActions");
+    const seg = s.slice(bar, bar + 420);
+    ok(seg.indexOf("props.onSave") < seg.indexOf("props.onClose"),
+      "the shared bar lists Save before Cancel");
+  });
+});
+
+test("modal action buttons are big enough and heavy enough to read", () => {
+  eq(count(/var MODAL_BTN_FONT = "1\.05rem";/g), 1, "one size for all of them");
+  const c = s.slice(s.indexOf("function MODAL_CANCEL()"), s.indexOf("var MODAL_BTN_FONT"));
+  ok(/fontWeight:700/.test(c), "Cancel is bold - it was inheriting normal weight");
+  ok(/fontSize:MODAL_BTN_FONT/.test(c), "and takes the shared size");
+  const v = s.slice(s.indexOf("function MODAL_SAVE()"), s.indexOf("function MODAL_SAVE()") + 400);
+  ok(/fontWeight:700/.test(v) && /fontSize:MODAL_BTN_FONT/.test(v), "so does Save");
+  // Nothing paired with a Cancel may sit at the old smaller size.
+  eq((s.match(/fontSize:"0\.95rem"\} \}, "Save Stages"\)/g) || []).length, 0,
+    "no action button left behind at 0.95rem");
+  ok(count(/fontSize:MODAL_BTN_FONT/g) >= 8, "every action button reads the shared size");
+});
+
+test("a modal that names a menu row wears that row's glyph", () => {
+  eq(count(/var MODAL_GLYPHS = \{/g), 1, "one title-to-glyph map");
+  eq(count(/function ModalGlyph\(props\)\{/g), 1, "one component reads it");
+  const map = s.slice(s.indexOf("var MODAL_GLYPHS = {"), s.indexOf("function ModalGlyph(props){"));
+  // Every glyph named here must exist, or the title silently renders bare.
+  const tbl = s.slice(s.indexOf("var MENU_GLYPHS = {"), s.indexOf("var MODAL_GLYPHS = {"));
+  [...map.matchAll(/:"([a-z]+)"/g)].map((m) => m[1]).forEach((g) => {
+    ok(g === "interface" || new RegExp('(^|\\s)"?' + g + '"?:').test(tbl),
+      g + " is a glyph that exists");
+  });
+  // Every title named here must be a real modal title, or the entry is dead.
+  // Titles are sometimes chosen inline - title:x?"Edit Task":"Edit Project" -
+  // so the literal need not sit directly after "title:". Requiring that it did
+  // failed three correct entries.
+  [...map.matchAll(/"([^"]+)":"[a-z]+"/g)].map((m) => m[1]).forEach((t) => {
+    ok(s.indexOf('"' + t + '"') >= 0, '"' + t + '" is a title some modal actually uses');
+  });
+  // Prefix entries exist for titles that carry a record's name.
+  const pfx = s.slice(s.indexOf("var MODAL_GLYPH_PREFIX"), s.indexOf("var MODAL_GLYPHS"));
+  ok(/\["Stages - ","stages"\]/.test(pfx), "the stages sheet is matched on its opening");
+  const mg2 = s.slice(s.indexOf("function ModalGlyph(props){"), s.indexOf("function MenuIcon(props){"));
+  ok(mg2.indexOf("MODAL_GLYPHS[title]") < mg2.indexOf("MODAL_GLYPH_PREFIX"),
+    "an exact title always beats a prefix that happens to cover it");
+  // Titles that never came from a menu row stay bare: a confirmation or a
+  // picker wearing a menu glyph would claim to be a screen it is not.
+  ["Match Tasks?","Regular or Overtime?","New Start Time","Delete lane","Not Started Yet"]
+    .forEach((t) => ok(map.indexOf('"' + t + '"') < 0, '"' + t + '" stays bare'));
+  const mg = s.slice(s.indexOf("function ModalGlyph(props){"), s.indexOf("function MenuIcon(props){"));
+  ok(/if\(!name\) return null;/.test(mg), "an unmapped title renders nothing at all");
+  // Both branches, not just whichever one the regex happens to hit first.
+  const sizes = [...mg.matchAll(/size:(\d+)/g)].map((m) => Number(m[1]));
+  eq(sizes.length, 2, "both branches declare a size");
+  ok(sizes.every((n) => n === 20), "sized to the title, not to the menu row");
+});
+
+test("title glyphs are written first and let the mirror do the rest", () => {
+  // The board sits inside dir=rtl when left-handed, so a flex row already lays
+  // its children right to left. Writing the glyph first is all that is needed
+  // for it to land after the title on that hand. A UI.left conditional here
+  // cancels the mirror out and pins the glyph to one side on both - which is
+  // what the modal header was doing until this was measured in a browser.
+  eq(count(/function TitleGlyph\(props\)\{/g), 1, "one component for a title glyph");
+  const tg = s.slice(s.indexOf("function TitleGlyph(props){"), s.indexOf("function ModalGlyph(props){"));
+  ok(tg.indexOf("UI.left") < 0, "it does not try to mirror itself");
+  const h0 = s.indexOf('justifyContent:UI.left?"flex-end":"flex-start"');
+  const hdr = s.slice(h0, s.indexOf("props.children", h0));
+  eq((hdr.match(/React\.createElement\(ModalGlyph/g) || []).length, 1,
+    "the modal header mounts its glyph once, unconditionally");
+  ok(hdr.indexOf("ModalGlyph") < hdr.indexOf("props.title)"),
+    "and writes it before the title");
+  ok(hdr.indexOf("UI.left ?") < 0, "with no conditional left to fight the mirror");
+  // Lanes, projects and tasks each lead with their own glyph.
+  [["lanes", "meta.accent"], ["project", "titleCol"], ["task", "titleCol"]].forEach(([n]) => {
+    ok(new RegExp('TitleGlyph, \\{ name:"' + n + '"').test(s), n + " titles carry a glyph");
+  });
+  eq(count(/React\.createElement\(TitleGlyph, \{/g), 3, "three title sites, no more");
+});
+
+test("nothing is left drawing its own chrome glyph", () => {
+  // GearSVG was the one glyph in the set that was filled rather than stroked.
+  // It survives for two non-menu uses; the menu and the header must not be
+  // among them, or the family is inconsistent again.
+  const i = s.indexOf('menuOpen && React.createElement("div", { dir:"ltr", "data-surface":"menu"');
+  const menu = s.slice(i, s.indexOf("// CLOCK button", i));
+  ok(menu.indexOf("GearSVG") < 0, "no gear left in the settings menu");
+  const hdr = s.slice(s.indexOf("// SETTINGS MENU button"), i);
+  ok(hdr.indexOf('MenuIcon, { name:"more"') >= 0, "the header button uses the hamburger");
+  ok(hdr.indexOf("GearSVG") < 0, "and not the gear");
+});
+
+test("the Interface group has its own icon", () => {
+  eq(count(/function TouchSVG\(props\)\{/g), 1, "TouchSVG is declared once");
+  const ic = s.slice(s.indexOf("function TouchSVG(props){"), s.indexOf("// The settings menu reads"));
+  ok(/viewBox:"0 0 28 28"/.test(ic), "on the same 28-unit grid as the clock glyph");
+  ok(/fill:"none"/.test(ic), "stroked, not filled, like the rest");
+  // The hand is drawn on its own grid and scaled down, so its stroke is
+  // pre-divided to land back on 2.5. Asserting the literal 2.5 would fail on a
+  // correct icon; asserting the arithmetic is what actually holds the weight.
+  ok(/var TOUCH_SCALE = 0\.\d+;/.test(s), "the hand's scale is a named constant");
+  ok(/\(2\.5\/TOUCH_SCALE\)/.test(ic), "and its stroke is divided by that same scale");
+  ok(/scale\("\+TOUCH_SCALE\+"\)/.test(ic),
+    "the transform reads the constant too, so the two cannot drift apart");
+  const scale = Number((s.match(/var TOUCH_SCALE = (0\.\d+);/) || [])[1]);
+  ok(scale > 0 && Math.abs((2.5 / scale) * scale - 2.5) < 1e-9,
+    "so the hand renders at the shared 2.5 weight");
+  ok(/strokeLinejoin:"round"/.test(ic), "joins are round like the rest of the set");
+  // The ripples are thinner than the hand on purpose, and both must stay under
+  // it - a ripple at full weight competes with the finger it comes off.
+  const rw = [...ic.matchAll(/strokeWidth:"(\d\.\d)"/g)].map((m) => Number(m[1]));
+  eq(rw.length, 2, "two ripples, and only two");
+  ok(rw.every((w) => w > 0 && w < 2.5), "each lighter than the hand");
+  ok(rw[0] > rw[1], "and the outer one lighter than the inner it spreads from");
+  // The glyph once shipped clipped: the artwork measured 28.1 x 23.3 units in a
+  // 28 box and lost its corner. Nothing here caught it, because the bounding
+  // box of a rotated hand plus two arcs is nowhere near the numbers written in
+  // the path data. This checks what can be checked without rasterising - the
+  // ripples, whose extents are just centre plus radius plus half the stroke.
+  // The hand still needs an eye on a render; see HANDOVER.
+  const cen = ic.match(/translate\((\d+\.?\d*),(\d+\.?\d*)\) rotate\(-45\)/);
+  ok(!!cen, "the composition declares its anchor point");
+  const [ax, ay] = cen ? [Number(cen[1]), Number(cen[2])] : [0, 0];
+  const arcs = [...ic.matchAll(/A(\d+\.?\d*) \d+\.?\d* 0 1 1/g)].map((m) => Number(m[1]));
+  eq(arcs.length, 2, "two ripple radii declared");
+  arcs.forEach((r, i) => {
+    const reach = r + rw[i] / 2;
+    ok(ax - reach >= 0 && ax + reach <= 28 && ay - reach >= 0 && ay + reach <= 28,
+      "ripple " + (i + 1) + " stays inside the 28-unit box");
+  });
+  ok(ic.indexOf("props.col||S.chromeText") >= 0, "and it takes its colour from the caller");
+  // Two uses now: the menu row, and the Interface modal's own title. Both are
+  // the same screen, which is the point - anything beyond those two means the
+  // glyph has been borrowed for something it does not name.
+  eq(count(/React\.createElement\(TouchSVG,/g), 2, "used in exactly two places");
+  ok(s.slice(s.indexOf('"data-menugroup":"interface"'), s.indexOf('"Interface"',
+      s.indexOf('"data-menugroup":"interface"'))).indexOf("TouchSVG") >= 0,
+    "one is the Interface row");
+  ok(s.slice(s.indexOf("function ModalGlyph(props){"), s.indexOf("function MenuIcon(props){"))
+      .indexOf("TouchSVG") >= 0, "the other is its modal title");
 });
 
 // ---- Phase 1 changes nothing visible ----------------------------------------
@@ -794,7 +1834,14 @@ test("the stacking chain is intact", () => {
   ok(/zIndex:900/.test(modal.slice(0, 800)), "the core Modal still owns 900");
   // Module screens use the core Modal, so they inherit 900 rather than
   // inventing a layer of their own.
-  eq(count(/zIndex:9[0-9][0-9]/g), 2, "nothing new was added above the modal layer");
+  // The outline's controller is pinned above its own sheet and below the
+  // toast: 900 modal, 920 controller, 950 toast. Three layers, named, so a
+  // fourth cannot appear without this failing.
+  has(/zIndex:920/, "the outline controller at 920");
+  eq(count(/zIndex:9[0-9][0-9]/g), 3, "and nothing else above the modal layer");
+  const ctrlZ = s.indexOf("zIndex:920");
+  ok(ctrlZ > s.indexOf('"data-controller":true') && ctrlZ - s.indexOf('"data-controller":true') < 400,
+    "920 belongs to the controller and nothing else");
 });
 
 test("time increment and backup rules still hold", () => {
@@ -811,8 +1858,17 @@ test("every day-scoped surface reads the same work day", () => {
   has(/function workDayOf\(ts\)\{/, "there is one work-day function");
   has(/function sameWorkDay\(ts, dayKey\)\{/, "and one comparison built on it");
   has(/function todayStr\(\)\{ return workDayOf\(Date\.now\(\)\); \}/, "today goes through it too");
-  // Exactly one toDateString in the file, and it is inside workDayOf.
-  eq(count(/toDateString\(\)/g), 2, "no surface does its own date maths");
+  // Exactly one toDateString among the SURFACES, and it is inside workDayOf.
+  // The tutorial's seed data is excluded: it fabricates records at fixed
+  // offsets from today and has to stamp their day key at build time, which is
+  // not a surface reading the clock.
+  const seedStart = s.indexOf("// ---- SAMPLE DATA ---");
+  const seedEnd = s.indexOf("// ---- HOOKS ---");
+  const noSeed = s.slice(0, seedStart) + s.slice(seedEnd);
+  eq((noSeed.match(/toDateString\(\)/g) || []).length, 2, "no surface does its own date maths");
+  // And the seed only stamps days on records it is inventing.
+  const seed = s.slice(seedStart, seedEnd);
+  ok((seed.match(/toDateString\(\)/g) || []).length <= 3, "the seed stamps a day key and nothing more");
   const decl = s.slice(s.indexOf("function workDayOf(ts){"));
   ok(decl.indexOf("toDateString()") < 60, "the only live one is workDayOf's own");
 });
@@ -847,13 +1903,48 @@ test("a session survives midnight but not a week", () => {
 });
 
 test("nothing starts until the shift question is answered", () => {
-  has(/if\(auto===null\)\{ askWorkDay\(now, function\(day, ot\)\{ commitClockIn\(now, day, ot\); \}\); return false; \}/,
-    "an unresolved clock-in defers instead of guessing");
-  has(/if\(!atWorkStart && !clockIn\(\)\) return;/,
-    "and starting a project on a deferred clock-in stops too");
+  // Two halves, and the second one was missing: nothing may start before the
+  // question is answered, AND the thing the user tapped has to happen once it
+  // is. The board used to come back with nothing running and no sign the tap
+  // had been dropped.
+  has(/askWorkDay\(now, function\(day, ot\)\{ commitClockIn\(now, day, ot\); if\(then\) then\(now\); \}\);/,
+    "an unresolved clock-in defers, then resumes what was asked for");
+  has(/return false;/, "and still reports that it deferred");
+  has(/if\(!atWorkStart\)\{ clockIn\(function\(at\)\{ runToggle\(id, at\); \}\); return; \}/,
+    "a tap on a project hands itself to the clock-in as the continuation");
+  has(/function runToggle\(id, now\)\{/, "the start itself is separable from the gate");
+  // Both clock-in paths must call back, or the sync path silently does nothing.
+  const ci = s.slice(s.indexOf("function clockIn(then){"), s.indexOf("function commitClockIn"));
+  eq((ci.match(/if\(then\) then\(now\)/g) || []).length, 2,
+    "both the deferred and the immediate path resume the caller");
+  ok(ci.indexOf("commitClockIn(now, auto, null);") < ci.lastIndexOf("if(then) then(now)"),
+    "and the immediate path clocks in before resuming");
   // Every record that carries time must carry the day it was filed under.
   eq(count(/day:curDay\(\)/g), 3, "project logs, disruptions and breaks are all stamped");
   has(/\{id:uid\(\),day:day,projectId:null,projectName:"At Work"/, "and so is the clock-in itself");
+});
+
+test("clocking out lands on Reports for the day just finished", () => {
+  eq(count(/function openReports\(kind\)\{/g), 1, "one way into Reports");
+  const co = s.slice(s.indexOf("function clockOut(){"), s.indexOf("function openReports"));
+  ok(co.indexOf('openReports("day")') >= 0, "clock-out opens it on the day");
+  ok(co.indexOf("setShowDay(true)") < 0, "and no longer on the copy-out sheet");
+  // Everything that ends the shift must still be closed off first, or the
+  // report is built from a day that is not finished yet.
+  ["finalizeProject(now)", "closeDisruption(now)", "endBreak()"].forEach((c) => {
+    ok(co.indexOf(c) >= 0 && co.indexOf(c) < co.indexOf('openReports("day")'),
+      c + " runs before Reports opens");
+  });
+  ok(co.indexOf("setAtWorkStart(null)") < co.indexOf('openReports("day")'),
+    "and the clock is stopped first");
+  // The modal reads its period once on mount, so a stale value would make the
+  // menu open on whatever was used last.
+  eq(count(/openReports\("week"\)/g), 1, "the menu entry states its own period");
+  has(/initialKind:reportsKind/, "and the modal is told which to use");
+  eq(count(/setShowReports\(true\)/g), 1, "only openReports opens it");
+  // Day Summary is not orphaned - it is still on the ticker.
+  ok(count(/setShowDay\(true\)/g) >= 1, "the day sheet is still reachable");
+  has(/showDay && React\.createElement\(DaySummary/, "and still mounted");
 });
 
 test("an off-roster day raises the pay question, and only then", () => {
@@ -918,14 +2009,29 @@ test("nesting a project does not demote it to a task", () => {
     "and falling back to the old rule for records written before it existed");
   // The edit form must not re-derive it, or moving a project under another
   // would flip it back to a task on save.
-  has(/return project \? projRole\(project\) : \(\(defaultParentId\|\|null\)!=null \? "task" : "project"\);/,
-    "an existing project keeps what it already is");
-  has(/role: pid==null \? "project" : role/, "and only a top-level save forces project");
+  has(/if\(project\) return projRole\(project\);/, "an existing project keeps what it already is");
+  has(/if\(props\.defaultRole\) return props\.defaultRole;/,
+    "a caller asking for a nested project gets one");
+  has(/return \(defaultParentId\|\|null\)!=null \? "task" : "project";/,
+    "and without a request, nesting still implies a task");
+  // Placement now saves only when the form owns it - opened from the outline
+  // these keys are omitted so the panel cannot overwrite an arrangement the
+  // outline is still holding.
+  has(/out\.role = pid==null \? "project" : role;/, "and only a top-level save forces project");
+  has(/if\(props\.structure!==false\)\{/, "placement is written only when the form owns it");
+  const sub = s.slice(s.indexOf("function submit(){"), s.indexOf("var hintStyle"));
+  ok(sub.indexOf("out.lane=lane") > sub.indexOf("if(props.structure!==false)"),
+    "lane, parent and role all sit inside that branch");
+  ok(/name:name\.trim\(\), notes:notes\.trim\(\), kind:kind,/.test(sub),
+    "while name, notes and type always save");
   has(/keys:\["task","project"\], value:role/, "with a toggle to choose when nested");
 });
 
 test("a nested project draws as a card tucked under its parent", () => {
-  has(/var childTasks=subTasks\.filter\(isTaskRole\);/, "tasks and nested projects are separated");
+  // Two lists: what is DRAWN (finished work included, sunk to the end) and
+  // what is COUNTED (live only - a finished task is not outstanding).
+  has(/var childTasksAll=subTasks\.filter\(isTaskRole\)\.slice\(\)\.sort\(sinkClosed\);/, "tasks and nested projects are separated");
+  has(/var childTasks=childTasksAll\.filter\(isOpen\);/, "and the counted list drops the finished ones");
   has(/var childProjects=subTasks\.filter\(isProjectRole\)/, "and drawn differently");
   has(/React\.createElement\(ProjectCard, \{\n\s*key:child\.id, proj:child, nestDepth:nestDepth\+1,/,
     "a nested project gets the full card, recursively");
@@ -953,13 +2059,13 @@ test("a nested project draws as a card tucked under its parent", () => {
   has(/borderTopLeftRadius:isNestedCard\?"4px":S\.radius2/, "and the top corner squared at the join");
   has(/marginBottom:isNestedCard\?0:"0\.45rem"/, "no gap below it either");
   // Tasks still roll up under the card the way they always did.
-  has(/renderKids\(childTasks, 1\)/, "tasks stay as rows inside the card");
+  has(/renderKids\(childTasksAll, 1\)/, "tasks stay as rows inside the card, finished ones included");
 });
 
 test("the collapsed card can see everything it reads", () => {
   const src = source();
   const card = src.slice(src.indexOf("function ProjectCard(props){"));
-  const decl = card.indexOf("var childTasks=subTasks.filter(isTaskRole);");
+  const decl = card.indexOf("var childTasksAll=subTasks.filter(isTaskRole)");
   const early = card.indexOf("if(cardCollapsed){");
   ok(decl >= 0 && early >= 0, "both the declaration and the early return exist");
   ok(decl < early,
@@ -998,6 +2104,9 @@ test("a collapsed nested pill clears its parent and hides what is under it", () 
     "with the themed tint painted over it, so the colour survives");
   has(/opacity:isNestedCard\?1:0\.92/, "and fully opaque, since 0.92 leaked too");
   // Both the expanded card and the collapsed pill tuck by the same 12px.
+  // The completed pill does NOT take the tuck: that headroom is for a nested
+  // CARD sitting under its parent's title, and on a slim pill it landed on
+  // the parent's bottom border.
   eq(count(/marginTop:isNestedCard\?"-12px":0/g), 2,
     "expanded card and collapsed pill are pulled up alike");
 });
@@ -1008,7 +2117,7 @@ test("a select hands back a string, and project ids are numbers", () => {
   has(/function resolveParentId\(v\)\{/, "the picked value is resolved to a real id");
   has(/return hit \? hit\.id : null;/, "by matching it against the actual projects");
   has(/var pid=resolveParentId\(parentId\);/, "and save goes through it");
-  has(/parentId:pid, kind:kind,/, "handing the resolved id on");
+  has(/out\.parentId=pid;/, "handing the resolved id on");
   ok(!/parentId:parentId\|\|null, kind:kind/.test(s), "never the raw select value");
 });
 
@@ -1020,12 +2129,26 @@ test("nesting renders recursively rather than one level deep", () => {
   has(/var isNest=kids\.length>0;/, "a row with children is a project, by structure not by a flag");
   has(/var canNest=depth < MAX_NEST_DEPTH-1;/, "and stops offering to nest at the cap");
   // Counting: "3 tasks" is wrong the moment one of them has work under it.
-  has(/var nested = deepCount > childTasks\.length;/, "the card notices when it is deeper than one level");
-  has(/countLabel = nested \? \(deepCount\+" nested"\)/, "and says so");
+  has(/var nested = deepAll\.length > childTasksAll\.length;/, "the card notices when it is deeper than one level");
+  // The count is of what is THERE, not what is left: an outstanding-only
+  // count read "0 tasks" once everything was done, the expander vanished, and
+  // the finished tasks it hid could never be reopened. How many are done is
+  // said alongside.
+  has(/var countLabel = \(nested \? \(totalTasks\+" nested"\) : \(totalTasks\+" task"\+\(totalTasks!==1\?"s":""\)\)\)/, "and says so");
+  has(/\+ \(doneTasks>0 \? " \\u00b7 "\+doneTasks\+" done" : ""\);/, "with how many of them are finished");
+  eq(count(/childTasksAll\.length>0/g), 4, "and every gate that opens the contents counts what is there, not what is left");
 });
 
 test("closing out is not deleting, and the board knows the difference", () => {
-  has(/var liveProjects=openProjects\(projects\);/, "one filtered list feeds the board");
+  // The board no longer drops finished records: they stay as a greyed,
+  // minimised pill, because a record vanishing the moment it is completed
+  // gives no confirmation that anything happened. Counts filter locally.
+  has(/var liveProjects=projects;/, "the board keeps finished records");
+  has(/if\(isClosed\(proj\)\)\{/, "a finished project draws as a completed pill");
+  has(/if\(isClosed\(sub\)\)\{/, "and a finished task as a completed row");
+  eq(count(/"data-donetag":true/g), 2, "both say so next to the name");
+  eq(count(/"data-reopen":(proj|sub)\.id/g), 2, "and both are HELD to reopen");
+  ok(!/onClick:function\(\)\{ if\(props\.onReopen\)/.test(s), "reopening is never a plain tap");
   has(/allProjects:liveProjects/, "the lanes get it");
   has(/parents:liveProjects/, "and so do the parent pickers, twice over");
   eq(count(/parents:liveProjects/g), 2, "add and edit both");
@@ -1037,8 +2160,20 @@ test("closing out is not deleting, and the board knows the difference", () => {
 });
 
 test("a close stamps the record and touches nothing else", () => {
-  has(/return p\.id===proj\.id \? Object\.assign\(\{\},p,\{ closedAt:at, closedNote:note\|\|"" \}\) : p;/,
-    "only the one project changes");
+  // The closed record gets when, note and OUTCOME. Open children are never
+  // silently hidden: they are closed with it, or moved up a level - the
+  // sheet asks which.
+  has(/if\(p\.id===proj\.id\) return Object\.assign\(\{\},p,\{ closedAt:at, closedNote:opts\.note\|\|"", closedOutcome:opts\.outcome\|\|"done" \}\);/,
+    "the record is stamped with when, note and outcome");
+  has(/var at = opts\.at \|\| Date\.now\(\), res = opts\.resolutions \|\| \{\};/, "and when is the sheet's time, defaulting to now");
+  has(/if\(openKids\.some\(function\(id\)\{ return !res\[id\]; \}\)\) return;/,
+    "an undecided child stops the close outright - belt and braces behind the sheet");
+  has(/if\(r && r\.kind==="move" && p\.parentId===proj\.id\) return Object\.assign\(\{\},p,\{ parentId:r\.parentId\|\|null, lane:r\.lane\|\|p\.lane \}\);/,
+    "a moved child takes the parent and lane that were chosen");
+  has(/if\(res\[id\]\.kind==="delete"\)\{ gone\[id\]=true; getDescendantIds\(projects,id\)\.forEach\(function\(d\)\{ gone\[d\]=true; \}\); \}/,
+    "a deleted child goes with its whole subtree");
+  has(/return prev\.filter\(function\(p\)\{ return !gone\[p\.id\]; \}\)/, "removed, not hidden");
+  eq(count(/closedNote:"", closedOutcome/g), 0, "and nothing is ever closed over silently");
   has(/if\(activeId!==null&&ids\.indexOf\(activeId\)>=0\)\{ finalizeProject\(Date\.now\(\)\); \}/,
     "and a running timer is banked first rather than lost");
   ok(!/closedAt[\s\S]{0,80}setLogs/.test(s), "no log is rewritten by closing");
@@ -1051,10 +2186,17 @@ test("reopening a task brings its parent back with it", () => {
     "stopping at the first parent that is already open");
 });
 
-test("the last stage offers to close, and only for a finite project", () => {
-  has(/if\(next && readyToClose\(next\) && closeBlockers\(projects, next\)\.length===0\)\{/,
-    "the offer needs a finite project, every stage done, and nothing blocking");
-  has(/setCloseOut\(\{ proj:next, blockers:\[\] \}\);/, "and it opens the modal rather than closing outright");
+test("the last stage offers a choice: complete it, or add more stages", () => {
+  // Ticking the last stage used to jump straight to the close-out, and only
+  // for a finite project with no open children. Now it OFFERS, for any open
+  // record whose stages are all ticked: complete it, or add the stages still
+  // to come. Open children are the sheet's business, not a reason to stay quiet.
+  has(/if\(next && isOpen\(next\) && stagesAllDone\(next\)\)\{\s*setStagesDone\(next\);/,
+    "all stages ticked raises the offer, finite or ongoing, children or not");
+  eq(count(/^function StagesDoneModal\(props\)\{/gm), 1, "the offer is its own sheet");
+  ["close", "more", "later"].forEach((k) => has(new RegExp('"data-stagesdone":"' + k + '"'), "with a " + k + " choice"));
+  has(/setStagesDone\(null\); askCloseOut\(pr\); \}/, "complete-it leads to the closure sheet");
+  has(/setStagesDone\(null\); setStagesProj\(pr\); \}/, "add-more-stages leads to the stage list");
   // Two menus, two ready badges: the project card and the task row.
   eq(count(/readyToClose\(proj\)/g), 3, "the project menu shows the state");
   eq(count(/readyToClose\(sub\)/g), 3, "and so does the task menu");
@@ -1128,35 +2270,44 @@ test("no focusable field is small enough to make iOS zoom", () => {
   ok(!/user-scalable/.test(s), "nor scaling locked");
 });
 
-test("Add New asks what, and the dead accordion is gone", () => {
-  has(/"Add New\\u2026"/, "the row is labelled Add New with an ellipsis");
-  ok(!/"Add New Item"/.test(s), "the old label is gone");
-  ok(!/addMenuOpen/.test(s), "and so is the accordion state, not left write-only");
-  ok(!/addMenuRef/.test(s), "including its outside-click ref");
-  has(/setAddNew\(\{stage:"what"\}\)/, "the row opens the prompt");
-  has(/if\(pick\.what==="chooseLane"\)\{ setAddNew\(\{stage:"lane"\}\); return; \}/, "project leads to a lane pick");
-  has(/if\(pick\.what==="chooseProject"\)\{ setAddNew\(\{stage:"project"\}\); return; \}/, "task leads to a project pick");
-  has(/setShowAdd\(\{ lane:pick\.lane, parentId:pick\.parentId\|\|null \}\);/,
-    "and both end in the same add form");
-  has(/projects:liveProjects/, "only open projects can be picked as a parent");
-  // Edit Lanes was buried in the accordion; it is not an add, so it stands alone.
-  has(/onClick:function\(\)\{ closeAllPopups\(\); setShowEditLanes\(true\); \},\n\s*style:\{display:"flex",alignItems:"center",gap:"0\.5rem",width:"100%"/,
-    "Edit Lanes has its own settings row now the accordion is gone");
-  eq(count(/"Edit Lanes"/g), 3, "the modal title and the lane's own menu keep theirs");
+test("the settings menu has no Add New row, and no dead chooser behind it", () => {
+  // Removed at Brent's request. The chooser had exactly one entry point, so
+  // taking the row out left the modal unreachable - dead code with state, the
+  // thing this suite exists to catch. Component, state and mount all went.
+  ok(!/"Add New/.test(s), "no Add New row");
+  ok(!/function AddNewModal\(props\)\{/.test(s), "no chooser component");
+  ok(!/addNew/.test(s), "no state left write-only");
+  ok(!/addMenuOpen/.test(s) && !/addMenuRef/.test(s), "and none of the older accordion either");
+  // Adding is still reachable from the board and the outline: a lane header's
+  // menu, a card's menu, and every row menu in the outline.
+  has(/rowMenuItems\(kind, role, a\)/, "row menus still offer New lane / project / task");
 });
 
 test("the project form calls a task a task", () => {
   has(/var noun = \(parentId!=null && role==="task"\) \? "Task" : "Project";/,
     "the noun follows the live parent selection and the chosen role");
-  has(/project\?"Save Changes":\("Add "\+noun\)/, "the primary button uses it");
-  has(/\}, "Delete "\+noun\)/, "and so does the destructive one");
+  // Editing says only "Save" - the modal title already names the subject, and
+  // every sheet in the app says the same word. Creating still names the thing,
+  // because "Add Task" says something "Save" does not.
+  has(/project\?"Save":\("Add "\+noun\)/, "creating uses the noun, editing just says Save");
+  // No sheet may reintroduce a bespoke save label.
+  ["Save Changes","Save Lane","Save Lanes","Save Layout","Save List","Save Stages",
+   "Save Start Time","Save Schedule"].forEach((lbl) => {
+    eq(count(new RegExp('"' + lbl + '"', "g")), 0, '"' + lbl + '" is gone');
+  });
+  has(/\} \},\s*"Delete "\+noun\)/, "and so does the destructive one");
   ok(!/"Add Project"/.test(s), "nothing hard-codes Add Project any more");
   ok(!/\}, "Delete Project"\)/.test(s), "nor a hard-coded Delete Project on a form button");
   // The delete-confirmation modal already branched correctly and keeps its own
   // wording, including the count of tasks that go down with a parent.
   has(/title:isSub\?"Delete Task":"Delete Project"/, "the confirmation modal is unaffected");
   // The modal title already branched on this; the buttons inside it did not.
-  has(/title:showAdd\.parentId\?"Add Task":"Add to "/, "the title still agrees with them");
+  // Three titles now: adding into a lane, adding a nested project, adding a
+  // task. Nesting alone cannot tell the last two apart - the caller says which.
+  has(/title:!showAdd\.parentId \? \("Add to "\+\(getMeta\(laneMeta,showAdd\.lane\)\.label\)\)/,
+    "adding into a lane names the lane");
+  has(/showAdd\.role==="project" \? "Add Nested Project" : "Add Task"/,
+    "and a nested add says which of the two it is");
 });
 
 test("hexDarken is the mirror of hexBrighten", () => {

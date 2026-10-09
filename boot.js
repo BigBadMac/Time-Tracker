@@ -1,8 +1,5 @@
 // boot.js - evaluate the built app payload with React and a stub DOM, render
-// App once, and confirm the platform came up. Not a substitute for Playwright;
-// it does prove the file loads, the platform registers, and App still renders.
-// Phase 3 adds the Tool Tracker: this is the only place its screen is rendered
-// against the real tokens, the real Modal and the real formatters.
+// App once, and confirm the platform came up.
 const fs = require("fs");
 const React = require("react");
 const { renderToStaticMarkup } = require("react-dom/server");
@@ -35,7 +32,6 @@ ok.push(["TT exists", !!out.TT]);
 ok.push(["contract v1", out.TT && out.TT.version === 1]);
 ok.push(["window.TT published", win.TT === out.TT]);
 
-// ---- what ships in this build ----
 const mods = out.TT.modules();
 ok.push(["exactly one module ships", mods.length === 1]);
 ok.push(["and it is Tool Tracker", mods[0] && mods[0].id === "tools"]);
@@ -43,7 +39,6 @@ ok.push(["off until the user says otherwise", out.TT.isEnabled("tools") === fals
 ok.push(["so the settings menu has no module row", out.TT.nav().length === 0]);
 ok.push(["and Reports is unchanged", out.TT.reportSections({}).length === 0 && out.TT.reportText({}).length === 0]);
 
-// ---- boot normalizers run for a module that is switched off ----
 const ran = out.TT.boot();
 ok.push(["the tools normalizer ran at boot", ran.indexOf("tools") >= 0]);
 ok.push(["it laid down its empty shape", localStorage.getItem("tt_mod_tools_tools") === "[]"]);
@@ -51,7 +46,6 @@ ok.push(["stamped its schema", localStorage.getItem("tt_mod_tools_schema") === "
 ok.push(["and wrote nothing outside its namespace",
   Array.from(store.keys()).every((k) => k.indexOf("tt_mod_tools_") === 0)]);
 
-// ---- the Extensions screen sees it ----
 try {
   const ext = renderToStaticMarkup(React.createElement(out.ExtensionsModal, { onClose(){}, onChange(){} }));
   has(ext, "Tool Tracker", "Extensions lists Tool Tracker");
@@ -60,7 +54,6 @@ try {
   ok.push(["and it reads as Off", /aria-checked="true"[^>]*>Off</.test(ext)]);
 } catch (e) { ok.push(["Extensions renders", false]); console.log("   " + e.message); }
 
-// ---- switch it on ----
 out.TT.setEnabled("tools", true);
 const nav = out.TT.nav();
 ok.push(["the menu row appears", nav.length === 1 && nav[0].label === "Tools"]);
@@ -68,7 +61,6 @@ ok.push(["under the Modules group", nav[0] && nav[0].group === "Modules"]);
 const Screen = out.TT.screen("tools", nav[0] ? nav[0].screen : "main");
 ok.push(["nav.screen resolves to a component", typeof Screen === "function"]);
 
-// ---- the Tools screen, for real ----
 const HOUR = 3600000, T0 = Date.now() - 5 * HOUR;
 const st = out.TT.storage("tools");
 st.set("tools", [
@@ -108,7 +100,6 @@ has(screen, "History", "the History tab is offered");
 ok.push(["it mounts one modal, not two", (screen.match(/data-surface="modal"/g) || []).length === 1]);
 ok.push(["and invents no layer above the core modal", !/z-index:9[1-9][0-9]/.test(screen)]);
 
-// The sheets, rendered directly, since their open state lives inside the screen.
 let sheet = "";
 try {
   sheet = renderToStaticMarkup(React.createElement(out.ToolsCheckoutSheet, {
@@ -135,7 +126,6 @@ ok.push(["the editor sheet renders", editor.indexOf("ERR:") !== 0]);
 has(editor, "Edit Tool", "titled for editing an existing tool");
 has(editor, "Remove this tool", "with a way out");
 
-// ---- Reports contribution ----
 const range = { start: T0 - HOUR, end: Date.now() };
 const lines = out.TT.reportText({ kind: "day", range, now: Date.now() });
 ok.push(["Reports gains tool lines", lines.length === 3 && /^Tool checkouts: 2$/.test(lines[0])]);
@@ -147,24 +137,17 @@ try { secHtml = renderToStaticMarkup(secs[0].el); } catch (e) { secHtml = "ERR:"
 has(secHtml, "2 checkouts", "the section counts them");
 has(secHtml, "1 still out", "and flags the one outstanding");
 
-// Back off again for the App render: the board must look exactly as it did.
 out.TT.setEnabled("tools", false);
 
-// ---- App still renders, unchanged ----
 let rendered = null;
 try { rendered = renderToStaticMarkup(React.createElement(out.App)); }
 catch (e) { rendered = "ERR:" + e.message; }
 ok.push(["App renders", typeof rendered === "string" && rendered.indexOf("ERR:") !== 0]);
 ok.push(["board painted", typeof rendered === "string" && rendered.length > 2000]);
-ok.push(["lanes painted", typeof rendered === "string" && rendered.indexOf("Daily Activities") >= 0]);
+ok.push(["lanes painted", typeof rendered === "string" && rendered.indexOf("First Lane") >= 0]);
 ok.push(["no module group header leaked onto the board", typeof rendered === "string" && rendered.indexOf(">Modules<") < 0]);
 ok.push(["no module overlay mounted", typeof rendered === "string" && rendered.indexOf("data-surface=\"modal\"") < 0]);
 
-// ---- the board, with real logs and disruptions behind it ----
-// The badge arithmetic is unit-tested; this proves the wiring reaches the card.
-// Anchored to the start of today rather than to "an hour ago": run this at
-// 00:18 and an hour ago is yesterday, which used to fail the fixture rather
-// than the code.
 const DAY = 86400000, NOW = Date.now();
 const T = new Date(); T.setHours(0, 1, 0, 0);
 const TODAY0 = T.getTime();
@@ -181,7 +164,6 @@ localStorage.setItem("tt_logs", JSON.stringify([
     type: "project", startTime: TODAY0, endTime: TODAY0 + 3600000, duration: 3600000,
     parentId: null, parentName: null }
 ]));
-// Two today (10m + 5m on the parent, 4m on the sub-task) and two from days ago.
 localStorage.setItem("tt_disruptions", JSON.stringify([
   { id: "d1", projectId: 1, projectName: "Label Printing", startTime: TODAY0 + 60000,  endTime: TODAY0 + 660000,  duration: 600000 },
   { id: "d2", projectId: 1, projectName: "Label Printing", startTime: TODAY0 + 120000, endTime: TODAY0 + 420000,  duration: 300000 },
@@ -205,8 +187,6 @@ has(board, 'aria-label="Disruptions: 3 today, 5 in total"', "the parent rolls up
 has(board, 'aria-label="Disruptions: 1 today, 2 in total"', "the sub-task reports only its own");
 has(board, 'aria-label="Disruptions: 0 today, 1 in total"',
   "a project disrupted only in the past still shows its history on a clean day");
-// Parent = its own 10m + 5m plus the sub-task's 4m, so 19m today; lifetime adds
-// the 15m from three days ago and the sub-task's 10m from five days ago.
 has(board, ">3 19m 00s<", "today's lost time on the parent, rolled up");
 has(board, ">5 44m 00s<", "and the lifetime total beside it");
 has(board, ">1 4m 00s<", "the sub-task's own figure for today");
@@ -217,10 +197,6 @@ ok.push(["the running total is never smaller than today's figure",
     return m && Number(m[1]) <= Number(m[2]);
   })]);
 
-// ---- collapsing a card, at every level ----
-// The collapsed pill is an early return that reads variables declared further
-// down the component. `var` hoists the name and not the value, so from up there
-// they were undefined and minimising a nested card threw.
 const P = (id, n, pid, o, role) => ({ id: id, name: n, lane: "Projects", notes: "",
   order: o || 0, parentId: pid, role: role || "project", kind: "finite", stages: [] });
 [["nothing", {}], ["the parent", { 1: true }], ["the nested card", { 2: true }],
@@ -235,7 +211,6 @@ const P = (id, n, pid, o, role) => ({ id: id, name: n, lane: "Projects", notes: 
   catch (e) { out2 = "ERR:" + e.message; }
   ok.push(["collapsing " + label + " does not throw", out2.indexOf("ERR:") !== 0]);
   if (out2.indexOf("ERR:") === 0) console.log("   " + out2);
-  // Collapsing hides a card's own steps; it must never hide a nested project.
   ok.push(["a nested project survives collapsing " + label, out2.indexOf(">Nested Proj<") >= 0]);
 });
 
