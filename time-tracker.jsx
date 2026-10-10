@@ -572,6 +572,44 @@ function HoldFill(props){
            width:props.holding?"100%":"0%",background:props.color||S.successBg,
            transition:props.holding?("width "+props.ms+"ms linear"):"none"} });
 }
+// ---- SWIPE -------------------------------------------------------------------
+// The one swipe: lanes, project cards and task rows all collapse with it. It
+// used to be written out six times, once per place and state.
+//
+// Read on RELEASE only. It never tries to stop the page scrolling, which is
+// why it survives on iOS where drag-to-reorder never did: Safari claims a
+// moving finger for scrolling before any script sees it, but it cannot stop
+// us comparing where the finger went down with where it came up.
+//
+// `open` is for an expanded name: past SWIPE_MIN_PX either way, onSwipe gets
+// "left" or "right". `pill` is for a collapsed pill: only a right swipe counts,
+// so a left swipe on something already shut does nothing. `guard(fn)` wraps
+// the name's click so the tap a swipe would otherwise end in never opens the
+// menu as well.
+var SWIPE_MIN_PX = 50;
+function useSwipe(onSwipe){
+  var x=useRef(null), swiped=useRef(false), cb=useRef(onSwipe);
+  cb.current=onSwipe;
+  function make(rightOnly){
+    function begin(cx){ x.current=cx; swiped.current=false; }
+    function end(cx){
+      var from=x.current; x.current=null;
+      if(from===null) return;
+      var dx=cx-from;
+      if(rightOnly ? dx>SWIPE_MIN_PX : Math.abs(dx)>SWIPE_MIN_PX){
+        swiped.current=true; haptic(8); cb.current(dx<0 ? "left" : "right");
+      }
+    }
+    return {
+      onMouseDown:function(e){ begin(e.clientX); },
+      onMouseUp:function(e){ end(e.clientX); },
+      onTouchStart:function(e){ if(e.touches&&e.touches.length) begin(e.touches[0].clientX); },
+      onTouchEnd:function(e){ if(e.changedTouches&&e.changedTouches.length) end(e.changedTouches[0].clientX); else x.current=null; }
+    };
+  }
+  return { open:make(false), pill:make(true),
+    guard:function(fn){ return function(e){ if(swiped.current){ swiped.current=false; return; } fn(e); }; } };
+}
 function useTaps(onSingle, onDouble, delayMs){
   delayMs = delayMs || 300;
   var timer = useRef(null);
@@ -654,8 +692,13 @@ function MODAL_CANCEL(){ return { flex:1,background:S.bg1,border:"1px solid "+S.
 var MODAL_BTN_FONT = "1.05rem";
 function MODAL_SAVE(){ return { flex:1,background:S.infoBg,border:"2.5px solid "+S.actionBdr,borderRadius:S.radius,padding:"0.85rem",color:S.infoText,fontWeight:700,cursor:"pointer",fontFamily:S.fontBody,fontSize:MODAL_BTN_FONT }; }
 
+// A sheet drawn as a miniature inside a guide is not a live sheet: it must not
+// answer to [data-modal-panel], which tests and the app use to find the sheet
+// on top. The guide's stage provides this context; everywhere else it is false.
+var StageCtx = (React && React.createContext) ? React.createContext(false) : null;
 function Modal(props){
   var wide = props.wide;
+  var staged = (StageCtx && React.useContext) ? React.useContext(StageCtx) : false;
   return (
     React.createElement("div", {
       onClick: function(e){ if(e.target===e.currentTarget) props.onClose(); },
@@ -665,7 +708,7 @@ function Modal(props){
       React.createElement("div", { "data-surface":"modal",
         // overscroll-behavior:contain stops the sheet handing a gesture to the
         // page when it has nowhere left to scroll.
-        "data-modal-panel":true,
+        "data-modal-panel":staged?undefined:true, "data-staged":staged?true:undefined,
         // shrinkBy: while an overlay sits over the foot of the viewport (the
         // outline's controller), the sheet gives up that height rather than
         // padding under it - so a sticky action row lands ABOVE the overlay.
@@ -1435,7 +1478,11 @@ var MENU_GLYPHS = {
   // A road sign on a post, planted on a ground line with two ticks - the
   // ticks a milestone line carries along its whole length.
   milestone: [["p","M3.5 24.5H24.5",2.5], ["p","M8 24.5V21 M20 24.5V21",2.2],
-              ["p","M14 24.5V14",2.4], ["p","M14 3.5L19.5 9L14 14.5L8.5 9Z",2.4]]
+              ["p","M14 24.5V14",2.4], ["p","M14 3.5L19.5 9L14 14.5L8.5 9Z",2.4]],
+  // The User Manual: an open book. Chosen over a ringed "?" because it does not
+  // share the clock's silhouette, and the two sit next to each other.
+  manual: [["p","M14 8 C11.5 6.2 7 5.8 3.5 6.8 V21.8 C7 20.8 11.5 21.2 14 23 C16.5 21.2 21 20.8 24.5 21.8 V6.8 C21 5.8 16.5 6.2 14 8 Z",2.5],
+           ["p","M14 8 V23",2.5]]
 };
 // A modal that lands you where a menu row pointed shows that row's glyph beside
 // its title, so the screen is visibly the one you tapped. Keyed by exact title.
@@ -1454,7 +1501,8 @@ var MODAL_GLYPHS = {
   "Edit Lanes":"lanes", "Time Settings":"clock",
   "Interface":"interface", "Day Summary":"summary", "Reports":"reports",
   "Archive":"archive", "Backup & Restore":"backup", "Extensions":"extensions",
-  "Exit Tutorial":"test", "Start Break":"break"
+  "Leave Practice Board":"test", "Start Break":"break",
+  "User Manual":"manual", "Guides":"manual"
 };
 // A glyph in front of a title. The board is inside dir=rtl when left-handed,
 // so a flex row already lays its children right to left there - writing the
@@ -1573,6 +1621,727 @@ function MenuGroupModal(props){
              padding:"0.85rem",color:S.textDim,cursor:"pointer",fontFamily:S.fontBody,
              fontWeight:600,fontSize:MENU_FONT} }, "Close")
   );
+}
+
+// ---- HEADER BUTTONS ----------------------------------------------------------
+// The Clock and Disruption buttons and the disruption reasons list. Components
+// rather than inline so the User Manual can stage them exactly as the header
+// draws them: state in, picture out. What a press DOES stays in the header.
+function ClockButton(props){
+  var clocked=!!props.clocked;
+  var ckBg = clocked ? S.successBg2 : S.successBg;
+  var ckBdr = clocked ? S.clockBdrOn : S.clockBdr;
+  var ckIcon = clocked ? S.successText : S.successMid;
+  var ckLblC = clocked ? S.successText : S.successMid;
+  var ckSubC = S.successDim;
+  return React.createElement("button", { "data-anchor":"hdr-clock", onClick:props.onClick,
+      style:{flex:1,minHeight:"56px",display:"flex",alignItems:"center",justifyContent:"center",gap:"0.55rem",background:ckBg,border:"2.5px solid "+ckBdr,borderRadius:S.radius2,cursor:"pointer"} },
+    React.createElement("svg", { width:28, height:28, viewBox:"0 0 28 28", fill:"none" },
+      React.createElement("circle", { cx:"14", cy:"14", r:"11", stroke:ckIcon, strokeWidth:"2.5" }),
+      React.createElement("path", { d:"M14 8 L14 14 L18 17", stroke:ckIcon, strokeWidth:"2.5", strokeLinecap:"round", strokeLinejoin:"round" })
+    ),
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:"0.08rem"} },
+      React.createElement("span", { style:{fontSize:"1rem",fontWeight:700,color:ckLblC,fontFamily:S.fontBody,lineHeight:1,whiteSpace:"nowrap"} }, clocked ? "Clock Out" : "Clock In"),
+      React.createElement(Mono, { style:{fontSize:"0.72rem",color:ckSubC,lineHeight:1,whiteSpace:"nowrap"} }, props.sub)
+    )
+  );
+}
+// mode: "idle" (log one), "active" (a running job is paused - Resume), or
+// "standalone" (a disruption with nothing running - End).
+function DisruptButton(props){
+  var dActive=props.mode==="active", dStandalone=props.mode==="standalone";
+  var dBg = dActive ? S.dangerBg2 : S.dangerBg;
+  var dBdr = dActive ? S.distBdrLive : (dStandalone ? S.distBdrOpen : S.distBdr);
+  var dBangCol = dActive ? S.dangerBright : S.bang;
+  var dLbl = dActive ? "Resume" : (dStandalone ? "End" : "Disruption");
+  return React.createElement("button", { "data-anchor":"hdr-disrupt", onClick:props.onClick,
+      style:{width:"100%",minHeight:"56px",display:"flex",alignItems:"center",justifyContent:"center",gap:"0.55rem",background:dBg,border:"2.5px solid "+dBdr,borderRadius:S.radius2,cursor:"pointer"} },
+    React.createElement("span", { style:{fontSize:"1.6rem",fontWeight:900,color:dBangCol,letterSpacing:"-0.08em",lineHeight:1,fontFamily:S.fontBody} }, "!!"),
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:"0.1rem"} },
+      React.createElement("span", { style:{fontSize:"1rem",fontWeight:700,color:S.dangerText,fontFamily:S.fontBody,lineHeight:1,whiteSpace:"nowrap"} }, dLbl),
+      React.createElement(Mono, { style:{fontSize:"0.72rem",color:S.dangerText,opacity:0.75,lineHeight:1,whiteSpace:"nowrap"} }, props.sub)
+    )
+  );
+}
+// The reasons list the Disruption button drops. `place` is where the header
+// pins it; the list owns how it looks.
+function DisruptPresetList(props){
+  return React.createElement("div", { "data-anchor":"disrupt-list",
+      style:Object.assign({minWidth:"250px",background:S.menuBg,border:"1px solid #4A1A1A",borderRadius:S.radius2,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",padding:"0.5rem",display:"flex",flexDirection:"column",gap:"0.4rem"}, props.place||{}) },
+    (props.presets||[]).map(function(label,i){
+      return React.createElement("button", { key:i, "data-distpreset":i, onClick:function(){ props.onPick(label); },
+        style:{display:"flex",alignItems:"center",gap:"0.55rem",width:"100%",textAlign:"left",background:S.dangerBg,border:"2.5px solid #AA4040",borderRadius:"10px",padding:"0.6rem 0.85rem",cursor:"pointer",fontFamily:S.fontBody} },
+        React.createElement("span", { style:{fontSize:"1.25rem",fontWeight:900,color:S.bang,letterSpacing:"-0.08em",lineHeight:1,flexShrink:0} }, "!!"),
+        React.createElement("span", { style:{fontSize:"0.95rem",fontWeight:700,color:S.dangerText,whiteSpace:"nowrap"} }, label)
+      );
+    }),
+    React.createElement("button", { onClick:props.onCustom,
+      style:{display:"flex",alignItems:"center",gap:"0.55rem",width:"100%",textAlign:"left",background:S.bg1,border:"2px solid #5A3030",borderRadius:"10px",padding:"0.55rem 0.85rem",cursor:"pointer",fontFamily:S.fontBody} },
+      React.createElement("span", { style:{fontSize:"1.1rem",fontWeight:700,color:S.distNote,flexShrink:0,lineHeight:1} }, "+"),
+      React.createElement("span", { style:{fontSize:"0.9rem",fontWeight:600,color:S.distNote,whiteSpace:"nowrap"} }, "Custom note...")
+    ),
+    React.createElement("button", { onClick:props.onEdit,
+      style:{display:"flex",alignItems:"center",gap:"0.55rem",width:"100%",textAlign:"left",background:S.bg1,border:"2px solid "+S.borderBright,borderRadius:"10px",padding:"0.55rem 0.85rem",cursor:"pointer",fontFamily:S.fontBody} },
+      React.createElement(GearSVG, { size:14, col:S.chromeText }),
+      React.createElement("span", { style:{fontSize:"0.9rem",fontWeight:600,color:S.chromeText,whiteSpace:"nowrap"} }, "Edit List")
+    )
+  );
+}
+
+// The ticker under (or over) the header buttons: date and time fixed on the
+// left, then what is happening now. A component so the manual can stage it;
+// the board hands it the state.
+function HeaderTicker(props){
+  var interrupting=props.interrupting, activeProj=props.activeProj, intElapsed=props.intElapsed;
+  var wsActive=props.wsActive, elapsed=props.elapsed, onBreak=props.onBreak, breakLabel=props.breakLabel;
+  var breakElapsed=props.breakElapsed, clocked=props.clocked, atWorkElapsed=props.atWorkElapsed;
+  var nowTick=props.nowTick, hdrBottom=!!props.bottom;
+  var tickerStatus = null;
+  if(interrupting && activeProj){
+    // No flashing labels. The disrupted project's own name breathes red on the
+    // same slow cycle a running project's border uses, so the cue reads as the
+    // counterpart of the green one rather than as an alarm.
+    tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem",minWidth:0} },
+      React.createElement("span", { "data-glow":"1",
+        style:Object.assign(glowVars(S.dangerText),
+          {fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}) },
+        activeProj.name),
+      React.createElement(Mono, { "data-glow":"1",
+        style:Object.assign(glowVars(S.dangerText),
+          {fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap",flexShrink:0}) },
+        fmtDur(intElapsed,true))
+    );
+  } else if(activeProj){
+    tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem",minWidth:0} },
+      React.createElement("span", { style:{color:wsActive?wsActive.accent:S.text,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, activeProj.name),
+      React.createElement(Mono, { style:{color:wsActive?wsActive.accent:S.text,fontWeight:500,fontSize:"0.8rem",whiteSpace:"nowrap"} }, fmtDur(elapsed,true))
+    );
+  } else if(onBreak){
+    tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem"} },
+      React.createElement("span", { style:{color:S.warnText,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, "On Break - "+breakLabel),
+      React.createElement(Mono, { style:{color:S.warnText,fontWeight:500,fontSize:"0.8rem",whiteSpace:"nowrap"} }, fmtDur(breakElapsed,true))
+    );
+  } else if(clocked){
+    // Clocked in with nothing running. The day clock keeps its green because
+    // the day really is running; the label says what is not.
+    tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem"} },
+      React.createElement("span", { style:{color:S.textDim,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, "No Activity"),
+      React.createElement(Mono, { style:{color:S.successDim,fontWeight:500,fontSize:"0.8rem",whiteSpace:"nowrap"} }, fmtDur(atWorkElapsed,true))
+    );
+  } else {
+    tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem"} },
+      React.createElement("span", { style:{color:S.textMuted,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, "No Activity")
+    );
+  }
+  var tickerDate = React.createElement("span", { "data-anchor":"hdr-when", style:{color:S.titleText,fontWeight:700,fontSize:"0.88rem",fontFamily:S.fontBody,whiteSpace:"nowrap"} },
+    new Date(nowTick).toLocaleDateString([],{weekday:"short",month:"short",day:"numeric"})
+  );
+  var tickerTime = React.createElement(Mono, { "data-anchor":"hdr-when", style:{color:S.text,fontSize:"0.88rem",fontWeight:700,whiteSpace:"nowrap"} }, fmtTime(nowTick));
+  // Static, not scrolling. The date and time are fixed on the left where the
+  // eye can find them without waiting for them to come round again; the status
+  // takes the rest of the bar and truncates rather than moving.
+  return React.createElement("div", { dir:"ltr", style:{display:"flex",alignItems:"center",gap:"0.75rem",padding:"0.25rem 0.85rem",minHeight:"28px",background:S.bg2,borderBottom:hdrBottom?"none":"1px solid "+S.border,boxShadow:hdrBottom?"inset 0 1px 0 "+S.border:"none",overflow:"hidden",whiteSpace:"nowrap"} },
+    tickerDate, tickerTime,
+    tickerStatus && React.createElement("span", { "data-anchor":"hdr-status", style:{display:"flex",alignItems:"center",flex:1,minWidth:0,overflow:"hidden"} }, tickerStatus)
+  );
+
+}
+// The settings menu's button. The dropdown it opens stays in the header.
+function HeaderMenuButton(props){
+  var open=!!props.open;
+  return React.createElement("button", { "data-anchor":"hdr-menu", onClick:props.onClick,
+      style:{width:"100%",minHeight:"56px",display:"flex",alignItems:"center",justifyContent:"center",background:open?S.bg3:S.bg0,border:"2.5px solid "+(open?S.chromeBdrOn:S.chromeBdr),borderRadius:S.radius2,cursor:"pointer"} },
+    React.createElement(MenuIcon, { name:"more", size:30, col:open?S.chromeIconOn:S.chromeText }));
+}
+
+// ---- USER MANUAL: GUIDES -----------------------------------------------------
+// The manual's Guides: an index with two ways in, annotated PICTURES ("What's
+// on my screen?") and STEP-THROUGHS ("How do I...?"). A picture's part can
+// carry How >, which opens the step-through for it, so each one is written once.
+//
+// Content is DATA, here beside the features it describes, so it ships with
+// every build and the freshness checks can hold it to the app: every anchor a
+// guide rings must exist in what its stage renders, every practice record it
+// names must exist in TEST_PROJECTS, and no prose quotes a figure - the
+// practice board's numbers are relative to today and move every day.
+//
+// A STAGE is a live render of the real component, from the practice board's
+// SHIPPED seed (never the user's practice edits, so the words always match the
+// picture), scaled to fit and made inert. A position:fixed sheet inside a
+// transformed box is contained by that box, so a sheet stages the same way a
+// card does.
+var HELP_PICTURES = {
+  card: { title:"A card", back:"Back to card", stage:{ kind:"card", id:101 },
+    blurb:"Every project and task on the board is a card. Tap a number to see what that part does.",
+    parts:[
+      { anchor:'[data-anchor="card-title"]', side:"above", label:"Its name",
+        text:"One tap opens its menu. Two taps edit it. Swipe left to tuck it away.", guide:"collapse" },
+      { anchor:'[data-anchor="card-start"]', side:"left", label:"Start",
+        text:"Starts the clock on this job. Tap again to stop.", guide:"clock" },
+      { anchor:'[data-anchor="card-time"]', side:"right", label:"Time logged",
+        text:"Time recorded against it so far today." },
+      { anchor:'[data-anchor="disruptions"]', side:"below", label:"Disruptions",
+        text:"Interruptions today on the left. All of them, and the time they cost, on the right.", guide:"disrupt" },
+      { anchor:"[data-complete]", side:"below", label:"Complete",
+        text:"Finishes the job.", guide:"finish" }
+    ] },
+  header: { title:"The header", back:"Back to the header", stage:{ kind:"headerfull" }, padTop:26,
+    blurb:"The bar that stays in view while the board scrolls. It can sit at the top or the bottom, under Interface and Layout.",
+    parts:[
+      { anchor:'[data-anchor="hdr-when"]', side:"above", label:"Date and time",
+        text:"Always the current day and time." },
+      { anchor:'[data-anchor="hdr-status"]', side:"above", label:"What is happening",
+        text:"The job that is running and how long it has run. On a break it says so, and with nothing running it reads No Activity." },
+      { anchor:'[data-anchor="hdr-disrupt"]', side:"below", label:"Disruption",
+        text:"Log an interruption. While one is running this reads Resume.", guide:"disrupt" },
+      { anchor:'[data-anchor="hdr-clock"]', side:"below", label:"Clock in and out",
+        text:"Starts and ends the work day, with the day\u2019s time under it.", guide:"clock" },
+      { anchor:'[data-anchor="hdr-menu"]', side:"below", label:"The menu",
+        text:"The User Manual, Edit, the settings, Reports and the rest." }
+    ] },
+  reports: { title:"Reports", back:"Back to Reports", stage:{ kind:"reports" }, padTop:16,
+    blurb:"Clocking out opens it on the day you just finished. Further down it lists every lane and project with its time, and Copy report puts the lot on the clipboard.",
+    parts:[
+      { anchor:'[data-anchor="rep-period"]', side:"right", label:"How much time",
+        text:"A day, a week, a month or a pay period. Pay period follows the pay cycle set in Time Settings." },
+      { anchor:'[data-anchor="rep-nav"]', side:"right", label:"Back and forward",
+        text:"The arrows step to the period before or after." },
+      { anchor:'[data-anchor="rep-summary"]', side:"right", label:"The headline",
+        text:"What the period came to, against the hours you were scheduled for." },
+      { anchor:'[data-anchor="rep-stats"]', side:"right", label:"The detail",
+        text:"Time clocked, breaks, disruptions and the rest, side by side." },
+      { anchor:"[data-msreport]", side:"corner", label:"Milestones",
+        text:"Steps that fell due in the period: met on time, late or missed, and what is coming next." }
+    ] },
+  msline: { title:"A milestone line", back:"Back to the line", stage:{ kind:"msline" }, padTop:52, tryit:"msline",
+    blurb:"A project\u2019s milestones laid out in time. Each sign is a step, coloured by how it stands. Lanes and the board carry the same line, gathered from everything beneath them.",
+    parts:[
+      { anchor:'[data-msstatus="met"]', first:true, side:"above", label:"Met",
+        text:"Solid green: the step happened by its date. Completing the job it was waiting on is enough." },
+      { anchor:"[data-driftarc]", first:true, side:"above2", label:"Slipped",
+        text:"A step met late. A faint sign stays on the date it was due, the arc runs to where it really happened, and its sign there is amber. Signs that land close together share one post, with a dot for each." },
+      { anchor:'[data-msstatus="missed"]', first:true, side:"below", label:"Missed",
+        text:"Red: its date has passed and it is still open." },
+      { anchor:'[data-msstatus="upcoming"]', first:true, side:"above", label:"Still to come",
+        text:"Hollow grey. It fills in when it is met." },
+      { anchor:"[data-msnow]", side:"below", label:"Now",
+        text:"The small pointer under the line. Everything left of it has happened." },
+      { anchor:"[data-mszoom]", side:"below", label:"Zoom",
+        text:"Tap to step closer. Hold to see the whole line again. Zoomed in, drag the line sideways." }
+    ] }
+};
+var HELP_GUIDES = {
+  clock: { title:"Start and stop the clock",
+    steps:[
+      { stage:{ kind:"header", clocked:false, dmode:"idle" }, ring:'[data-anchor="hdr-clock"]', title:"Clock in",
+        text:"Tap Clock In when your day starts. If it is outside your scheduled shift, it asks which shift the time belongs to." },
+      { stage:{ kind:"card", id:101 }, ring:'[data-anchor="card-start"]', side:"left", title:"Start a job",
+        text:"Tap Start on a card. If you have not clocked in yet, this clocks you in as well. Starting another job stops this one, so only one ever runs." },
+      { stage:{ kind:"card", id:101, state:"running" }, ring:'[data-anchor="card-start"]', side:"left", title:"Stop it",
+        text:"A running card lights up and its button reads Stop. Tap it when you are done, and the time goes into the day\u2019s log." },
+      { stage:{ kind:"header", clocked:true, dmode:"idle" }, ring:'[data-anchor="hdr-clock"]', title:"Clock out",
+        text:"At the end of the day, tap Clock Out. Whatever is running stops, and Reports opens on the day you just finished." }
+    ] },
+  disrupt: { title:"Log a disruption",
+    steps:[
+      { stage:{ kind:"header", clocked:true, dmode:"idle" }, ring:'[data-anchor="hdr-disrupt"]', title:"Tap Disruption",
+        text:"When something pulls you off the job, tap Disruption in the header. A list of reasons drops down." },
+      { stage:{ kind:"presets" }, ring:"[data-distpreset]", side:"right", title:"Pick the reason",
+        text:"Tap the one that fits. Custom note lets you type your own, and Edit List changes the choices." },
+      { stage:{ kind:"card", id:101, state:"disrupted" }, ring:'[data-anchor="card-start"]', side:"left", title:"The job is paused",
+        text:"The running job stops counting and its button reads Paused. The time you lose is counted against that job, in its red badge." },
+      { stage:{ kind:"header", clocked:true, dmode:"active" }, ring:'[data-anchor="hdr-disrupt"]', title:"Get back to it",
+        text:"Tap Resume in the header, or Paused on the card, and the job carries on. With nothing running, a disruption is logged on its own and the button reads End." }
+    ] },
+  finish: { title:"Finish a job",
+    steps:[
+      { stage:{ kind:"card", id:101 }, ring:"[data-complete]", title:"Hold Complete", tryit:"hold",
+        text:"Press and keep pressing until the bar fills. A quick tap does nothing, so it can never happen by accident." },
+      { stage:{ kind:"close", id:101 }, ring:"[data-closeopt]", title:"Say how it ended",
+        text:"Done, abandoned or superseded. Then when it finished, and a note on where things were left." },
+      { stage:{ kind:"close", id:103 }, ring:"[data-closekids]", title:"Settle anything still open",
+        text:"Every open task or nested project inside it must be moved somewhere else or deleted. Complete stays locked until each one is decided." },
+      { stage:{ kind:"card", id:103 }, ring:"[data-donerow]", title:"It stays on the board",
+        text:"It shrinks to a grey pill below your live work, so you can see it happened. Hold the pill to reopen it." }
+    ] },
+  night: { title:"Clock in for a night shift",
+    steps:[
+      { stage:{ kind:"schedule" }, ring:'[data-schedday="mon"]', side:"right", title:"Set the shift",
+        text:"In Time Settings, Work Schedule, give the day an end earlier than its start. The row is marked as running into the next day, and the whole shift counts as one work day." },
+      { stage:{ kind:"header", clocked:true, dmode:"idle" }, ring:'[data-anchor="hdr-clock"]', title:"Clock in as normal",
+        text:"Clock in when the shift starts. Everything you log after midnight still belongs to the day the shift began, so the board and Reports keep the night together." },
+      { stage:{ kind:"shiftask" }, ring:"[data-shiftchoice]", side:"right", title:"Outside the shift, it asks",
+        text:"Start early, late or between shifts and it asks which shift the time belongs to: the one that just ended or the one coming up." },
+      { stage:{ kind:"shiftask", ot:true }, ring:"[data-shiftchoice]", side:"right", title:"A day off asks one more thing",
+        text:"Working a day that is not on your schedule? Say whether it is regular time or overtime. Reports uses that answer for pay." }
+    ] },
+  backup: { title:"Back up my data",
+    steps:[
+      { stage:{ kind:"backup" }, ring:'[data-anchor="backup-export"]', side:"right", title:"Export a backup",
+        text:"Everything lives on this phone, so deleting the app deletes your time with it. Tap Export Backup now and then. On a phone it offers to share the file: save it to Files or send it to yourself." },
+      { stage:{ kind:"backup" }, ring:'[data-anchor="backup-choose"]', side:"right", title:"Restore from a file",
+        text:"Choose Backup File and pick the file you saved. Nothing changes yet." },
+      { stage:{ kind:"backup", preview:true }, ring:'[data-anchor="backup-replace"]', side:"right", title:"Check it, then replace",
+        text:"It shows when the backup was made and what is in it. Replace All Data and Restore swaps everything in the app for the backup and reloads. Pick a Different File backs out." }
+    ] },
+  outline: { title:"Rearrange with Edit\u2026",
+    steps:[
+      { stage:{ kind:"outline" }, ring:'[data-outlinekey="L:Projects"]', side:"corner", title:"Everything in one list",
+        text:"Edit in the menu opens the outline: every lane, with its projects, tasks and stages beneath it, in the order they sit on the board." },
+      { stage:{ kind:"outline" }, ring:'[data-outlinepick="P:102"]', side:"left", title:"Pick a row",
+        text:"Tap the glyph at the start of a row to pick it up. Tap its name once for its menu, twice to edit its details; moves you have made are kept." },
+      { stage:{ kind:"outline", sel:"P:102" }, ring:"[data-pad]", side:"left", title:"Move it with the arrows",
+        text:"Up and down move it among its neighbours. At the end of its group, one more step takes it out, and asks first. Left and right change how deep it sits." },
+      { stage:{ kind:"outline", sel:"P:102" }, ring:"[data-role]", side:"left", title:"Task or project",
+        text:"When a row steps inside another, choose here whether it goes in as a task or as a nested project. A task can only hold tasks." },
+      { stage:{ kind:"outline" }, ring:'[data-anchor="outline-save"]', side:"left", title:"Save puts it on the board",
+        text:"Nothing on the board changes until you Save. Cancel throws the moves away. Done puts the arrows away when you have finished moving." },
+      { stage:null, title:"Try it here", tryit:"outline",
+        text:"A practice copy of the outline. Move rows as much as you like; Save here only tells you what would happen." }
+    ] },
+  milestone: { title:"Set up a milestone",
+    steps:[
+      { stage:{ kind:"msline" }, ring:"[data-msstrip]", side:"corner", title:"Open the milestones",
+        text:"Tap a project\u2019s milestone line, or choose Milestones from the project\u2019s menu. A project with none yet starts from the menu." },
+      { stage:{ kind:"msedit" }, ring:"[data-msadd]", side:"left", title:"Add a step",
+        text:"The project\u2019s steps in the order they fall, with its line across the top. Add step makes a new one; tap a step to change it." },
+      { stage:{ kind:"msstep" }, ring:"[data-mslabel]", side:"corner", title:"Name it and date it",
+        text:"A short name, and the day and time it is due." },
+      { stage:{ kind:"msstep" }, ring:"[data-mstarget]", side:"left", title:"Say what it waits for",
+        text:"Under Expects these closed out, pick the jobs it depends on. When they are completed, the step turns green by itself." },
+      { stage:{ kind:"msstep", step:"tm3" }, ring:"[data-msmarkmet]", side:"corner", title:"Or mark it by hand",
+        text:"Nothing to wait for? Tap Mark met now when it happens. Hold it instead to say when it really happened, so a step met on time does not read late." },
+      { stage:{ kind:"msedit" }, ring:"[data-mssaveall]", side:"left", title:"Save",
+        text:"Save keeps the steps on the project and its line updates. Cancel drops what you changed." }
+    ] },
+  collapse: { title:"Collapse and expand",
+    steps:[
+      { stage:{ kind:"card", id:101 }, ring:'[data-anchor="card-title"]', side:"above", title:"Swipe left on its name", tryit:"swipe",
+        text:"Swipe left across a card\u2019s name and it shrinks to a slim pill. Lanes and task rows work the same way." },
+      { stage:{ kind:"card", id:101, collapsed:true }, ring:'[data-anchor="card-pill"]', title:"Swipe right to open it",
+        text:"A pill only opens to the right, so a stray swipe cannot shut anything. A running job still shows its time on the pill." }
+    ] }
+};
+// Practice pages: the Try it panels gathered in one place, no reading needed.
+var HELP_PRACTICE = {
+  gestures: { title:"Tap, double tap, hold and swipe", panels:["taps","hold","swipe","msline","outline"],
+    blurb:"Every gesture the board uses, to try right here. Nothing you do on this page changes anything." }
+};
+var HELP_INDEX = [
+  { head:"What\u2019s on my screen?", kind:"picture", ids:["header","card","msline","reports"] },
+  { head:"How do I\u2026?", kind:"guide", ids:["clock","disrupt","finish","collapse","outline","milestone","night","backup"] },
+  { head:"Practise the gestures", kind:"practice", ids:["gestures"] }
+];
+
+// Nights, finishing the next morning. `every` puts a shift on all seven days.
+function HELP_NIGHTS(every){
+  var on={ on:true, start:"21:00", end:"05:30" }, off={ on:false };
+  return normalizeSchedule({ mon:on, tue:on, wed:on, thu:on, fri:on, sat:every?on:off, sun:every?on:off });
+}
+function helpSeedProject(id){ return TEST_PROJECTS.filter(function(p){ return p.id===id; })[0]||null; }
+// The element a stage draws. Pure apart from React.createElement, so the boot
+// harness can render every stage statically and look for its anchors.
+// `on` lets a LIVE practice copy (the outline Try it) hear its own Save and
+// Cancel; a staged picture passes nothing and everything is wired to nop.
+function helpStageEl(stage, on){
+  var P=TEST_PROJECTS, nop=function(){}; on=on||{};
+  // The outline, on the practice board's lanes and records, optionally with a
+  // row already picked so the arrow pad shows.
+  if(stage.kind==="outline")
+    return React.createElement(OutlineModal, { laneOrder:TEST_ORDER, laneMeta:TEST_META, projects:P, msProjects:P,
+      offDays:[], initialSel:stage.sel||null, onOpen:on.open||nop, onSave:on.save||nop, onClose:on.close||nop });
+  if(stage.kind==="msedit")
+    return React.createElement(MilestoneEditModal, { project:helpSeedProject(103), projects:P, offDays:[], onSave:nop, onClose:nop });
+  // A step sheet: a new step, or one of the workbench's own.
+  if(stage.kind==="msstep"){
+    var host=helpSeedProject(103), beneath=[];
+    (function walk(pid){ P.filter(function(c){ return c.parentId===pid; }).forEach(function(c){ beneath.push(c); walk(c.id); }); })(host.id);
+    var step=stage.step ? (host.milestones||[]).filter(function(m){ return m.id===stage.step; })[0] : {};
+    return React.createElement(MilestoneStepModal, { step:step||{}, records:beneath, onSave:nop, onDelete:nop, onCancel:nop });
+  }
+  if(stage.kind==="reports")
+    return React.createElement(ReportsModal, { logs:TEST_LOGS, projects:P, disruptions:TEST_DIST, breaks:TEST_BREAKS,
+      laneMeta:TEST_META, laneOrder:TEST_ORDER, schedule:null, testMode:true, liveLogs:[], initialKind:"week", onClose:nop });
+  // The header's two buttons, side by side as the header lays them out.
+  if(stage.kind==="header")
+    return React.createElement("div", { style:{display:"flex",gap:"0.5rem",padding:"0.5rem 0.75rem",background:S.bg1,borderRadius:S.radius2} },
+      React.createElement("div", { style:{position:"relative",flex:1} },
+        React.createElement(DisruptButton, { mode:stage.dmode||"idle", onClick:nop,
+          sub:stage.dmode==="active" ? fmtDur(4*60000,true) : "log one" })),
+      React.createElement(ClockButton, { clocked:!!stage.clocked, onClick:nop,
+        sub:stage.clocked ? fmtDur(3*3600000+20*60000,true) : "start day" }));
+  if(stage.kind==="presets")
+    return React.createElement(DisruptPresetList, { presets:DEFAULT_DIST_PRESETS, onPick:nop, onCustom:nop, onEdit:nop });
+  // The whole header as a right-handed user sees it at the top: the ticker,
+  // then Menu | Clock | Disruption painted in reverse, mid-shift with a job running.
+  if(stage.kind==="headerfull"){
+    var job=helpSeedProject(101);
+    return React.createElement("div", { style:{ background:S.bg1 } },
+      React.createElement(HeaderTicker, { interrupting:false, activeProj:job, intElapsed:0,
+        wsActive:getMeta(TEST_META, job.lane), elapsed:25*60000, onBreak:false, breakLabel:"", breakElapsed:0,
+        clocked:true, atWorkElapsed:3*3600000+20*60000, nowTick:Date.now(), bottom:false }),
+      React.createElement("div", { style:{display:"flex",flexDirection:"row-reverse",alignItems:"stretch",background:S.bg1,borderBottom:"2px solid "+S.border,padding:"0.5rem 0.75rem",gap:"0.5rem"} },
+        React.createElement("div", { style:{position:"relative",flex:"0 0 64px"} }, React.createElement(HeaderMenuButton, { open:false, onClick:nop })),
+        React.createElement(ClockButton, { clocked:true, onClick:nop, sub:fmtDur(3*3600000+20*60000,true) }),
+        React.createElement("div", { style:{position:"relative",flex:1} }, React.createElement(DisruptButton, { mode:"idle", onClick:nop, sub:"log one" }))));
+  }
+  // A night roster, Monday to Friday, as the Work Schedule sheet shows it.
+  if(stage.kind==="schedule")
+    return React.createElement(WorkScheduleModal, { schedule:HELP_NIGHTS(), onSave:nop, onClose:nop });
+  // The question a clock-in outside the shift asks: an early-morning tap on a
+  // roster of nights every day (so it reads the same on any weekday), or the
+  // pay question a day off adds.
+  if(stage.kind==="shiftask"){
+    if(stage.ot)
+      return React.createElement(ClockDayModal, { stage:"ot", title:"Regular or Overtime?", choices:OT_CHOICES, onPick:nop, onCancel:nop });
+    var t=new Date(); t.setHours(6, 30, 0, 0);
+    var ctx=shiftContext(HELP_NIGHTS(true), t.getTime(), 0);
+    return React.createElement(ClockDayModal, { when:t.getTime(), position:ctx.position, choices:shiftChoices(ctx), onPick:nop, onCancel:nop });
+  }
+  if(stage.kind==="backup")
+    return React.createElement(BackupModal, { onClose:nop,
+      preview:stage.preview ? { exportedAt:new Date().toISOString(), projects:TEST_PROJECTS.length, logs:TEST_LOGS.length } : null });
+  // A project's milestone line, as its card carries it: the practice
+  // workbench, whose steps are in every state at once.
+  if(stage.kind==="msline")
+    return React.createElement("div", { style:{ padding:"0 0.3rem" } },
+      React.createElement(MilestoneStrip, { kind:"project", points:subtreePoints(P, 103, Date.now()), width:300, offDays:[], tight:true, onOpen:nop }));
+  var proj=helpSeedProject(stage.id);
+  if(!proj) return null;
+  if(stage.kind==="close")
+    return React.createElement(CloseProjectModal, { proj:proj, blockers:closeBlockers(P, proj), onClose:nop, onConfirm:nop });
+  var ids=[proj.id].concat(getDescendantIds(P, proj.id));
+  // Today through the one work-day function, like every other surface.
+  var today=todayStr();
+  var todayLogs=TEST_LOGS.filter(function(l){ return recordDay(l)===today; });
+  var todayDist=TEST_DIST.filter(function(d){ return recordDay(d)===today; });
+  var mine=function(r){ return ids.indexOf(r.projectId)>=0; };
+  var live=stage.state==="running"||stage.state==="disrupted";
+  return React.createElement(ProjectCard, { proj:proj, still:true, stillCollapsed:!!stage.collapsed,
+    subTasks:P.filter(function(p){ return p.parentId===proj.id; }),
+    isActive:live, interrupting:stage.state==="disrupted", elapsed:live?25*60000:0,
+    todayMs:todayLogs.filter(mine).reduce(function(a,l){ return a+l.duration; },0),
+    distToday:distStats(todayDist, ids), distTotal:distStats(TEST_DIST, ids),
+    projDisruptions:TEST_DIST.filter(mine),
+    onCloseOut:nop, onToggle:nop, onEdit:nop, onStages:nop, onStageToggle:nop, onAddSub:nop,
+    onReopen:nop, msProjects:P, offDays:[], schedule:null, activeId:live?proj.id:null,
+    todayLogs:todayLogs, todayDist:todayDist, allDist:TEST_DIST, allProjects:P,
+    editMode:false, laneMeta:TEST_META, dragHandleProps:{} });
+}
+
+// One staged picture. `marks` are the numbered parts (picture pages) or the
+// single ringed control (steps); each is { anchor, n, side, on }. Positions are
+// MEASURED from the live render, never typed in, so a layout change moves the
+// marks with it. A mark whose anchor is missing draws nothing.
+var HELP_CARD_W = 366, HELP_SHEET_W = 390, HELP_MARK = 22;
+var HELP_STAGE_W = { card:366, close:390, header:366, presets:300, headerfull:390, msline:366,
+                     schedule:390, shiftask:390, backup:390, outline:390, msedit:400, msstep:390, reports:400 };
+// Kinds that stage a whole sheet: measured off the staged panel, not the content.
+var HELP_SHEETS = { close:true, schedule:true, shiftask:true, backup:true, outline:true, msedit:true, msstep:true, reports:true };
+function HelpStage(props){
+  var stage=props.stage, sheet=!!HELP_SHEETS[stage.kind];
+  var natW=HELP_STAGE_W[stage.kind]||HELP_CARD_W, dispW=props.width||300, k=dispW/natW;
+  var boxRef=useRef(null), innerRef=useRef(null);
+  var measS=useState({ h:sheet?640:0, rects:[] }); var setMeas=measS[1]; var meas=measS[0];
+  var padTop=props.padTop||0;
+  var marks=props.marks||[];
+  var key=JSON.stringify(stage)+"|"+marks.map(function(m){ return m.anchor; }).join(",");
+  useEffect(function(){
+    function measure(){
+      var box=boxRef.current, inner=innerRef.current; if(!box||!inner) return;
+      var B=box.getBoundingClientRect(), h;
+      // The staged panel caps itself at 85vh and scrolls inside; its own
+      // height (not its scroll height) is what shows.
+      if(sheet){ var pan=inner.querySelector("[data-staged]"); h=pan ? Math.ceil(pan.offsetHeight)+34 : 640; }
+      else h=Math.ceil(inner.scrollHeight);
+      // What is actually visible: a staged sheet scrolls inside its own
+      // panel, so a part can run on below what shows. A ring drawn to the
+      // part's full height ran down into the legend (the Reports milestones
+      // section did), so every box is cut to what can be seen.
+      var vis=(sheet && inner.querySelector("[data-staged]") ? inner.querySelector("[data-staged]") : inner).getBoundingClientRect();
+      var rects=marks.map(function(m){
+        var els=inner.querySelectorAll(m.anchor); if(!els.length) return null;
+        if(m.first) els=[els[0]];
+        var x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+        Array.prototype.forEach.call(els, function(el){ var r=el.getBoundingClientRect();
+          x0=Math.min(x0,r.left); y0=Math.min(y0,r.top); x1=Math.max(x1,r.right); y1=Math.max(y1,r.bottom); });
+        x0=Math.max(x0,vis.left); y0=Math.max(y0,vis.top); x1=Math.min(x1,vis.right); y1=Math.min(y1,vis.bottom);
+        if(x1<=x0 || y1<=y0) return null;   // nothing of it shows: no mark, no ring
+        return { x:x0-B.left, y:y0-B.top, w:x1-x0, h:y1-y0 };
+      });
+      setMeas({ h:h, rects:rects });
+    }
+    measure();
+    var a=setTimeout(measure, 60), b=setTimeout(measure, 380);
+    return function(){ clearTimeout(a); clearTimeout(b); };
+  },[key]);
+  var M=HELP_MARK;
+  function at(r, side){
+    // Above a wide target the mark sits toward its start; above a narrow one
+    // (a sign on a line) it is centred, or it lands on the neighbour.
+    if(side==="above") return [r.w<40 ? r.x+r.w/2-M/2 : r.x+r.w*0.35, r.y-M-3];
+    // On the top edge at the far end: for a full-width block with no room beside it.
+    if(side==="corner") return [r.x+r.w-M-6, r.y-M/2];
+    // A second row up, for parts that sit too close together to share one.
+    if(side==="above2") return [r.x+r.w/2-M/2, r.y-2*M-8];
+    if(side==="left")  return [r.x-M-4, r.y+r.h/2-M/2];
+    if(side==="right") return [r.x+r.w+4, r.y+r.h/2-M/2];
+    return [r.x+r.w/2-M/2, r.y+r.h+3];
+  }
+  // Where each numbered mark lands, then nudged apart. The practice board is
+  // dated relative to today, so on a milestone line the signs - and "now" -
+  // sit in different places at different hours; no fixed layout stays clear.
+  // Each mark that would overlap one already placed slides sideways (right
+  // first, then left) until it is clear.
+  var spots=marks.map(function(m, i){ var r=meas.rects[i]; return r ? at(r, m.side||"below") : null; });
+  spots.forEach(function(p, i){
+    if(!p) return;
+    var clash=function(x){ return spots.slice(0, i).some(function(q){ return q && Math.abs(q[1]-p[1])<M && Math.abs(q[0]-x)<M+2; }); };
+    for(var d=0; d<=6*M && clash(p[0]); d+=4){
+      if(!clash(p[0]+d) && p[0]+d+M<=dispW+M){ p[0]+=d; break; }
+      if(!clash(p[0]-d) && p[0]-d>=-M){ p[0]-=d; break; }
+    }
+  });
+  return React.createElement("div", { ref:boxRef, "data-helpstage":stage.kind+":"+(stage.id||stage.dmode||""),
+      // flexShrink:0 - the sheet is a flex column and everything in a stage is
+      // absolutely placed, so without it the box collapsed to a sliver and the
+      // legend slid up under the picture.
+      style:{ position:"relative", flexShrink:0, boxSizing:"content-box", width:dispW+"px", height:(Math.ceil(meas.h*k)+padTop)+"px", margin:"0 auto",
+              paddingBottom:props.pad||0 } },
+    React.createElement("div", { ref:innerRef, inert:!props.live, "aria-hidden":!props.live,
+      style:{ position:"absolute", left:0, top:padTop+"px", width:natW+"px", height:sheet?meas.h+"px":undefined,
+              transform:"scale("+k+")", transformOrigin:"0 0", pointerEvents:props.live?"auto":"none",
+              overflow:"hidden", background:sheet?S.bg0:"transparent", borderRadius:S.radius3 } },
+      StageCtx ? React.createElement(StageCtx.Provider, { value:true }, helpStageEl(stage, props.on)) : helpStageEl(stage, props.on)),
+    marks.map(function(m, i){
+      var r=meas.rects[i]; if(!r) return null;
+      var p=spots[i];
+      return React.createElement(React.Fragment, { key:i },
+        m.on && React.createElement("div", { "data-helpring":true, style:{ position:"absolute",
+          left:(r.x-4)+"px", top:(r.y-4)+"px", width:(r.w+8)+"px", height:(r.h+8)+"px",
+          border:"2.5px solid "+S.infoText, borderRadius:"10px", pointerEvents:"none",
+          boxShadow:"0 0 0 4px rgba(0,0,0,0.4), 0 0 14px "+S.infoText } }),
+        m.n!=null && React.createElement("button", { "data-helpmark":m.n,
+          onClick:m.onPick||undefined, "aria-label":"Part "+m.n,
+          style:{ position:"absolute", left:p[0]+"px", top:p[1]+"px", width:M+"px", height:M+"px",
+            padding:0, borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center",
+            border:"2px solid "+S.infoText, background:m.on?S.infoText:S.bg0, color:m.on?S.bg0:S.infoText,
+            fontWeight:800, fontSize:"0.72rem", fontFamily:S.fontBody, cursor:m.onPick?"pointer":"default",
+            boxSizing:"border-box", WebkitTapHighlightColor:"transparent" } }, m.n));
+    }));
+}
+
+function HelpNum(props){
+  return React.createElement("span", { style:{ flex:"0 0 auto", width:"26px", height:"26px", borderRadius:"50%",
+    display:"inline-flex", alignItems:"center", justifyContent:"center", border:"2px solid "+S.infoText,
+    background:props.on?S.infoText:S.infoBg, color:props.on?S.bg0:S.infoText, fontWeight:800,
+    fontSize:"0.82rem", fontFamily:S.fontBody } }, props.n);
+}
+function HelpCrumb(props){
+  return React.createElement("div", { "data-helpcrumb":true,
+    style:{ color:S.textMuted, fontSize:"0.8rem", margin:"-0.6rem 0 0.8rem" } }, props.parts.join(" › "));
+}
+
+// TRY IT HERE: the real HoldButton, wired to nothing. It answers back and it
+// writes nothing - no storage, no record - which e2e checks byte for byte.
+// The frame every practice panel sits in, so they read as one family.
+function HelpTryBox(props){
+  return React.createElement("div", { "data-tryit":props.kind,
+      style:{ background:S.bg1, border:"1px dashed "+S.borderBright, borderRadius:S.radius,
+              padding:"0.75rem 0.8rem", marginTop:"0.9rem" } },
+    React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { marginBottom:"0.55rem" }) }, props.label||"Try it here"),
+    props.children,
+    React.createElement("div", { "data-tryresult":props.res||"none", "aria-live":"polite",
+      style:{ marginTop:"0.55rem", fontSize:"0.88rem", lineHeight:1.4,
+              color:props.good?S.successText:props.warn?S.warnText:S.textDim } }, props.msg));
+}
+function HelpTryHold(props){
+  var resS=useState(null); var setRes=resS[1]; var res=resS[0];
+  var msg = res==="held" ? "That’s it. On a real job, that opens the sheet in the next step."
+          : res==="early" ? "Let go too soon. Nothing happened — that’s the safety catch."
+          : "Hold it until the bar fills.";
+  return React.createElement(HelpTryBox, { kind:"hold", label:(props&&props.label)||"Try it here", res:res, msg:msg,
+      good:res==="held", warn:res==="early" },
+    React.createElement(HoldButton, { onTap:function(){ setRes("early"); }, onHold:function(){ setRes("held"); },
+      holdMs:HOLD_DELETE_MS, fill:rgba(S.successText,0.35), attrs:{ "data-tryhold":true, "aria-label":"Practice hold" },
+      style:{ width:"100%", display:"flex", alignItems:"center", justifyContent:"center",
+              background:S.bg0, border:"2px solid "+S.chromeBdr, borderRadius:S.radius3, padding:"0.7rem 0.6rem",
+              color:S.chromeText, fontFamily:S.fontBody, fontWeight:700, fontSize:"0.95rem" } },
+      React.createElement("span", { style:{ display:"flex", alignItems:"center", gap:"0.45rem" } },
+        React.createElement(MenuIcon, { name:"task", size:18, col:S.chromeText }), "Complete",
+        React.createElement("span", { style:{ fontSize:"0.72rem", fontWeight:600, opacity:0.7 } }, "hold"))));
+}
+// One tap or two: the real useTaps, so the timing is the board's own.
+function HelpTryTaps(props){
+  var resS=useState(null); var setRes=resS[1]; var res=resS[0];
+  var taps=useTaps(function(){ setRes("one"); }, function(){ setRes("two"); });
+  var msg = res==="one" ? "One tap. On the board, that opens its menu."
+          : res==="two" ? "Two taps. On the board, that opens its editor."
+          : "Tap the name once, then try two quick taps.";
+  return React.createElement(HelpTryBox, { kind:"taps", label:(props&&props.label)||"Try it here", res:res, msg:msg, good:!!res },
+    React.createElement("button", { "data-trytaps":true, onClick:function(){ taps(); },
+        style:{ width:"100%", display:"flex", alignItems:"center", gap:"0.45rem", background:S.bg0,
+                border:"2px solid "+S.chromeBdr, borderRadius:S.radius3, padding:"0.7rem 0.8rem", cursor:"pointer",
+                color:S.text, fontFamily:S.fontBody, fontWeight:700, fontSize:"1rem", userSelect:"none",
+                WebkitUserSelect:"none", touchAction:"manipulation", WebkitTapHighlightColor:"transparent" } },
+      React.createElement(MenuIcon, { name:"project", size:18, col:S.chromeText }), "Practice job"));
+}
+// Swipe to tuck away and bring back: the real useSwipe, the same threshold,
+// the same rule that a pill only opens to the right.
+function HelpTrySwipe(props){
+  var shutS=useState(false); var setShut=shutS[1]; var shut=shutS[0];
+  var resS=useState(null); var setRes=resS[1]; var res=resS[0];
+  var sw=useSwipe(function(dir){ var s2=dir==="left"; setShut(s2); setRes(s2?"shut":"open"); });
+  var msg = res==="shut" ? "Tucked away. Now swipe right on the pill to open it."
+          : res==="open" ? "Open again. A left swipe on a pill does nothing \u2014 try it."
+          : "Swipe left across the name.";
+  var base={ width:"100%", boxSizing:"border-box", display:"flex", alignItems:"center", gap:"0.45rem",
+             cursor:"grab", userSelect:"none", WebkitUserSelect:"none", touchAction:"pan-y", fontFamily:S.fontBody };
+  return React.createElement(HelpTryBox, { kind:"swipe", label:(props&&props.label)||"Try it here", res:res, msg:msg, good:!!res },
+    shut
+      ? React.createElement("div", Object.assign({ "data-tryswipe":"pill",
+          style:Object.assign({}, base, { height:"22px", justifyContent:"center", border:"2.5px solid "+S.chromeBdr,
+            borderRadius:"999px", background:S.bg0, color:S.chromeText, fontSize:"0.72rem", fontWeight:700 }) }, sw.pill),
+          "Practice job")
+      : React.createElement("div", Object.assign({ "data-tryswipe":"open", onClick:sw.guard(function(){}),
+          style:Object.assign({}, base, { background:S.bg0, border:"2px solid "+S.chromeBdr, borderRadius:S.radius3,
+            padding:"0.8rem", color:S.text, fontWeight:700, fontSize:"1rem" }) }, sw.open),
+          React.createElement(MenuIcon, { name:"project", size:18, col:S.chromeText }), "Practice job"));
+}
+
+function HelpIndexRow(props){
+  return React.createElement("button", { "data-helprow":props.kind+":"+props.id, onClick:props.onOpen,
+      style:{ display:"flex", alignItems:"center", gap:"0.65rem", width:"100%", textAlign:"left",
+              background:S.bg1, border:"2px solid "+S.border, borderRadius:S.radius, padding:"0.75rem 0.9rem",
+              marginBottom:"0.45rem", cursor:"pointer", fontFamily:S.fontBody } },
+    React.createElement(MenuIcon, { name:props.kind==="picture"?"project":props.kind==="practice"?"test":"manual", size:24, col:S.chromeText }),
+    React.createElement("span", { style:{ flex:1, color:S.text, fontWeight:700, fontSize:MENU_FONT } }, props.title),
+    React.createElement("span", { style:{ color:S.textMuted, fontSize:"0.8rem", whiteSpace:"nowrap" } }, props.count),
+    React.createElement("span", { style:{ color:S.textDim } }, "›"));
+}
+
+function HelpPicture(props){
+  var pic=HELP_PICTURES[props.id];
+  var onS=useState(null); var setOn=onS[1]; var on=onS[0];
+  var marks=pic.parts.map(function(pt, i){
+    return { anchor:pt.anchor, side:pt.side, first:!!pt.first, n:i+1, on:on===i, onPick:function(){ setOn(i); } };
+  });
+  return React.createElement(Modal, { title:pic.title, onClose:props.onClose, ownActions:true,
+      actions:[React.createElement("button", { key:"b", "data-helpback":true, onClick:props.onBack, style:MODAL_CANCEL() }, "Back")] },
+    React.createElement(HelpCrumb, { parts:["Guides", "What’s on my screen?"] }),
+    React.createElement("p", { style:{ color:S.textDim, fontSize:"0.95rem", lineHeight:1.5, margin:"0 0 1rem" } }, pic.blurb),
+    React.createElement(HelpStage, { stage:pic.stage, marks:marks, width:300, pad:"30px", padTop:pic.padTop||0 }),
+    React.createElement("div", { style:{ marginTop:"0.6rem" } },
+      pic.parts.map(function(pt, i){
+        return React.createElement("div", { key:i, "data-helppart":i+1, onClick:function(){ setOn(i); },
+            style:{ display:"flex", gap:"0.7rem", alignItems:"center", padding:"0.55rem 0.6rem", cursor:"pointer",
+                    borderRadius:S.radius3, marginBottom:"0.2rem",
+                    background:on===i?S.bg3:"transparent", border:"1px solid "+(on===i?S.borderBright:"transparent") } },
+          React.createElement(HelpNum, { n:i+1, on:on===i }),
+          React.createElement("div", { style:{ flex:1 } },
+            React.createElement("div", { style:{ color:S.text, fontWeight:700, fontSize:"0.98rem" } }, pt.label),
+            React.createElement("div", { style:{ color:S.textDim, fontSize:"0.88rem", lineHeight:1.35 } }, pt.text)),
+          pt.guide && HELP_GUIDES[pt.guide] && React.createElement("button", { "data-helphow":pt.guide,
+              onClick:function(e){ e.stopPropagation(); props.onHow(pt.guide, pt.label); },
+              style:{ flex:"none", border:"2px solid "+S.actionBdr, background:S.infoBg, color:S.infoText,
+                      borderRadius:S.radius3, padding:"0.4rem 0.65rem", fontWeight:700, fontSize:"0.88rem",
+                      fontFamily:S.fontBody, cursor:"pointer" } }, "How ›"));
+      })),
+    pic.tryit && HELP_PANELS[pic.tryit] && React.createElement(HELP_PANELS[pic.tryit]));
+}
+
+function HelpSteps(props){
+  var g=HELP_GUIDES[props.id], n=g.steps.length;
+  var stepS=useState(0); var setStep=stepS[1]; var step=stepS[0];
+  var st=g.steps[step], last=step===n-1;
+  var from=props.from;   // { picture, part } when reached through How >, else null
+  var crumb = from ? ["Guides", HELP_PICTURES[from.picture].title, from.part] : ["Guides", "How do I…?"];
+  var backLabel = step>0 ? "Back" : from ? (HELP_PICTURES[from.picture].back||"Back") : "Back";
+  return React.createElement(Modal, { title:g.title, onClose:props.onClose, ownActions:true,
+      actions:[
+        React.createElement("button", { key:"n", "data-helpnext":true,
+          onClick:function(){ if(last) props.onBack(); else setStep(step+1); }, style:MODAL_SAVE() }, last?"Done":"Next"),
+        React.createElement("button", { key:"b", "data-helpback":true,
+          onClick:function(){ if(step>0) setStep(step-1); else props.onBack(); }, style:MODAL_CANCEL() }, backLabel)
+      ] },
+    React.createElement(HelpCrumb, { parts:crumb }),
+    React.createElement("div", { style:{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"0.9rem" } },
+      React.createElement("span", { "data-helpstep":step+1, style:Object.assign({}, LABEL_STYLE, { margin:0 }) }, "Step "+(step+1)+" of "+n),
+      React.createElement("span", { style:{ display:"flex", gap:"6px" } },
+        g.steps.map(function(_, i){ return React.createElement("span", { key:i,
+          style:{ width:i===step?"18px":"8px", height:"8px", borderRadius:"4px", background:i===step?S.infoText:S.borderBright } }); }))),
+    st.stage && React.createElement("div", { style:{ background:S.bg0, border:"1px solid "+S.border, borderRadius:S.radius,
+                                        padding:"1rem 0.5rem 0.6rem", marginBottom:"1rem" } },
+      React.createElement(HelpStage, { key:step, stage:st.stage, width:st.stage.kind==="close"?250:st.stage.kind==="presets"?220:290, pad:"26px",
+        marks:[{ anchor:st.ring, n:step+1, on:true, side:st.side||"below" }] })),
+    React.createElement("div", { style:{ color:S.text, fontWeight:700, fontSize:"1.15rem", marginBottom:"0.4rem" } }, st.title),
+    React.createElement("div", { style:{ color:S.textDim, fontSize:"0.95rem", lineHeight:1.5 } }, st.text),
+    st.tryit==="hold" && React.createElement(HelpTryHold, { key:"try"+step }),
+    st.tryit==="swipe" && React.createElement(HelpTrySwipe, { key:"try"+step }),
+    st.tryit==="outline" && React.createElement(HelpTryOutline, { key:"try"+step }));
+}
+
+// The real MilestoneStrip on the practice workbench's steps. Its zoom and pan
+// are its own state, so nothing here can reach a record; a tap that does not
+// move would open the milestones sheet, and here it only says so.
+function HelpTryLine(props){
+  var resS=useState(null); var setRes=resS[1]; var res=resS[0];
+  var msg = res==="open" ? "A tap that does not move opens that project\u2019s milestones."
+          : "Tap the zoom button to step closer, hold it to see everything, and drag the line once you are zoomed in.";
+  return React.createElement(HelpTryBox, { kind:"msline", label:(props&&props.label)||"Try it here", res:res, msg:msg, good:!!res },
+    React.createElement(MilestoneStrip, { kind:"practice", points:subtreePoints(TEST_PROJECTS, 103, Date.now()), width:250,
+      offDays:[], tight:true, onOpen:function(){ setRes("open"); } }));
+}
+// The outline itself, LIVE, on a copy of the practice board: pick, move, nest,
+// open the controller and Save - and Save only says so. Its rows are its own
+// state, so nothing reaches a record.
+function HelpTryOutline(props){
+  var resS=useState(null); var setRes=resS[1]; var res=resS[0];
+  var msg = res==="save" ? "Saved. On the real outline, your moves would land on the board now."
+          : res==="close" ? "Cancelled. On the real outline, every move would be thrown away."
+          : res==="open" ? "That would open the row\u2019s details, and keep your moves."
+          : "Tap a row\u2019s glyph to pick it, then move it with the arrows.";
+  return React.createElement(HelpTryBox, { kind:"outline", label:(props&&props.label)||"Try it here", res:res, msg:msg, good:!!res },
+    React.createElement(HelpStage, { live:true, stage:{ kind:"outline" }, width:282, marks:[],
+      on:{ save:function(){ setRes("save"); }, close:function(){ setRes("close"); }, open:function(){ setRes("open"); } } }));
+}
+var HELP_PANELS = { taps:HelpTryTaps, hold:HelpTryHold, swipe:HelpTrySwipe, msline:HelpTryLine, outline:HelpTryOutline };
+var HELP_PANEL_LABELS = { taps:"One tap, two taps", hold:"Hold", swipe:"Swipe", msline:"Zoom and pan", outline:"The arrow pad" };
+function HelpPractice(props){
+  var pr=HELP_PRACTICE[props.id];
+  return React.createElement(Modal, { title:pr.title, onClose:props.onClose, ownActions:true,
+      actions:[React.createElement("button", { key:"b", "data-helpback":true, onClick:props.onBack, style:MODAL_CANCEL() }, "Back")] },
+    React.createElement(HelpCrumb, { parts:["Guides", "Practise the gestures"] }),
+    React.createElement("p", { style:{ color:S.textDim, fontSize:"0.95rem", lineHeight:1.5, margin:"0 0 0.2rem" } }, pr.blurb),
+    pr.panels.map(function(k){ return React.createElement(HELP_PANELS[k], { key:k, label:HELP_PANEL_LABELS[k] }); }));
+}
+
+// The Guides sheet. One mount, four views; each view is its own component so
+// every hook sits at the top of a component, never in a loop or a branch.
+function GuidesModal(props){
+  var viewS=useState({ kind:"index" }); var setView=viewS[1]; var view=viewS[0];
+  var home=function(){ setView({ kind:"index" }); };
+  if(view.kind==="picture")
+    return React.createElement(HelpPicture, { id:view.id, onClose:props.onClose, onBack:home,
+      onHow:function(gid, part){ setView({ kind:"guide", id:gid, from:{ picture:view.id, part:part } }); } });
+  if(view.kind==="practice")
+    return React.createElement(HelpPractice, { id:view.id, onClose:props.onClose, onBack:home });
+  if(view.kind==="guide")
+    return React.createElement(HelpSteps, { id:view.id, from:view.from||null, onClose:props.onClose,
+      onBack:function(){ if(view.from) setView({ kind:"picture", id:view.from.picture }); else home(); } });
+  return React.createElement(Modal, { title:"Guides", onClose:props.onClose, cancelLabel:"Close" },
+    React.createElement("p", { style:{ color:S.textDim, fontSize:"0.95rem", lineHeight:1.5, margin:"0 0 0.4rem" } },
+      "Two ways in. Not sure what you are looking at? Start with a picture. Know what you want to do? Go straight to the steps."),
+    HELP_INDEX.map(function(sec){
+      return React.createElement("div", { key:sec.head },
+        React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { margin:"0.9rem 0 0.45rem" }) }, sec.head),
+        sec.ids.map(function(id){
+          var d=sec.kind==="picture"?HELP_PICTURES[id]:sec.kind==="practice"?HELP_PRACTICE[id]:HELP_GUIDES[id];
+          var cnt=sec.kind==="picture" ? d.parts.length+" parts" : sec.kind==="practice" ? d.panels.length+" to try" : d.steps.length+" steps";
+          return React.createElement(HelpIndexRow, { key:id, kind:sec.kind, id:id, title:d.title, count:cnt,
+            onOpen:function(){ setView({ kind:sec.kind, id:id }); } });
+        }));
+    }));
 }
 
 // ---- STAGES MODAL ------------------------------------------------------------
@@ -2274,7 +3043,7 @@ function ClockDayModal(props){
       ask),
     React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.55rem"} },
       choices.map(function(c){
-        return React.createElement("button", { key:c.key, onClick:function(){ haptic(12); onPick(c); },
+        return React.createElement("button", { key:c.key, "data-shiftchoice":c.key, onClick:function(){ haptic(12); onPick(c); },
           style:{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:"0.1rem",
                  width:"100%",textAlign:"left",background:S.bg1,border:"2px solid "+S.actionBdr,
                  borderRadius:S.radius,padding:"0.8rem 0.9rem",cursor:"pointer",fontFamily:S.fontBody} },
@@ -2315,7 +3084,7 @@ function DistBadge(props){
   if(!total.n) return null;
   var live = today.n>0;
   var fs = props.small ? "0.7rem" : "0.74rem";
-  return React.createElement("button", { onClick:props.onClick,
+  return React.createElement("button", { onClick:props.onClick, "data-anchor":"disruptions",
     "aria-label":"Disruptions: "+today.n+" today, "+total.n+" in total",
     style:{display:"flex",alignItems:"center",gap:"0.32rem",
            background:live?S.dangerTint:S.bg1,
@@ -2974,7 +3743,7 @@ function MilestoneLine(props){
   var groups=groupMarks(visible, span, w, 10);
   groups.forEach(function(g, i){
     var x=left+g.x, c=MS_STATUS_COLOR(g.status), filled=g.status!=="upcoming";
-    kids.push(React.createElement("g", { key:"m"+i, "data-msmark":g.members.map(function(m){ return m.id; }).join(",") },
+    kids.push(React.createElement("g", { key:"m"+i, "data-msmark":g.members.map(function(m){ return m.id; }).join(","), "data-msstatus":g.status },
       React.createElement("line", { x1:x, y1:axisY, x2:x, y2:axisY-8, stroke:c, strokeWidth:2.1, strokeLinecap:"round" }),
       React.createElement("path", { d:"M"+x+" "+(axisY-8)+"L"+(x+4.4)+" "+(axisY-12.4)+"L"+x+" "+(axisY-16.8)+"L"+(x-4.4)+" "+(axisY-12.4)+"Z",
         stroke:c, strokeWidth:2.1, strokeLinejoin:"round", fill:filled?c:S.bg1 }),
@@ -2985,7 +3754,7 @@ function MilestoneLine(props){
         textAnchor:"middle", fontFamily:S.fontBody }, g.members.length>1 ? (g.members[0].label+" +"+(g.members.length-1)) : g.members[0].label) : null
     ));
   });
-  kids.push(React.createElement("path", { key:"now", d:"M"+(nowX-4.5)+" "+(axisY+8)+"L"+nowX+" "+(axisY+2)+"L"+(nowX+4.5)+" "+(axisY+8)+"Z", fill:S.text }));
+  kids.push(React.createElement("path", { key:"now", "data-msnow":true, d:"M"+(nowX-4.5)+" "+(axisY+8)+"L"+nowX+" "+(axisY+2)+"L"+(nowX+4.5)+" "+(axisY+8)+"Z", fill:S.text }));
   // Two signals that the line runs past what is shown, and only when it does:
   // the edges FADE, so the line visibly continues; and a scrollbar says where
   // this window sits in the whole and how much of it you are seeing. The fade
@@ -4612,7 +5381,7 @@ function WorkScheduleModal(props){
     DAY_KEYS.map(function(k){
       var d=draft[k];
       var invalid = d.on && schMinutes(d)===0;
-      return React.createElement("div", { key:k,
+      return React.createElement("div", { key:k, "data-schedday":k,
         style:{display:"flex",alignItems:"center",gap:"0.45rem",padding:"0.5rem 0",borderBottom:"1px solid "+S.border} },
         // Day toggle: tap the name to switch the day on or off. The column is
         // sized by an invisible bold "Wednesday" so every name's right edge
@@ -4694,7 +5463,9 @@ function WorkScheduleModal(props){
 // normalizers.
 function BackupModal(props){
   var statusS=useState(null); var setStatus=statusS[1]; var status=statusS[0];
-  var pendingS=useState(null); var setPending=pendingS[1]; var pending=pendingS[0];
+  // `preview` is the manual staging this sheet: it opens on the "check it"
+  // stage with a summary and NO backup object, so there is nothing to apply.
+  var pendingS=useState(props.preview ? { obj:null, summary:props.preview } : null); var setPending=pendingS[1]; var pending=pendingS[0];
 
   function doExport(){
     haptic(10);
@@ -4746,7 +5517,7 @@ function BackupModal(props){
   }
 
   function doRestore(){
-    if(!pending) return;
+    if(!pending || !pending.obj) return;
     haptic([20,50,20]);
     var res=backupApply(pending.obj, localStorage);
     if(!res.ok){ setStatus({ok:false,msg:res.error}); setPending(null); return; }
@@ -4766,12 +5537,12 @@ function BackupModal(props){
   return React.createElement(Modal, { title:"Backup & Restore", onClose:props.onClose, cancelLabel:"Close" },
     React.createElement("div", { style:note },
       "Everything lives on this phone: deleting the app from the home screen deletes your tracked time with it. Export a backup regularly and keep it somewhere safe."),
-    React.createElement("button", { "data-flat":true, onClick:doExport, style:btn }, "Export Backup"),
+    React.createElement("button", { "data-flat":true, "data-anchor":"backup-export", onClick:doExport, style:btn }, "Export Backup"),
     React.createElement("div", { style:{margin:"1rem 0 0.4rem",fontSize:"0.72rem",textTransform:"uppercase",
       letterSpacing:"0.08em",color:S.textDim,fontWeight:700,fontFamily:S.fontBody} }, "Restore"),
     React.createElement("div", { style:note },
       "Restoring replaces everything currently in the app with the backup."),
-    !pending && React.createElement("label", { style:Object.assign({},btn,{textAlign:"center"}) },
+    !pending && React.createElement("label", { "data-anchor":"backup-choose", style:Object.assign({},btn,{textAlign:"center"}) },
       "Choose Backup File",
       React.createElement("input", { type:"file", accept:"application/json,.json",
         onChange:onPickFile, style:{display:"none"} })
@@ -4785,7 +5556,7 @@ function BackupModal(props){
         (pending.summary.logs!=null ? pending.summary.logs+" log entries" : pending.summary.keys+" data sets")+
         (pending.summary.range ? " ("+fmtStamp(new Date(pending.summary.range.min).toISOString())+
           " - "+fmtStamp(new Date(pending.summary.range.max).toISOString())+")" : "")),
-      React.createElement("button", { "data-flat":true, onClick:doRestore,
+      React.createElement("button", { "data-flat":true, "data-anchor":"backup-replace", onClick:doRestore,
         style:Object.assign({},btn,{marginTop:"0.6rem",background:S.dangerBg2,
           border:"1.5px solid "+S.dangerText,color:S.dangerText}) },
         "Replace All Data & Restore"),
@@ -5453,7 +6224,7 @@ function OutlineModal(props){
     if(firstS.current){ firstS.current=false; return; }
     setRows(function(prev){ return mergeOutline(prev, outlineRows(laneOrder, laneMeta, projects)); });
   }, [projects, laneMeta, laneOrder]);
-  var selS=useState(null); var setSel=selS[1]; var sel=selS[0];          // row key
+  var selS=useState(props.initialSel||null); var setSel=selS[1]; var sel=selS[0];          // row key
   var roleS=useState("task"); var setRole=roleS[1]; var role=roleS[0];   // how it would nest
   var askS=useState(null); var setAsk=askS[1]; var ask=askS[0];
   // Single tap on a name opens that row's menu, double tap edits it - the same
@@ -5472,7 +6243,11 @@ function OutlineModal(props){
   }, [sel, roles.join(",")]);
   // Keep the selected row in view: the controller covers the bottom of the
   // sheet, and a row stepped past that edge would vanish behind it.
+  // Not when staged in a guide: there it would scroll the GUIDE, and the app
+  // drops taps while anything scrolls - Back and Next went dead.
+  var stagedOutline = (StageCtx && React.useContext) ? React.useContext(StageCtx) : false;
   useEffect(function(){
+    if(stagedOutline) return;
     if(!sel || typeof document==="undefined" || !document.querySelector) return;
     var el=document.querySelector('[data-outlinekey="'+sel+'"]');
     if(el && el.scrollIntoView) el.scrollIntoView({ block:"nearest", behavior:"smooth" });
@@ -5571,7 +6346,7 @@ function OutlineModal(props){
     // rather than the sheet shrinking to make room. Moving and saving are two
     // separate moments: Done puts the controller away, and the action row is
     // there underneath it.
-    React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", onClick:function(){ onSave(rows); }, style:MODAL_SAVE() }, "Save"),
+    React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", "data-anchor":"outline-save", onClick:function(){ onSave(rows); }, style:MODAL_SAVE() }, "Save"),
           React.createElement("button", { key:"a1", onClick:onClose, style:MODAL_CANCEL() }, "Cancel")], title:"Edit\u2026", onClose:onClose, wide:true, ownActions:true },
       React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted,marginBottom:"0.8rem",lineHeight:1.4} },
         "Tap a row\u2019s icon to move it. Tap its name for its menu, twice to edit it."),
@@ -5809,7 +6584,7 @@ function DaySummary(props){
     byProject[k].ms+=l.duration;
   });
 
-  var lines=["Day Summary - "+today+(testMode?" [TUTORIAL]":""),""];
+  var lines=["Day Summary - "+today+(testMode?" [PRACTICE]":""),""];
   Object.values(byProject).filter(function(p){ return !p.parentId; }).sort(function(a,b){ return b.ms-a.ms; }).forEach(function(p){
     lines.push(p.name.padEnd(36)+fmtDur(p.ms,true).padStart(8));
     Object.values(byProject).filter(function(c){ return c.parentId; }).forEach(function(c){
@@ -5889,7 +6664,7 @@ function ReportsModal(props){
 
   // Plain-text version for pasting into a log or an email.
   function reportText(){
-    var out=["Time Report - "+periodLabel(range)+(props.testMode?" [TUTORIAL]":""),""];
+    var out=["Time Report - "+periodLabel(range)+(props.testMode?" [PRACTICE]":""),""];
     if(msRep.due>0 || msRep.next.length>0){
       out.push("MILESTONES");
       if(msRep.due>0) out.push("  Due "+msRep.due+"  -  met "+msRep.met+", late "+msRep.late+", missed "+msRep.missed
@@ -5939,7 +6714,7 @@ function ReportsModal(props){
   }
 
   // ---- pieces ----
-  var seg=React.createElement("div", { style:{display:"flex",gap:"0.3rem",marginBottom:"0.7rem"} },
+  var seg=React.createElement("div", { "data-anchor":"rep-period", style:{display:"flex",gap:"0.3rem",marginBottom:"0.7rem"} },
     PERIODS.concat(["pay"]).map(function(k){
       var on=k===kind;
       return React.createElement("button", { key:k, "data-flat":true,
@@ -5959,7 +6734,7 @@ function ReportsModal(props){
              color:disabled?S.textMuted:S.text,fontFamily:S.fontMono,fontSize:"1rem",
              cursor:disabled?"default":"pointer",opacity:disabled?0.4:1} }, glyph);
   }
-  var nav=React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.85rem"} },
+  var nav=React.createElement("div", { "data-anchor":"rep-nav", style:{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.85rem"} },
     arrow("\u2039", false, function(){ stepTo(off-1); }),
     React.createElement("div", { style:{flex:1,minWidth:0,textAlign:"center"} },
       React.createElement("div", { style:{color:S.text,fontWeight:700,fontSize:"0.9rem",
@@ -5980,7 +6755,7 @@ function ReportsModal(props){
       left:markPct+"%",top:0,bottom:0,width:"2px",background:S.warnText,opacity:0.9} })
   );
 
-  var summary=React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,
+  var summary=React.createElement("div", { "data-anchor":"rep-summary", style:{background:S.bg1,border:"1px solid "+S.border,
       borderRadius:S.radius,padding:"0.85rem",marginBottom:"0.85rem"} },
     React.createElement("div", { style:{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:"0.5rem",marginBottom:"0.55rem"} },
       React.createElement(Mono, { style:{fontSize:"1.5rem",fontWeight:600,color:S.text,lineHeight:1} }, fmtDur(roll.trackedMs,true)),
@@ -6072,7 +6847,7 @@ function ReportsModal(props){
       React.createElement(Mono, { style:{fontSize:"0.82rem",fontWeight:600,color:col||S.text} }, value)
     );
   }
-  var stats=React.createElement("div", { style:{display:"flex",gap:"0.4rem",flexWrap:"wrap",marginBottom:"1rem"} },
+  var stats=React.createElement("div", { "data-anchor":"rep-stats", style:{display:"flex",gap:"0.4rem",flexWrap:"wrap",marginBottom:"1rem"} },
     stat("Clocked", roll.clockedMs>0?fmtDur(roll.clockedMs,true):"--"),
     stat("Breaks", roll.breakMs>0?fmtDur(roll.breakMs,true):"--", roll.breakMs>0?S.warnText:S.textMuted),
     stat("Disrupt", roll.distCount>0?(fmtDur(roll.distMs,true)+" x"+roll.distCount):"--", roll.distCount>0?S.dangerText:S.textMuted),
@@ -6229,8 +7004,7 @@ function SubRow(props){
     function(){ if(!menu){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setMenu(function(x){ return !x; }); },
     function(){ setMenu(false); setHint(false); onEdit(sub); }
   );
-  var swipeX=useRef(null);
-  var swiped=useRef(false);
+  var sw=useSwipe(function(dir){ setRowCollapsedPersist(dir==="left"); });
   var rowCollapsedS=useState(function(){ var c=load("tt_cardcollapse",{}); return !!c[sub.id]; });
   var setRowCollapsed=rowCollapsedS[1]; var rowCollapsed=rowCollapsedS[0];
   function setRowCollapsedPersist(v){ setRowCollapsed(v); var c=load("tt_cardcollapse",{}); c[sub.id]=v; save("tt_cardcollapse",c); }
@@ -6317,10 +7091,7 @@ function SubRow(props){
   if(rowCollapsed){
     return (
       React.createElement("div", {
-        onMouseDown:function(e){ swipeX.current=e.clientX; },
-        onMouseUp:function(e){ if(swipeX.current!==null){ var dx=e.clientX-swipeX.current; if(dx>50){ haptic(8); setRowCollapsedPersist(false); } } swipeX.current=null; },
-        onTouchStart:function(e){ if(e.touches&&e.touches.length) swipeX.current=e.touches[0].clientX; },
-        onTouchEnd:function(e){ if(swipeX.current!==null&&e.changedTouches&&e.changedTouches.length){ var dx=e.changedTouches[0].clientX-swipeX.current; if(dx>50){ haptic(8); setRowCollapsedPersist(false); } } swipeX.current=null; },
+        onMouseDown:sw.pill.onMouseDown, onMouseUp:sw.pill.onMouseUp, onTouchStart:sw.pill.onTouchStart, onTouchEnd:sw.pill.onTouchEnd,
         style:{height:"20px",border:"2.5px solid "+rowBdr,borderRadius:"999px",background:rowBg,cursor:"grab",opacity:0.9,marginBottom:"0.35rem",display:"flex",alignItems:"center",justifyContent:"center",gap:"0.5rem",overflow:"hidden",boxShadow:glow,touchAction:"pan-y",WebkitUserSelect:"none",userSelect:"none"} },
         React.createElement("span", { style:{fontSize:"0.68rem",fontWeight:700,color:ACCENT,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",fontFamily:S.fontBody} }, sub.name),
         (isActive||todayMs>0) && React.createElement(Mono, { style:{fontSize:"0.66rem",color:timCol,fontWeight:700,whiteSpace:"nowrap"} }, fmtDur(todayMs,true))
@@ -6334,18 +7105,9 @@ function SubRow(props){
         editMode&&React.createElement("span", { onMouseDown:function(e){ onDragStart(e,idx); }, onTouchStart:function(e){ onDragStart(e,idx); }, style:{cursor:"grab",color:S.dragGlyph,fontSize:"0.95rem",userSelect:"none",touchAction:"none",flexShrink:0} }, "\u283f"),
         React.createElement("div", { style:{width:"3px",alignSelf:"stretch",background:barBg,borderRadius:"2px",flexShrink:0,minHeight:"22px"} }),
         React.createElement("div", { style:{flex:1,minWidth:0,cursor:"pointer",WebkitUserSelect:"none",userSelect:"none",touchAction:"pan-y",position:"relative"},
-          onMouseDown:function(e){ swipeX.current=e.clientX; swiped.current=false; },
-          onMouseUp:function(e){
-            if(swipeX.current!==null){ var dx=e.clientX-swipeX.current; if(Math.abs(dx)>50){ swiped.current=true; haptic(8); setRowCollapsedPersist(dx<0); } }
-            swipeX.current=null;
-          },
+          onMouseDown:sw.open.onMouseDown, onMouseUp:sw.open.onMouseUp, onTouchStart:sw.open.onTouchStart, onTouchEnd:sw.open.onTouchEnd,
           onMouseLeave:function(){ setHint(false); },
-          onTouchStart:function(e){ if(e.touches&&e.touches.length) swipeX.current=e.touches[0].clientX; swiped.current=false; },
-          onTouchEnd:function(e){
-            if(swipeX.current!==null&&e.changedTouches&&e.changedTouches.length){ var dx=e.changedTouches[0].clientX-swipeX.current; if(Math.abs(dx)>50){ swiped.current=true; haptic(8); setRowCollapsedPersist(dx<0); } }
-            swipeX.current=null;
-          },
-          onClick:function(e){ if(swiped.current){ swiped.current=false; return; } taps(); },
+          onClick:sw.guard(function(){ taps(); }),
           onMouseEnter:function(){ setHint(true); } },
           React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.35rem",fontWeight:600,fontSize:"0.92rem",color:titleCol,lineHeight:1.25,wordBreak:"break-word"} },
             React.createElement(TitleGlyph, { name:"task", size:17, col:titleCol }),
@@ -6465,9 +7227,10 @@ function ProjectCard(props){
     function(){ if(!menu){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setMenu(function(x){ return !x; }); },
     function(){ setMenu(false); setHint(false); onEdit(proj); }
   );
-  var swipeX=useRef(null);
-  var swiped=useRef(false);
-  var cardCollapsedS=useState(function(){ var c=load("tt_cardcollapse",{}); return !!c[proj.id]; });
+  var sw=useSwipe(function(dir){ setCardCollapsedPersist(dir==="left"); });
+  // `still` is a card staged inside a guide: always drawn open, whatever the
+  // board remembers for that id, so the picture matches the guide's words.
+  var cardCollapsedS=useState(function(){ if(props.still) return !!props.stillCollapsed; var c=load("tt_cardcollapse",{}); return !!c[proj.id]; });
   var setCardCollapsed=cardCollapsedS[1]; var cardCollapsed=cardCollapsedS[0];
   function setCardCollapsedPersist(v){ setCardCollapsed(v); var c=load("tt_cardcollapse",{}); c[proj.id]=v; save("tt_cardcollapse",c); }
 
@@ -6610,11 +7373,8 @@ function ProjectCard(props){
         style:{ marginBottom:isNestedCard?0:"0.45rem",
                 marginTop:isNestedCard?"-12px":0 } },
         React.createElement("div", {
-          "data-pulse": pillPulse ? "1" : undefined,
-          onMouseDown:function(e){ swipeX.current=e.clientX; },
-          onMouseUp:function(e){ if(swipeX.current!==null){ var dx=e.clientX-swipeX.current; if(dx>50){ haptic(8); setCardCollapsedPersist(false); } } swipeX.current=null; },
-          onTouchStart:function(e){ if(e.touches&&e.touches.length) swipeX.current=e.touches[0].clientX; },
-          onTouchEnd:function(e){ if(swipeX.current!==null&&e.changedTouches&&e.changedTouches.length){ var dx=e.changedTouches[0].clientX-swipeX.current; if(dx>50){ haptic(8); setCardCollapsedPersist(false); } } swipeX.current=null; },
+          "data-pulse": pillPulse ? "1" : undefined, "data-anchor":"card-pill",
+          onMouseDown:sw.pill.onMouseDown, onMouseUp:sw.pill.onMouseUp, onTouchStart:sw.pill.onTouchStart, onTouchEnd:sw.pill.onTouchEnd,
           // A nested pill is 12px taller and spends all of it above the text,
           // so the text keeps its original position relative to the bottom and
           // the extra 12px is what slides under the parent.
@@ -6763,21 +7523,12 @@ function ProjectCard(props){
           editMode && React.createElement("span", { onMouseDown:dragHandleProps.onMouseDown, onTouchStart:dragHandleProps.onTouchStart, style:{cursor:"grab",color:S.mutedGlyph,fontSize:"1.3rem",userSelect:"none",touchAction:"none",flexShrink:0} }, "\u283f"),
           // Title
           React.createElement("div", { style:{flex:1,minWidth:0,cursor:"pointer",WebkitUserSelect:"none",userSelect:"none",touchAction:"pan-y",position:"relative"},
-            onMouseDown:function(e){ swipeX.current=e.clientX; swiped.current=false; },
-            onMouseUp:function(e){
-              if(swipeX.current!==null){ var dx=e.clientX-swipeX.current; if(Math.abs(dx)>50){ swiped.current=true; haptic(8); setCardCollapsedPersist(dx<0); } }
-              swipeX.current=null;
-            },
-            onTouchStart:function(e){ if(e.touches&&e.touches.length) swipeX.current=e.touches[0].clientX; swiped.current=false; },
-            onTouchEnd:function(e){
-              if(swipeX.current!==null&&e.changedTouches&&e.changedTouches.length){ var dx=e.changedTouches[0].clientX-swipeX.current; if(Math.abs(dx)>50){ swiped.current=true; haptic(8); setCardCollapsedPersist(dx<0); } }
-              swipeX.current=null;
-            },
-            onClick:function(e){ if(swiped.current){ swiped.current=false; return; } taps(); },
+            onMouseDown:sw.open.onMouseDown, onMouseUp:sw.open.onMouseUp, onTouchStart:sw.open.onTouchStart, onTouchEnd:sw.open.onTouchEnd,
+            onClick:sw.guard(function(){ taps(); }),
             onMouseEnter:function(){ setHint(true); }, onMouseLeave:function(){ setHint(false); } },
             React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.4rem",fontWeight:700,fontSize:"1.05rem",color:titleCol,lineHeight:1.25,wordBreak:"break-word"} },
               React.createElement(TitleGlyph, { name:"project", size:19, col:titleCol }),
-              React.createElement("span", { style:{minWidth:0,wordBreak:"break-word"} }, proj.name)
+              React.createElement("span", { "data-anchor":"card-title", style:{minWidth:0,wordBreak:"break-word"} }, proj.name)
             ),
             hint && React.createElement("div", { style:{fontSize:"0.7rem",color:S.titleText,marginTop:"0.12rem"} }, "tap: menu / double-tap: edit"),
             menu && React.createElement("div", {
@@ -6805,7 +7556,7 @@ function ProjectCard(props){
             )
           ),
           // Start/Stop button
-          React.createElement("button", { onClick:function(){ onToggle(proj.id); },
+          React.createElement("button", { "data-anchor":"card-start", onClick:function(){ onToggle(proj.id); },
             "aria-disabled": pending ? "true" : undefined,
             style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.38rem",background:startBg,border:"2px solid "+startBdr,borderRadius:S.radius,cursor:"pointer",padding:"0.38rem 0.65rem",minHeight:"44px",flexShrink:0,transition:"all 0.15s",boxShadow:startGlow} },
             isInterrupted
@@ -6832,7 +7583,7 @@ function ProjectCard(props){
             style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"0.3rem",background:S.bg0,border:"2px solid "+S.chromeBdr,borderRadius:"8px",cursor:"pointer",padding:"0 0.55rem",height:"30px",minHeight:"30px",flexShrink:0} },
             React.createElement("span", { style:{fontSize:"0.76rem",color:S.chromeText,fontWeight:700} }, (expanded?"\u2228 ":"\u203a ")+countLabel)
           ),
-          todayMs>0 && React.createElement(Mono, { style:{fontSize:"0.82rem",color:timCol,fontWeight:700} }, fmtDur(todayMs,true)),
+          todayMs>0 && React.createElement(Mono, { "data-anchor":"card-time", style:{fontSize:"0.82rem",color:timCol,fontWeight:700} }, fmtDur(todayMs,true)),
           React.createElement(DistBadge, { today:distToday, total:distTotal,
             onClick:function(){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} setDistPopup(true); } }),
           // No stages: Complete sits where the gauge would. HELD, not tapped -
@@ -6916,8 +7667,7 @@ function LaneSection(props){
     setCollapsed(v);
     var c=load("tt_lanecollapse",{}); c[lane]=v; save("tt_lanecollapse",c);
   }
-  var swipeX=useRef(null);
-  var swiped=useRef(false);
+  var sw=useSwipe(function(dir){ setCollapsedPersist(dir==="left"); });
   useEffect(function(){
     if(!addOpen) return;
     function h(e){ if(addRef.current&&!addRef.current.contains(e.target)) setAddOpen(false); }
@@ -6956,17 +7706,8 @@ function LaneSection(props){
         React.createElement(TitleGlyph, { name:"lanes", size:19, col:meta.accent }),
         React.createElement("span", {
           style:{flex:1,cursor:"pointer",WebkitUserSelect:"none",userSelect:"none",touchAction:"pan-y"},
-          onMouseDown:function(e){ swipeX.current=e.clientX; swiped.current=false; },
-          onMouseUp:function(e){
-            if(swipeX.current!==null){ var dx=e.clientX-swipeX.current; if(Math.abs(dx)>50){ swiped.current=true; haptic(8); setCollapsedPersist(dx<0); } }
-            swipeX.current=null;
-          },
-          onTouchStart:function(e){ if(e.touches&&e.touches.length) swipeX.current=e.touches[0].clientX; swiped.current=false; },
-          onTouchEnd:function(e){
-            if(swipeX.current!==null&&e.changedTouches&&e.changedTouches.length){ var dx=e.changedTouches[0].clientX-swipeX.current; if(Math.abs(dx)>50){ swiped.current=true; haptic(8); setCollapsedPersist(dx<0); } }
-            swipeX.current=null;
-          },
-          onClick:function(e){ if(swiped.current){ swiped.current=false; return; } laneTaps(); }
+          onMouseDown:sw.open.onMouseDown, onMouseUp:sw.open.onMouseUp, onTouchStart:sw.open.onTouchStart, onTouchEnd:sw.open.onTouchEnd,
+          onClick:sw.guard(function(){ laneTaps(); })
         }, meta.label),
         // The same rule the cards follow: count what is THERE, and say how
         // many are finished. A count of only what is left read "0" for a lane
@@ -6999,10 +7740,7 @@ function LaneSection(props){
         ? React.createElement("div", {
             "data-pulse": lanePulse ? "1" : undefined,
             "data-laneoval":lane,
-            onMouseDown:function(e){ swipeX.current=e.clientX; },
-            onMouseUp:function(e){ if(swipeX.current!==null){ var dx=e.clientX-swipeX.current; if(dx>50){ haptic(8); setCollapsedPersist(false); } } swipeX.current=null; },
-            onTouchStart:function(e){ if(e.touches&&e.touches.length) swipeX.current=e.touches[0].clientX; },
-            onTouchEnd:function(e){ if(swipeX.current!==null&&e.changedTouches&&e.changedTouches.length){ var dx=e.changedTouches[0].clientX-swipeX.current; if(dx>50){ haptic(8); setCollapsedPersist(false); } } swipeX.current=null; },
+            onMouseDown:sw.pill.onMouseDown, onMouseUp:sw.pill.onMouseUp, onTouchStart:sw.pill.onTouchStart, onTouchEnd:sw.pill.onTouchEnd,
             style:Object.assign({height:laneActiveProj?"20px":"16px",border:"2.5px solid "+meta.accent,borderRadius:"999px",background:laneOvalBg,cursor:"grab",opacity:laneActiveProj?0.95:0.85,marginTop:"0.15rem",touchAction:"pan-y",display:"flex",alignItems:"center",padding:laneActiveProj?"0 0.75rem":"0",overflow:"hidden"}, pulseVars(meta.accent)) },
             // A collapsed lane still names its running timer, so nothing
             // active is ever fully out of sight.
@@ -8284,6 +9022,7 @@ function TTBoard(){
   var showEditPresetsS=useState(false); var setShowEditPresets=showEditPresetsS[1]; var showEditPresets=showEditPresetsS[0];
   var distMenuRef=useRef(null);
   var showTestConfirmS=useState(false); var setShowTestConfirm=showTestConfirmS[1]; var showTestConfirm=showTestConfirmS[0];
+  var showGuidesS=useState(false); var setShowGuides=showGuidesS[1]; var showGuides=showGuidesS[0];
   var menuRef=useRef(null);
   var interval=useRef(null);
 
@@ -8413,7 +9152,7 @@ function TTBoard(){
     setShowAdd(null); setEditProj(null); setStagesProj(null); setShowDisrupt(false);
     setShowBreak(false); setShowDay(false); setShowNewLane(false);
     setShowReports(false); setShowBackup(false); setShowExtensions(false); setModScreen(null);
-    setConfirmDelete(null); setShowTestConfirm(false); setStartAsk(null);
+    setConfirmDelete(null); setShowTestConfirm(false); setShowGuides(false); setStartAsk(null);
     setMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowThemes(false); setShowLayout(false); setShowSchedule(false); setShowTracking(false); setMenuGroup(null); setShowOutline(false); setEditLane(null); setMsProj(null); setMsLane(null); setMsBoard(false); setStagesDone(null);
     try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){}
   }
@@ -8800,11 +9539,6 @@ function TTBoard(){
   // Disruption button state values
   var dActive = interrupting;
   var dStandalone = !!(openDist&&!openDist.projectId);
-  var dBg = dActive ? S.dangerBg2 : S.dangerBg;
-  var dBdr = dActive ? S.distBdrLive : (dStandalone ? S.distBdrOpen : S.distBdr);
-  var dBangCol = dActive ? S.dangerBright : S.bang;
-  var dLblCol = S.dangerText;
-  var dLbl = dActive ? "Resume" : (dStandalone ? "End" : "Disruption");
   var dSubLbl = dActive ? fmtDur(intElapsed,true) : (todayDist.length>0 ? todayDist.length+"x . "+fmtDur(todayDistMs,true) : "log one");
 
   // Work status bar values
@@ -8820,16 +9554,8 @@ function TTBoard(){
   // Summary item color (mode-aware)
   var summaryCol = todayLogs.length ? S.actionText : S.textMuted;
 
-  // Settings menu gear icon color (mode-aware)
-  var mnIcon = menuOpen ? S.chromeIconOn : S.chromeText;
 
   // Clock header button
-  var ckBg = clocked ? S.successBg2 : S.successBg;
-  var ckBdr = clocked ? S.clockBdrOn : S.clockBdr;
-  var ckIcon = clocked ? S.successText : S.successMid;
-  var ckLblC = clocked ? S.successText : S.successMid;
-  var ckSubC = S.successDim;
-  var ckLbl = clocked ? "Clock Out" : "Clock In";
   var ckSub = clocked ? fmtDur(atWorkElapsed,true) : "start day";
 
   // Test-mode frame
@@ -8862,54 +9588,9 @@ function TTBoard(){
   UI.topClear = hdrBottom ? FW : (114 + FW);
 
   // ---- Screen ticker: date/time + live status ----
-  var tickerStatus = null;
-  if(interrupting && activeProj){
-    // No flashing labels. The disrupted project's own name breathes red on the
-    // same slow cycle a running project's border uses, so the cue reads as the
-    // counterpart of the green one rather than as an alarm.
-    tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem",minWidth:0} },
-      React.createElement("span", { "data-glow":"1",
-        style:Object.assign(glowVars(S.dangerText),
-          {fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}) },
-        activeProj.name),
-      React.createElement(Mono, { "data-glow":"1",
-        style:Object.assign(glowVars(S.dangerText),
-          {fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap",flexShrink:0}) },
-        fmtDur(intElapsed,true))
-    );
-  } else if(activeProj){
-    tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem",minWidth:0} },
-      React.createElement("span", { style:{color:wsActive?wsActive.accent:S.text,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, activeProj.name),
-      React.createElement(Mono, { style:{color:wsActive?wsActive.accent:S.text,fontWeight:500,fontSize:"0.8rem",whiteSpace:"nowrap"} }, fmtDur(elapsed,true))
-    );
-  } else if(onBreak){
-    tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem"} },
-      React.createElement("span", { style:{color:S.warnText,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, "On Break - "+breakLabel),
-      React.createElement(Mono, { style:{color:S.warnText,fontWeight:500,fontSize:"0.8rem",whiteSpace:"nowrap"} }, fmtDur(breakElapsed,true))
-    );
-  } else if(clocked){
-    // Clocked in with nothing running. The day clock keeps its green because
-    // the day really is running; the label says what is not.
-    tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem"} },
-      React.createElement("span", { style:{color:S.textDim,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, "No Activity"),
-      React.createElement(Mono, { style:{color:S.successDim,fontWeight:500,fontSize:"0.8rem",whiteSpace:"nowrap"} }, fmtDur(atWorkElapsed,true))
-    );
-  } else {
-    tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem"} },
-      React.createElement("span", { style:{color:S.textMuted,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, "No Activity")
-    );
-  }
-  var tickerDate = React.createElement("span", { style:{color:S.titleText,fontWeight:700,fontSize:"0.88rem",fontFamily:S.fontBody,whiteSpace:"nowrap"} },
-    new Date(nowTick).toLocaleDateString([],{weekday:"short",month:"short",day:"numeric"})
-  );
-  var tickerTime = React.createElement(Mono, { style:{color:S.text,fontSize:"0.88rem",fontWeight:700,whiteSpace:"nowrap"} }, fmtTime(nowTick));
-  // Static, not scrolling. The date and time are fixed on the left where the
-  // eye can find them without waiting for them to come round again; the status
-  // takes the rest of the bar and truncates rather than moving.
-  var tickerEl = React.createElement("div", { dir:"ltr", style:{display:"flex",alignItems:"center",gap:"0.75rem",padding:"0.25rem 0.85rem",minHeight:"28px",background:S.bg2,borderBottom:hdrBottom?"none":"1px solid "+S.border,boxShadow:hdrBottom?"inset 0 1px 0 "+S.border:"none",overflow:"hidden",whiteSpace:"nowrap"} },
-    tickerDate, tickerTime,
-    tickerStatus && React.createElement("span", { style:{display:"flex",alignItems:"center",flex:1,minWidth:0,overflow:"hidden"} }, tickerStatus)
-  );
+  var tickerEl = React.createElement(HeaderTicker, { interrupting:interrupting, activeProj:activeProj, intElapsed:intElapsed,
+    wsActive:wsActive, elapsed:elapsed, onBreak:onBreak, breakLabel:breakLabel, breakElapsed:breakElapsed,
+    clocked:clocked, atWorkElapsed:atWorkElapsed, nowTick:nowTick, bottom:hdrBottom });
 
   return (
     React.createElement("div", { dir:isLeft?"rtl":"ltr", style:{minHeight:"100vh",background:S.bg0,color:S.text,fontFamily:S.fontBody,paddingBottom:rootPadBottom,paddingLeft:FW,paddingRight:FW} },
@@ -8959,7 +9640,13 @@ function TTBoard(){
         React.createElement(MenuIcon, { name:"test", size:17, col:S.testFrameInk }),
         React.createElement("span", { style:{flex:1,color:S.testFrameInk,fontSize:"0.66rem",
                fontWeight:800,letterSpacing:"0.22em",fontFamily:S.fontBody,whiteSpace:"nowrap"} },
-          "INTERACTIVE TUTORIAL"),
+          "PRACTICE BOARD"),
+        // The manual from inside practice: read a step, close it, try it here.
+        React.createElement("button", { "data-tutorialguides":true, "aria-label":"Guides",
+          onClick:function(){ closeAllPopups(); setShowGuides(true); },
+          style:{flexShrink:0,display:"flex",alignItems:"center",background:"none",border:"1.5px solid "+S.testFrameInk,
+                 borderRadius:S.radius3,padding:"0.12rem 0.45rem",cursor:"pointer",WebkitTapHighlightColor:"transparent"} },
+          React.createElement(MenuIcon, { name:"manual", size:16, col:S.testFrameInk })),
         React.createElement("button", { "data-tutorialexit":true,
           onClick:function(){ closeAllPopups(); setShowTestConfirm(true); },
           style:{flexShrink:0,background:"none",border:"1.5px solid "+S.testFrameInk,
@@ -8976,17 +9663,19 @@ function TTBoard(){
         React.createElement("div", { style:{display:"flex",flexDirection:"row-reverse",alignItems:"stretch",background:S.bg1,borderBottom:"2px solid "+S.border,padding:"0.5rem 0.75rem",gap:"0.5rem"} },
           // SETTINGS MENU button (gear) + stacked dropdown
           React.createElement("div", { ref:menuRef, style:{position:"relative",flex:"0 0 64px"} },
-            React.createElement("button", { onClick:function(){ if(!menuOpen){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setMenuOpen(function(x){ return !x; }); },
-              style:{width:"100%",minHeight:"56px",display:"flex",alignItems:"center",justifyContent:"center",background:menuOpen?S.bg3:S.bg0,border:"2.5px solid "+(menuOpen?S.chromeBdrOn:S.chromeBdr),borderRadius:S.radius2,cursor:"pointer"} },
-              React.createElement(MenuIcon, { name:"more", size:30, col:mnIcon })
-            ),
+            React.createElement(HeaderMenuButton, { open:menuOpen,
+              onClick:function(){ if(!menuOpen){ try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){} } setMenuOpen(function(x){ return !x; }); } }),
             menuOpen && React.createElement("div", { dir:"ltr", "data-surface":"menu", "data-menu-open":"1", style:{position:"absolute",top:ddTop,bottom:ddBottom,left:hdrMenuRight?"auto":0,right:hdrMenuRight?0:"auto",minWidth:"290px",maxWidth:"94vw",maxHeight:"72vh",overflowY:"auto",background:S.menuBg,border:"1px solid "+S.border,borderRadius:S.radius2,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:200} },
-              // Both ways out of the tutorial go through the confirm, which
-              // resets it - so neither can quietly leave it rummaged through.
-              React.createElement("button", { "data-flat":true, onClick:function(){ if(testMode){ closeAllPopups(); setShowTestConfirm(true); } else { setTestMode(true); setMenuOpen(false); } },
+              // USER MANUAL row - at the top, where the tutorial row was. It opens a
+              // group: Guides, and the Practice Board (the tutorial, renamed). On
+              // the practice board it reads in the warning colour, so the way out
+              // is as easy to find as it was when this row said Exit Tutorial.
+              React.createElement("button", { "data-flat":true, "data-menugroup":"manual",
+                onClick:function(){ setMenuOpen(false); setMenuGroup("manual"); },
                 style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:testMode?S.warnBg:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:testMode?S.warnText:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:testMode?700:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
-                React.createElement(MenuIcon, { name:"test", col:testMode?S.warnText:S.chromeText }),
-                React.createElement("span", { style:{flex:1} }, testMode?"Exit Tutorial":"Interactive Tutorial")
+                React.createElement(MenuIcon, { name:"manual", col:testMode?S.warnText:S.chromeText }),
+                React.createElement("span", { style:{flex:1} }, "User Manual"),
+                React.createElement("span", { style:{fontSize:"0.9rem",color:testMode?S.warnText:S.textDim} }, "\u203A")
               ),
               // Edit Lanes and Arrange both left this menu when Edit... arrived:
               // the outline lists every lane and reorders everything, so two
@@ -9105,54 +9794,24 @@ function TTBoard(){
               ),
             )
           ),
-          // CLOCK button
-          React.createElement("button", { onClick:function(){ if(clocked){ clockOut(); } else { clockIn(); } setMenuOpen(false); },
-            style:{flex:1,minHeight:"56px",display:"flex",alignItems:"center",justifyContent:"center",gap:"0.55rem",background:ckBg,border:"2.5px solid "+ckBdr,borderRadius:S.radius2,cursor:"pointer"} },
-            React.createElement("svg", { width:28, height:28, viewBox:"0 0 28 28", fill:"none" },
-              React.createElement("circle", { cx:"14", cy:"14", r:"11", stroke:ckIcon, strokeWidth:"2.5" }),
-              React.createElement("path", { d:"M14 8 L14 14 L18 17", stroke:ckIcon, strokeWidth:"2.5", strokeLinecap:"round", strokeLinejoin:"round" })
-            ),
-            React.createElement("div", { style:{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:"0.08rem"} },
-              React.createElement("span", { style:{fontSize:"1rem",fontWeight:700,color:ckLblC,fontFamily:S.fontBody,lineHeight:1,whiteSpace:"nowrap"} }, ckLbl),
-              React.createElement(Mono, { style:{fontSize:"0.72rem",color:ckSubC,lineHeight:1,whiteSpace:"nowrap"} }, ckSub)
-            )
-          ),
+          // CLOCK button. A component, so the manual can stage it exactly as
+          // drawn here; the header still owns what a press does.
+          React.createElement(ClockButton, { clocked:clocked, sub:ckSub,
+            onClick:function(){ if(clocked){ clockOut(); } else { clockIn(); } setMenuOpen(false); } }),
           // DISRUPTION button + presets dropdown
           React.createElement("div", { ref:distMenuRef, style:{position:"relative",flex:1} },
-            React.createElement("button", {
+            React.createElement(DisruptButton, { mode:dActive?"active":(dStandalone?"standalone":"idle"), sub:dSubLbl,
               onClick:function(){
                 if(dStandalone){ closeDisruption(); }
                 else if(interrupting){ resumeProject(); }
                 else if(distMenuOpen){ setDistMenuOpen(false); }
                 else { closeAllPopups(); setDistMenuOpen(true); }
-              },
-              style:{width:"100%",minHeight:"56px",display:"flex",alignItems:"center",justifyContent:"center",gap:"0.55rem",background:dBg,border:"2.5px solid "+dBdr,borderRadius:S.radius2,cursor:"pointer"}
-            },
-              React.createElement("span", { style:{fontSize:"1.6rem",fontWeight:900,color:dBangCol,letterSpacing:"-0.08em",lineHeight:1,fontFamily:S.fontBody} }, "!!"),
-              React.createElement("div", { style:{display:"flex",flexDirection:"column",alignItems:"flex-start",gap:"0.1rem"} },
-                React.createElement("span", { style:{fontSize:"1rem",fontWeight:700,color:dLblCol,fontFamily:S.fontBody,lineHeight:1,whiteSpace:"nowrap"} }, dLbl),
-                React.createElement(Mono, { style:{fontSize:"0.72rem",color:S.dangerText,opacity:0.75,lineHeight:1,whiteSpace:"nowrap"} }, dSubLbl)
-              )
-            ),
-            distMenuOpen && React.createElement("div", { style:{position:"absolute",top:ddTop,bottom:ddBottom,right:hdrMenuRight?"auto":0,left:hdrMenuRight?0:"auto",minWidth:"250px",maxWidth:"94vw",maxHeight:"72vh",overflowY:"auto",background:S.menuBg,border:"1px solid #4A1A1A",borderRadius:S.radius2,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",zIndex:200,padding:"0.5rem",display:"flex",flexDirection:"column",gap:"0.4rem"} },
-              distPresets.map(function(label,i){
-                return React.createElement("button", { key:i, onClick:function(){ setDistMenuOpen(false); startDisruptionWith(label, activeProj||null); },
-                  style:{display:"flex",alignItems:"center",gap:"0.55rem",width:"100%",textAlign:"left",background:S.dangerBg,border:"2.5px solid #AA4040",borderRadius:"10px",padding:"0.6rem 0.85rem",cursor:"pointer",fontFamily:S.fontBody} },
-                  React.createElement("span", { style:{fontSize:"1.25rem",fontWeight:900,color:S.bang,letterSpacing:"-0.08em",lineHeight:1,flexShrink:0} }, "!!"),
-                  React.createElement("span", { style:{fontSize:"0.95rem",fontWeight:700,color:S.dangerText,whiteSpace:"nowrap"} }, label)
-                );
-              }),
-              React.createElement("button", { onClick:function(){ setDistMenuOpen(false); openDisrupt(activeProj||null); },
-                style:{display:"flex",alignItems:"center",gap:"0.55rem",width:"100%",textAlign:"left",background:S.bg1,border:"2px solid #5A3030",borderRadius:"10px",padding:"0.55rem 0.85rem",cursor:"pointer",fontFamily:S.fontBody} },
-                React.createElement("span", { style:{fontSize:"1.1rem",fontWeight:700,color:S.distNote,flexShrink:0,lineHeight:1} }, "+"),
-                React.createElement("span", { style:{fontSize:"0.9rem",fontWeight:600,color:S.distNote,whiteSpace:"nowrap"} }, "Custom note...")
-              ),
-              React.createElement("button", { onClick:function(){ closeAllPopups(); setShowEditPresets(true); },
-                style:{display:"flex",alignItems:"center",gap:"0.55rem",width:"100%",textAlign:"left",background:S.bg1,border:"2px solid "+S.borderBright,borderRadius:"10px",padding:"0.55rem 0.85rem",cursor:"pointer",fontFamily:S.fontBody} },
-                React.createElement(GearSVG, { size:14, col:S.chromeText }),
-                React.createElement("span", { style:{fontSize:"0.9rem",fontWeight:600,color:S.chromeText,whiteSpace:"nowrap"} }, "Edit List")
-              )
-            )
+              } }),
+            distMenuOpen && React.createElement(DisruptPresetList, { presets:distPresets,
+              place:{position:"absolute",top:ddTop,bottom:ddBottom,right:hdrMenuRight?"auto":0,left:hdrMenuRight?0:"auto",maxWidth:"94vw",maxHeight:"72vh",overflowY:"auto",zIndex:200},
+              onPick:function(label){ setDistMenuOpen(false); startDisruptionWith(label, activeProj||null); },
+              onCustom:function(){ setDistMenuOpen(false); openDisrupt(activeProj||null); },
+              onEdit:function(){ closeAllPopups(); setShowEditPresets(true); } })
           )
         ),
         hdrBottom ? tickerEl : null
@@ -9308,6 +9967,16 @@ function TTBoard(){
       confirmDelete && React.createElement(DeleteProjectModal, { proj:confirmDelete, allProjects:projects, laneMeta:laneMeta, onMoveTasks:doMoveTasks, onDeleteAll:doDeleteAll, onCancel:function(){ setConfirmDelete(null); } }),
       // The menu groups. Selecting an item runs closeAllPopups first, which
       // clears the group itself, then opens the screen that was chosen.
+      // Both ways out of the practice board go through the confirm: the bar's
+      // EXIT and this group's Leave row.
+      menuGroup==="manual" && React.createElement(MenuGroupModal, { title:"User Manual",
+        onClose:function(){ setMenuGroup(null); },
+        items:[
+          { label:"Guides", onSelect:function(){ closeAllPopups(); setShowGuides(true); } },
+          testMode
+            ? { label:"Leave Practice Board", onSelect:function(){ closeAllPopups(); setShowTestConfirm(true); } }
+            : { label:"Practice Board", onSelect:function(){ closeAllPopups(); setTestMode(true); } }
+        ] }),
       menuGroup==="time" && React.createElement(MenuGroupModal, { title:"Time Settings",
         onClose:function(){ setMenuGroup(null); },
         items:[
@@ -9320,6 +9989,7 @@ function TTBoard(){
           { label:"Themes", onSelect:function(){ closeAllPopups(); setShowThemes(true); } },
           { label:"Layout", onSelect:function(){ closeAllPopups(); setShowLayout(true); } }
         ] }),
+      showGuides && React.createElement(GuidesModal, { onClose:function(){ setShowGuides(false); } }),
       showThemes && React.createElement(ThemesModal, { settings:settings, onChange:setSettings, onClose:function(){ setShowThemes(false); } }),
       showLayout && React.createElement(LayoutModal, { settings:settings, onChange:setSettings, onClose:function(){ setShowLayout(false); } }),
       showSchedule && React.createElement(WorkScheduleModal, { schedule:settings.workSchedule,
@@ -9328,22 +9998,22 @@ function TTBoard(){
       showTracking && React.createElement(TrackingModal, { settings:settings, onChange:setSettings,
         onClose:function(){ setShowTracking(false); } }),
       showEditPresets && React.createElement(EditDistPresetsModal, { presets:distPresets, onSave:function(items){ setDistPresets(items.length?items:DEFAULT_DIST_PRESETS); setShowEditPresets(false); }, onCancel:function(){ setShowEditPresets(false); } }),
-      showTestConfirm && React.createElement(Modal, { title:"Exit Tutorial", onClose:function(){ setShowTestConfirm(false); },
+      showTestConfirm && React.createElement(Modal, { title:"Leave Practice Board", onClose:function(){ setShowTestConfirm(false); },
         actions:[
           React.createElement("button", { key:"a0", "data-confirmexit":true, onClick:leaveTutorial, style:MODAL_SAVE() }, "Leave"),
           React.createElement("button", { key:"a1", onClick:function(){ setShowTestConfirm(false); }, style:MODAL_CANCEL() }, "Stay")
         ] },
         React.createElement("p", { style:{color:S.textDim,marginBottom:"0.9rem",fontSize:"0.9rem",lineHeight:1.5} },
-          "Leaving keeps everything you have built in the tutorial, so you can come back and carry on. Your own board is untouched either way."),
+          "Leaving keeps everything you have built on the practice board, so you can come back and carry on. Your own board is untouched either way."),
         // Reset is its own act, and held: it throws away practice work.
         React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.7rem 0.8rem"} },
           React.createElement("div", { style:{color:S.textDim,fontSize:"0.78rem",marginBottom:"0.5rem",lineHeight:1.45} },
-            "Start the tutorial over from how it ships? Everything you added or changed inside it goes."),
+            "Start the practice board over from how it ships? Everything you added or changed on it goes."),
           React.createElement(HoldButton, { onHold:resetTutorialNow, holdMs:HOLD_DELETE_MS, fill:rgba(S.dangerText,0.38),
             attrs:{ "data-tutorialreset":true, "data-holddelete":true },
             style:{width:"100%",background:S.dangerBg,border:"1px solid "+S.dangerText,borderRadius:S.radius,
                    padding:"0.65rem",color:S.dangerText,fontFamily:S.fontBody,fontWeight:700,fontSize:"0.84rem"} },
-            React.createElement("span", null, "Reset tutorial \u00b7 hold")))
+            React.createElement("span", null, "Reset practice board \u00b7 hold")))
       )
     )
   );

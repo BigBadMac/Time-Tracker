@@ -1,21 +1,26 @@
 # Time Tracker — session handover
 
-Current build: **`10-08 splash timing`**
+Current build: **`10-09 ring clip`**
 
 ```
-tt-tests.js  1541 assertions   182 cases   (static, no browser)
-boot.js        71 checks                    (renders the built file)
+tt-tests.js  1631 assertions   192 cases   (static, no browser)
+boot.js       189 checks                    (renders the built file)
 shift.js       46 checks                    (work days, shifts, overtime)
 lifecycle.js  496 checks                    (projects, nesting, archive, scheduling)
+e2e.js        347 checks                    (Playwright, the real board in a browser)
 ```
+
+**Everything above is green at this build.** Pushing it is Brent's step
+(Working Copy -> GitHub Pages). `10-09 outline + milestones` was the build before.
 
 ## Container resets lose the toolchain
 
 A conversation that outlives its container comes back with only what was
-staged. `shift.js`, `paint.js`, `build.py` and `extract.py` are NOT written to
-outputs by the normal loop - re-attach them, or there is no way to build or
-run the full suite. Everything else (source, index.html, tt-tests, lifecycle,
-e2e, boot) is staged each time.
+staged, and it has already happened twice. `shift.js`, `paint.js`, `build.py`
+and `extract.py` were the casualties - they are not produced by the normal
+loop, so nothing re-staged them. **Stage all eleven files at the end of any
+session that changes anything**, not just the ones that changed, or the next
+reset loses the ability to build at all.
 
 Two environment assumptions that have already broken fixtures:
 - **The container timezone is not always UTC.** A fixture built from
@@ -27,7 +32,8 @@ Two environment assumptions that have already broken fixtures:
 
 ## Start of every session
 
-The container is wiped between conversations. Attach all nine files below, then:
+The container is wiped between conversations. Attach all eleven files below
+(everything in the repo root except `MODULES.md` and the PWA bundle), then:
 
 ```
 python3 extract.py index.html /tmp/app_only.js
@@ -35,10 +41,20 @@ node tt-tests.js time-tracker.jsx
 node boot.js /tmp/app_only.js
 node shift.js /tmp/app_only.js
 node lifecycle.js /tmp/app_only.js
+node e2e.js index.html          # ~3 minutes, run it in the background
 ```
 
-All four must pass before anything is changed. If they don't, the attachments are
-out of sync with each other — fix that first.
+All five must pass before anything is changed. If they don't, the attachments
+are out of sync with each other — fix that first.
+
+**`HANDOVER.md` and `MODULES.md` are also mirrored in the claude.ai Project
+"Time Tracker App"** (Project docs), so a session in that Project can read them
+even when only some files are attached. Git is still the master copy. At the
+end of any session that changes either file, write the new version back to the
+Project as well as committing it.
+
+`e2e.js` takes about three minutes. Start it early and read the result later
+rather than waiting on it.
 
 ## Build
 
@@ -67,6 +83,7 @@ a wall clock and a stale comparison will differ on that alone.
 | `boot.js` | Evaluates the built file with real React and a stub DOM. |
 | `shift.js` | Work-day resolution, overnight shifts, overtime. |
 | `lifecycle.js` | Project types, closing out, nesting, the archive, scheduled starts. |
+| `e2e.js` | Playwright. The real board in a real browser: gestures, geometry, flows. |
 | `MODULES.md` | Module platform contract and Tool Tracker. |
 
 ## Architecture in one paragraph
@@ -78,6 +95,88 @@ and is off until switched on in Extensions. Storage is `localStorage` under `tt_
 which is what makes Backup & Restore whole.
 
 ## Rules that keep biting
+
+- **A ring is cut to what the picture shows.** Brent found the Reports
+  "Milestones" ring running 128px down into the legend: that section goes on
+  below the staged sheet's visible edge, and the ring layer is not clipped.
+  HelpStage now intersects every part with the visible area (the staged
+  panel, for a sheet) and draws nothing for a part that does not show. e2e
+  taps EVERY number on EVERY picture and fails if a ring leaves the picture.
+  The same cut exposed outline step 2 pointing at a row below the fold; the
+  outline steps now use Shift handover, near the top.
+- **The "leave the practice board keeps your work" e2e is served from a real
+  origin** (`ctx20.route('http://tt.test/**')`). Under test, a `file://`
+  reload intermittently came up on an EMPTY storage snapshot - the seed
+  version written seconds earlier read back null - so the practice job
+  "vanished" 2-3 runs in 10. Traced write by write: the app removed nothing.
+  A fresh page did worse; a 4s wait still failed 2 in 10; the real origin
+  passed 12 of 12. This is the flake previously blamed on "load" - it was
+  never load. Any new test that reloads and expects storage to survive must
+  use a routed origin too.
+
+- **Anything staged must not move the page around it.** The outline keeps its
+  picked row in view with a smooth scrollIntoView; staged in a guide that
+  scrolled the GUIDE, and the app drops taps while anything scrolls, so Back
+  and Next went dead. OutlineModal skips it under `StageCtx`. Any component
+  with a scroll/focus effect needs the same guard before it is staged.
+- **Whole-file `order()` checks lie once the manual stages a component.** It
+  stages BackupModal and ReportsModal earlier in the file than the board
+  mounts them; "mounted alongside BackupModal" was passing by accident. Those
+  checks are now scoped from `function TTBoard(){`.
+- **Stage wide sheets at phone width (400), not their max (552).** At 552
+  Reports and the milestone editor shrank to unreadable; at 400 they are what
+  a phone shows anyway.
+- **One stage is LIVE: the practice outline** (`HelpStage live:true`, its
+  callbacks via `helpStageEl(stage, on)`). tt-tests counts `live:true` == 1.
+
+- **A stage box needs `flexShrink:0`.** The sheet is a flex column and a
+  stage's contents are all absolutely placed, so without it the box shrank to
+  a sliver (28px for a 112px header) and the legend slid up under the picture.
+  e2e now asserts, for every picture, that the legend starts below it.
+- **Markers are nudged apart, not hand-placed.** The practice board is dated
+  relative to today, so on a milestone line the signs and "now" sit in
+  different places at different hours. HelpStage slides any clashing mark
+  sideways; e2e checks every picture for overlap at whatever hour it runs.
+- **On a milestone line at Fit, close steps share one post** with the worst
+  status. The practice line's "late" step merges into a red sign, so the
+  picture's "Slipped" part rings the drift ARC, not a late sign - the
+  freshness check caught the first version pointing at a sign that never
+  draws.
+- **A staged sheet can show a later stage but never act.** BackupModal takes
+  `preview` (a summary, `obj:null`) and `doRestore` refuses without an obj.
+  Sheets are measured by the staged panel's `offsetHeight` (it caps at 85vh
+  and scrolls inside), not its scroll height.
+
+- **There is ONE swipe: `useSwipe`.** Lanes, cards and task rows (and the
+  manual's practice panel) call it; `sw.open` on an expanded name, `sw.pill`
+  on a collapsed pill, `onClick:sw.guard(...)` on anything swipeable. Read on
+  release only - no preventDefault, no touchmove - which is why it works on
+  iOS. tt-tests fails on any `swipeX` or typed-in `dx>50`. Mutation note:
+  letting a pill take a LEFT swipe is an equivalent mutant (it asks for the
+  collapsed state it is already in), so only the static check guards it.
+- **The header's Clock and Disruption buttons and the reasons list are
+  components** (`ClockButton`, `DisruptButton`, `DisruptPresetList`) so the
+  manual can stage them. The header passes state and owns what a press does;
+  the components own their colours. `paint.js` proved the board's first paint
+  identical apart from two new `data-anchor`s.
+- **Swipe tests drive REAL touch** through CDP (`hasTouch` context,
+  `Input.dispatchTouchEvent`), because touch is the iOS path. A Playwright
+  mouse drag that leaves the element never fires its onMouseUp.
+
+- **A sheet staged inside a guide is NOT a live sheet.** `Modal` reads
+  `StageCtx`; inside a `HelpStage` it drops `data-modal-panel` and carries
+  `data-staged` instead. Without that, "the last [data-modal-panel]" - how e2e
+  and anything else finds the sheet on top - found the miniature closure sheet
+  inside step 2 instead of the Guides sheet around it.
+- **Guide anchors are `data-anchor` attributes** (`card-title`, `card-start`,
+  `card-time`, `disruptions`) plus existing ones (`data-complete`,
+  `data-closeopt`, `data-closekids`, `data-donerow`). Renaming or removing one
+  turns boot red naming the guide. Ring the WHOLE thing the step is about -
+  step 4 first ringed `[data-reopen]`, a small button, not the pill.
+- **Do not render screenshots while e2e runs.** One run went 3 red in the
+  practice-board leave flow while a Playwright screenshot script ran beside it;
+  the same build was 258/258 alone. The 600ms settles are not generous under
+  load.
 
 - **No direct `localStorage` in a module.** Only `ctx.storage`.
 - **Tokens are live.** `S` read per render, never cached at load.
@@ -284,6 +383,74 @@ which is what makes Backup & Restore whole.
   behaving exactly as they did. Nothing migrates.
 
 ## Recent work, newest first
+
+- **Ring clipping (10-09 `ring clip`)** - Brent's report: Reports part 5's
+  ring ran into the descriptions. Fixed for every picture, with a test that
+  would have caught it (confirmed: red on the old build, green on the new).
+  Also found and fixed the long-standing intermittent e2e failure (see Rules).
+
+- **USER MANUAL, part four (10-09 `outline + milestones`).** Guides:
+  **Rearrange with Edit...** (the list, pick a row, the arrow pad, task or
+  project, Save) ending on a LIVE practice outline - the real OutlineModal on
+  a copy of the practice board, Save only says so; also on the practice page
+  as "The arrow pad". **Set up a milestone** (open, add a step, name and date,
+  what it waits for, mark by hand - tap now / hold for when - and Save).
+  Picture: **Reports** (period, back/forward, headline, detail, milestones).
+  OutlineModal takes `initialSel`; BackupModal `preview`; stage kinds
+  `outline`, `msedit`, `msstep`, `reports`; marker side `corner`; a step may
+  be practice-only (`stage:null`, must carry `tryit` - boot checks it).
+
+- **USER MANUAL, part three (10-09 `header + line`).** The header is now all
+  components (`HeaderTicker`, `HeaderMenuButton` join the two buttons;
+  `paint.js` proved the first paint identical). Two new PICTURES: **The
+  header** (date/time, status, Disruption, Clock, menu - with How > into the
+  guides) and **A milestone line** (met, slipped arc, missed, upcoming, now,
+  zoom) with a live **Zoom and pan** Try it - the real `MilestoneStrip` on the
+  practice workbench, also on the practice page. Two new GUIDES: **Clock in
+  for a night shift** (Work Schedule sheet, clock in, Which Shift?, the
+  regular/overtime question) and **Back up my data** (export, choose, check
+  then replace). New stage kinds: `headerfull`, `msline`, and the sheets
+  `schedule`, `shiftask`, `backup`; marker sides `above2`; `padTop` on a
+  picture; parts may ring only the `first` match. e2e reads every count off
+  the registry, so new topics need no test edits.
+
+- **USER MANUAL, part two (10-09 `swipe + guides`).** `useSwipe` replaces the
+  six hand-written swipes (e2e written FIRST against the old build - 15
+  checks, real touch - then the refactor; same 15 green after). Header buttons
+  became components. New guides: **Start and stop the clock**, **Log a
+  disruption**, **Collapse and expand** (with a swipe Try it). The card
+  picture's Its name / Start / Disruptions parts now carry How >. New index
+  section **Practise the gestures** -> one page with three live panels: one tap
+  vs two (`useTaps`), hold (`HoldButton`), swipe (`useSwipe`) - all the board's
+  own code, all writing nothing. Stages gained kinds `header` and `presets`,
+  card `state` (running / disrupted) and `collapsed`; steps can place their
+  marker (`side`) so it never covers what it points near. e2e now walks EVERY
+  guide off the registry, so a new guide is ring-checked the moment it exists.
+  Wording checked against behaviour: a disrupted card reads **Paused**, the
+  header reads **Resume**; nothing running -> **End**.
+
+- **USER MANUAL - first working slice (10-09).** The settings menu's top row
+  is now **User Manual** (book glyph `manual` in MENU_GLYPHS, verified in both
+  themes and both modes) opening a `MenuGroupModal`: **Guides** and **Practice
+  Board** / **Leave Practice Board**. The tutorial is renamed Practice Board in
+  every user-facing string (bar, exit sheet, reset, copy-out `[PRACTICE]`);
+  internals unchanged. The practice bar has a book button (`data-tutorialguides`)
+  that opens Guides without leaving practice.
+  Guides (`GuidesModal`): index with two ways in -> picture **A card** (five
+  measured parts, tap to ring, How > on Complete) -> step-through **Finish a
+  job** (four steps, each ringing the real control on a LIVE render: Complete,
+  the outcome buttons, the open-children block, the done row) with **Try it
+  here** on step 1 (the real `HoldButton`, wired to nothing). Content is data:
+  `HELP_PICTURES`, `HELP_GUIDES`, `HELP_INDEX`. Stages draw from the shipped
+  seed (`TEST_PROJECTS`), never the user's practice edits; `ProjectCard` takes
+  `still` so a staged card ignores remembered collapse. The index lists only
+  what exists - no dead "coming soon" rows.
+  Freshness checks in boot (anchor present in the staged render, record in the
+  seed, no digits in prose, every index row and How > resolves, nothing written
+  to storage) - mutation-tested: dropping an anchor, typing a figure and
+  renumbering a named record each fail it. e2e walks the whole flow, checks
+  every ring CONTAINS its anchor on the live render, the marks never overlap,
+  and storage is byte-identical after reading and practising.
 
 - The outline's Save/Cancel are `position:sticky` at the foot of the sheet,
   so an edit at the top of a long list saves without scrolling down. The
@@ -742,10 +909,194 @@ which is what makes Backup & Restore whole.
 - Disruption day-scoping bugs; two data points per project card
 - Phase 3: Tool Tracker module
 
+## Open decisions — raised this session, deliberately not settled
+
+These are judgement calls waiting on real use, not bugs. Each one has a
+recommendation attached; none should be built without Brent saying so.
+
+- **Completed records accumulate on the board forever.** They stay as greyed
+  pills rather than vanishing, which is right, but a lane worked for months
+  will collect them. Options: auto-hide after some period, a per-lane "show
+  completed" toggle, or leave it. The Archive still holds everything either
+  way. Agreed to wait until he has used it a week before choosing.
+- **No cap on how many drift arcs a STRIP draws.** A week with many small
+  drifts could turn the strip into a ribbon. The report's full-width line can
+  carry the detail. Deliberately unset: wanted to see a real busy week on the
+  phone before picking a number.
+- **Panning has not been tested on an iPhone.** Dragging the milestone line is
+  a one-finger horizontal gesture inside a vertically scrolling page — the
+  same class iOS fought over drag-to-reorder, which was abandoned permanently.
+  Tap-to-zoom works regardless; the fallback if iOS eats the drag is arrows on
+  the zoom control, NOT a fight with the gesture system.
+- **A 2.5s splash means the first tap dismisses it.** Open the app and jab
+  immediately at where Start sits and that jab clears the splash instead of
+  starting the timer. Brent chose 2.5s over 0.9s knowing this; it is one
+  constant (`SPLASH_SHOW_MS`) if it annoys him on the floor.
+- **A touched tutorial never receives baseline improvements.** `TUTORIAL_SEED`
+  only re-seeds a tutorial still in its shipped state, so practice work is
+  never destroyed by a version bump — the trade is that someone who has built
+  in there must press Reset to get new baseline content. Right way round, but
+  it is a trade.
+
+## Things that must be done by hand
+
+- **`APP_VERSION`** (the splash's "v1.0") is bumped manually on a release. It
+  is deliberately NOT the build stamp: the stamp proves which deploy landed,
+  the version is what a person reads.
+- **`TUTORIAL_SEED`** is bumped whenever any `TEST_*` baseline data changes, or
+  the change reaches new installs only.
+- **`CACHE_VERSION` in `sw.js`** only when the worker's strategy changes.
+- **Help topics** when a feature's behaviour changes: the freshness tests name
+  the topics whose anchors or records broke, but a changed BEHAVIOUR with the
+  same anchors passes them - reread the topics for that feature by hand.
+- **Mirror `HANDOVER.md` and `MODULES.md` to the claude.ai Project** whenever
+  either changes.
+
+## The next piece of work: HELP PAGES
+
+This is the original goal, and most of the recent baseline work exists to
+serve it:
+
+- the **first-run data** (two lanes, three records, names that teach the
+  vocabulary) so a new install has something to point at
+- the **tutorial baseline** (three lanes, seven records, seeded logs,
+  disruptions and breaks, all RELATIVE to today via `tutAt` — so help text
+  must never quote specific figures)
+- a **milestone tracker in the tutorial**, in every state at once, including
+  one step that reads met because its target record is closed out
+
+Nothing has been written yet. Worth knowing when writing them: the milestone
+system, the hold-to-confirm interactions, the closure flow and the drift arcs
+are all recent and none of them are documented anywhere but this file.
+
+### THE USER MANUAL — design settled with Brent, 10-09 (no code yet)
+
+Mocked in the real build (tutorial mode, Neon Dream dark, 390px) and agreed.
+Nothing below is built; the build at the top of this file is unchanged.
+
+**Structure.**
+- Settings menu: the **Interactive Tutorial row is replaced by a book-glyph
+  row, "User Manual"**. Not "Manual": Time Settings already has a tracking mode
+  called "Manual Entry", and a bare "Manual" beside it reads as manual time.
+  "Help" was rejected as too generic. The row opens a `MenuGroupModal` with
+  two rows: **Guides** and **Practice Board**. While in practice mode it shows
+  **Leave practice board** instead.
+- **The tutorial is renamed Practice Board** in every user-facing string (the
+  bar reads PRACTICE BOARD + EXIT; the exit sheet, menu, reset copy). Internals
+  do NOT change: `testMode`, `tt_test_*`, `TUTORIAL_SEED`, `tutAt` stay, so no
+  device loses its practice data. e2e/tt-tests that match the old wording move
+  with it in the same build.
+- The Practice Board bar gains a **book button beside EXIT** that opens Guides
+  without leaving practice - read a step, close, try it, come back.
+
+**Glyph.** Option **1D, open book**: chosen because it does NOT share the
+ring silhouette with the clock it sits beside. Geometry (fits 2.25-25.75 x
+5.01-24.25 in the 28 box, measured):
+`[["p","M14 8 C11.5 6.2 7 5.8 3.5 6.8 V21.8 C7 20.8 11.5 21.2 14 23 C16.5 21.2 21 20.8 24.5 21.8 V6.8 C21 5.8 16.5 6.2 14 8 Z",2.5], ["p","M14 8 V23",2.5]]`
+Still to do per the glyph rule: re-render in BOTH themes and BOTH modes
+before it goes into `MENU_GLYPHS`.
+
+**Guides = index -> picture -> steps.** (Layout A, a single scrolling page,
+was rejected outright.)
+- **Index, two ways in.** "What's on my screen?" lists annotated PICTURES
+  (the board, a card, the header, a milestone line, the Edit... outline).
+  "How do I...?" lists STEP-THROUGHS (start/stop the clock, finish a job, log
+  a disruption, clock in for a night shift, set up a milestone, back up).
+  Each row says what is behind it: "5 parts" / "4 steps".
+- **Picture page (was layout C).** One real crop, numbered markers placed
+  BESIDE or UNDER the part they name - never on it (they covered the labels in
+  the first mock). Legend rows below; tapping lights the part. A part with an
+  action carries a **How ›** button into its step-through. Keep a picture to
+  five or six parts; a busy screen becomes several pictures.
+- **Step-through (was layout B).** One step per screen, Next/Back through
+  `ModalActions`. Every step picture carries the picture page's RING on the
+  exact control - one visual language, and the same ring "Show me" will draw
+  on the live board. Breadcrumb under the title ("Guides › A card › Complete" - the mocks
+  said "Help", which predates the User Manual name);
+  step 1's Back reads **Back to card** when entered from a picture.
+- A step-through is written ONCE and reached from both the index and any
+  picture's How ›.
+
+**Correlation with the Practice Board.**
+- Guides are written against the seeded practice records, which have fixed
+  names: 101 Start-of-day checks (a card, start/stop, finish a job,
+  disruptions) · 102 Shift handover (scheduled start) · 103 Install new
+  workbench (stages, milestones in every state, the line) · 104 Electrical
+  hookup (nesting, roll-up) · 105 Clear the old bench (completed pill,
+  reopen) · seeded logs/disruptions/breaks (Reports).
+- Every guide ends with **Show me on the practice board**: enters practice
+  mode, scrolls to the named record, rings the control. Cheap now because the
+  target is always a known seeded record, never user data. If the record is
+  gone (a touched practice board), say so and offer the held Reset.
+- **Try it here**: a live practice panel inside a step, built from the REAL
+  component wired to nothing, answering back ("Let go too soon - nothing
+  happened"). Must never write storage: e2e snapshots localStorage before and
+  after and fails on any difference.
+- Gestures that get a Try it: hold (all held controls share `HoldButton`),
+  one tap vs two, **swipe to collapse/expand** (left collapses, right
+  expands, ~50px, pills ignore a left swipe, a swipe swallows the following
+  tap), the milestone line (tap zoom / hold Fit / drag pan), the outline's
+  arrow pad. Carousels (Theme/Palette/Typeface) and the ten sliding Toggles
+  get a line of text, not a panel.
+- **Prerequisite for the swipe Try it:** the swipe is hand-written ~6 times
+  (task row, project card collapsed + expanded, lane collapsed + expanded).
+  Extract one `useSwipe` first, with e2e before and after (left collapses,
+  right expands, pill ignores left, no menu after a swipe), then point Try it
+  at it. Do not write a seventh copy.
+- The milestone-pan Try it doubles as the iPhone panning test still listed
+  under Open decisions. If it fails there it fails on the board too, and the
+  agreed fallback (arrows on the zoom control) applies to both.
+
+**Keeping help current - the rules.**
+- Help content lives in `time-tracker.jsx` as DATA (a topic registry: steps,
+  parts, and what each depends on - anchors it rings, practice records it
+  names, gestures). Not separate docs: it then ships with every build and is
+  in the files attached every session.
+- Freshness tests (the point of the design): every anchor a guide rings must
+  exist on the practice board in the BUILT app; every practice record a guide
+  names must exist in `TEST_PROJECTS` under that name; coverage - every menu
+  row, gesture and enabled module has at least one topic; help text contains
+  no figures (digits like "20m"), because the practice board's numbers move
+  daily.
+- Pictures are rendered from the live practice board, not stored
+  screenshots - a PNG is the one thing a test cannot see go stale, and each
+  one would add tens of KB to index.html. Prove live rendering on ONE topic
+  before committing to it everywhere.
+- **Modules bring their own help**: add an optional `help` field to
+  `TT.define()` beside `settingsPanel`/`reports` (topics + any practice
+  records, namespaced). Its section shows in Guides only while the module is
+  enabled. The coverage test means a module cannot ship without help. Update
+  MODULES.md when this lands.
+- Mock tooling that worked: the app's components are top-level globals in the
+  built page, so a Playwright page can `addScriptTag` a file that renders real
+  `Modal`/`MenuIcon`/`S` into its own `ReactDOMClient` root. That root sits
+  OUTSIDE the app root, so give it `fontFamily:S.fontBody` or it renders serif.
+
+**First working slice: BUILT at `10-09 user manual`** (see Recent work). Step 3
+did NOT need a new practice record after all: it stages the closure sheet for
+Install new workbench, whose Electrical hookup is open - no `TUTORIAL_SEED`
+bump.
+
+**Next, in rough order:** the **coverage test** (every menu row, gesture and
+enabled module has a topic) - rows still uncovered: Interface (Themes,
+Layout), Summary, Archive, Extensions; a short picture each closes it · the
+module `help` field in `TT.define()`, with Tool Tracker's own topic as the
+first user · "Show me on the practice board" last.
+The zoom/pan Try it is live: if dragging the line fails on the iPhone it fails
+there too, and the agreed fallback (arrows on the zoom control) covers both.
+Every new topic adds its anchors as `data-anchor` and gets the boot and e2e
+ring checks for free.
+
+**Option 3 ("Show me")** was discussed at length: it is the "Show me on the
+practice board" button above, built AFTER the guides have been used a while,
+for the three or four topics people actually get stuck on.
+
 ## Known gaps
 
-- **No way to delete a closed project.** Delete lives on the board; closed
-  projects aren't there. Reopen-then-delete works but is clumsy.
+- **No way to delete a completed record.** It no longer vanishes - it sits on
+  the board as a greyed pill - but that pill offers only Reopen. Deleting
+  still means reopening it first. Now more visible than it was, because the
+  thing you cannot delete is in front of you.
 - **Expanded nested cards may bleed** on glass themes the way collapsed pills did.
   Same cause, deliberately not changed yet.
 - **The pay answer is per session, not per log.** A Saturday that is part regular

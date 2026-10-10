@@ -730,9 +730,9 @@ test("enabled module nav entries render as menu rows", () => {
   has(/modGroups\.map\(function\(g\)\{/, "grouped rows rendered in the menu");
   has(/function openModule\(entry\)\{ closeAllPopups\(\);/, "opening a module closes every other popup first");
   order("Backup & Restore", "modGroups.map", "module rows sit below the core rows");
-  // The tutorial row moved to the TOP of the menu at Brent's request, so the
-  // module rows now sit below it rather than above.
-  order("// Both ways out of the tutorial", "modGroups.map", "the tutorial row sits above the module rows");
+  // The tutorial row moved to the TOP of the menu at Brent's request; the
+  // User Manual row (which now holds the practice board) took its place.
+  order("// USER MANUAL row", "modGroups.map", "the User Manual row sits above the module rows");
 });
 
 test("opening a module screen goes through the menu bus", () => {
@@ -748,8 +748,12 @@ test("opening a module screen goes through the menu bus", () => {
 test("module screens mount as sibling overlays", () => {
   has(/modScreen && ttModuleScreen\(modScreen\.id, modScreen\.screen\)/, "screen resolved before render");
   has(/ttModuleContext\(modScreen\.id, \{/, "screen receives a module context");
-  order("React.createElement(BackupModal", "ttModuleContext(modScreen.id", "mounted alongside BackupModal");
-  order("ttModuleContext(modScreen.id", "React.createElement(ReportsModal", "and before ReportsModal");
+  // Scoped to the board: the User Manual stages BackupModal and ReportsModal
+  // too, earlier in the file, and a whole-file search found those instead.
+  const brd = s.indexOf("function TTBoard(){");
+  const at = (x) => s.indexOf(x, brd);
+  ok(at("React.createElement(BackupModal") > 0 && at("React.createElement(BackupModal") < at("ttModuleContext(modScreen.id"), "mounted alongside BackupModal");
+  ok(at("ttModuleContext(modScreen.id") < at("React.createElement(ReportsModal"), "and before ReportsModal");
   const tail = s.slice(s.indexOf("ttModuleContext(modScreen.id"));
   ok(tail.indexOf("onClose:function(){ setModScreen(null); }") < 800, "the screen can close itself");
   ok(/activeId:activeId/.test(tail.slice(0, 800)), "and is told what is running right now");
@@ -1456,7 +1460,7 @@ test("rows are selected and stepped, and nothing drags any more", () => {
     "and the selected row stays in view above the controller");
   // Save and Cancel are pinned to the foot of the sheet, so an edit at the top
   // of a long list can be saved without scrolling to the bottom first.
-  ok(/React\.createElement\(Modal, \{ actions:\[React\.createElement\("button", \{ key:"a0", onClick:function\(\)\{ onSave\(rows\); \}/.test(om),
+  ok(/React\.createElement\(Modal, \{ actions:\[React\.createElement\("button", \{ key:"a0", ("data-anchor":"outline-save", )?onClick:function\(\)\{ onSave\(rows\); \}/.test(om),
     "the action row rides in the shared sticky box");
   ok(om.indexOf('"data-outlineactions"') < 0, "and no private sticky wrapper of its own");
   // The controller floats OVER the foot of the sheet, Save/Cancel included.
@@ -1487,7 +1491,9 @@ test("the header runs opposite to the board behind it", () => {
   // isLeft it opens off the edge of the screen on both settings.
   ok(s.indexOf('left:hdrMenuRight?"auto":0,right:hdrMenuRight?0:"auto",minWidth:"290px"') >= 0,
     "the menu dropdown follows the menu button");
-  ok(s.indexOf('right:hdrMenuRight?"auto":0,left:hdrMenuRight?0:"auto",minWidth:"250px"') >= 0,
+  // The reasons list is its own component now; the header still decides where
+  // it hangs, through `place`.
+  ok(s.indexOf('place:{position:"absolute",top:ddTop,bottom:ddBottom,right:hdrMenuRight?"auto":0,left:hdrMenuRight?0:"auto"') >= 0,
     "and the disruption dropdown follows its own, on the opposite side");
   const dd = s.match(/position:"absolute",top:ddTop,bottom:ddBottom,[^}]*/g) || [];
   eq(dd.filter((d) => /isLeft/.test(d)).length, 0,
@@ -1595,7 +1601,7 @@ test("the tutorial is one bar at the head, and nothing else moves", () => {
   ok(/dir:"ltr"/.test(s.slice(s.indexOf("testMode && React.createElement"), s.indexOf('"data-tutorialexit"'))),
     "and forced LTR, so handedness cannot mirror it");
   ok(bar.indexOf("hdrBottom") < 0, "the header-position setting does not move it");
-  ok(/INTERACTIVE TUTORIAL/.test(s), "it says what it is");
+  ok(/"PRACTICE BOARD"/.test(s), "it says what it is");
   // Exit is a real button, and it asks first - leaving clears the tutorial data.
   const ex = s.slice(s.indexOf('"data-tutorialexit"'), s.indexOf('"data-tutorialexit"') + 600);
   ok(/border:"1\.5px solid "\+S\.testFrameInk/.test(ex), "Exit is a button, not a label");
@@ -1605,8 +1611,8 @@ test("the tutorial is one bar at the head, and nothing else moves", () => {
   ["TEST MODE", "Exit Test Mode", "Stay in Test", "[TEST]"].forEach((w) => {
     eq(count(new RegExp(w.replace(/[[\]]/g, "\\$&"), "g")), 0, '"' + w + '" is gone');
   });
-  has(/\[TUTORIAL\]/, "the copy-out says TUTORIAL instead");
-  has(/testMode\?"Exit Tutorial":"Interactive Tutorial"/, "and so does the menu row");
+  has(/\[PRACTICE\]/, "the copy-out says PRACTICE instead");
+  has(/"Leave Practice Board"/, "and the way out says where you are leaving");
 });
 
 test("a lane is edited in its own full-size form", () => {
@@ -1753,7 +1759,9 @@ test("nothing is left drawing its own chrome glyph", () => {
   const menu = s.slice(i, s.indexOf("// CLOCK button", i));
   ok(menu.indexOf("GearSVG") < 0, "no gear left in the settings menu");
   const hdr = s.slice(s.indexOf("// SETTINGS MENU button"), i);
-  ok(hdr.indexOf('MenuIcon, { name:"more"') >= 0, "the header button uses the hamburger");
+  const hb = s.slice(s.indexOf("function HeaderMenuButton(props){"), s.indexOf("function HeaderMenuButton(props){")+600);
+  ok(hdr.indexOf("React.createElement(HeaderMenuButton") >= 0 && hb.indexOf('MenuIcon, { name:"more"') >= 0,
+    "the header button uses the hamburger");
   ok(hdr.indexOf("GearSVG") < 0, "and not the gear");
 });
 
@@ -3336,6 +3344,134 @@ test("the module obeys the house rules", () => {
   ok(/clearInterval/.test(block), "and the interval it does start is cleaned up");
 });
 
+})();
+
+
+// ============================================================
+// user manual: guides + practice board
+// ============================================================
+(function(){
+// The manual's source-level rules. The runtime freshness checks - every anchor
+// a guide rings exists in what its stage renders, every named record exists,
+// no prose quotes a figure - live in boot.js, which evaluates the BUILT file.
+const s = source();
+const has = (re, label) => ok(re.test(s), label);
+const count = (re) => (s.match(re) || []).length;
+const slice = (a, b) => { const i = s.indexOf(a); return s.slice(i, s.indexOf(b, i + a.length)); };
+
+
+test("there is one swipe, and every lane, card and task row uses it", () => {
+  eq(count(/^function useSwipe\(onSwipe\)\{/gm), 1, "useSwipe is defined once");
+  eq(count(/useSwipe\(function\(dir\)\{/g), 4, "called by the task row, the card, the lane - and the manual's practice panel");
+  eq(count(/swipeX/g), 0, "no hand-written swipe survives anywhere");
+  eq(count(/dx>50|Math\.abs\(dx\)>50/g), 0, "the threshold is not typed in at a call site");
+  has(/var SWIPE_MIN_PX = 50;/, "it is one named constant");
+  eq(count(/sw\.pill\.onTouchEnd/g), 3, "each collapsed pill uses the right-only half");
+  eq(count(/sw\.open\.onTouchEnd/g), 3, "each open name uses the either-way half");
+  eq(count(/onClick:sw\.guard\(/g), 4, "and every name that can be swiped swallows the tap a swipe ends in");
+  const hook = s.slice(s.indexOf("function useSwipe(onSwipe){"), s.indexOf("function useTaps("));
+  ok(!/preventDefault/.test(hook), "it never fights the page for the gesture - read on release only");
+  ok(!/onTouchMove/.test(hook), "and never listens to the move at all");
+});
+
+
+test("the header's buttons are components the board and the manual share", () => {
+  eq(count(/React\.createElement\(ClockButton, \{ clocked:clocked, sub:ckSub/g), 1, "the header draws ClockButton");
+  eq(count(/React\.createElement\(DisruptButton, \{ mode:dActive\?"active":\(dStandalone\?"standalone":"idle"\)/g), 1, "and DisruptButton");
+  eq(count(/distMenuOpen && React\.createElement\(DisruptPresetList, \{ presets:distPresets/g), 1, "and the reasons list");
+  ok(!/var ckBg|var dBg/.test(s.slice(s.indexOf("function TTBoard(){"))), "the colours live in the components, not copied in the board");
+  const el = s.slice(s.indexOf("function helpStageEl(stage, on){"), s.indexOf("var HELP_CARD_W"));
+  ok(/React\.createElement\(ClockButton/.test(el) && /React\.createElement\(DisruptButton/.test(el) && /React\.createElement\(DisruptPresetList/.test(el),
+    "and the manual stages the same three");
+});
+
+
+test("a staged sheet can show its later stages but never act", () => {
+  has(/useState\(props\.preview \? \{ obj:null, summary:props\.preview \} : null\)/, "a previewed backup opens with no backup behind it");
+  has(/function doRestore\(\)\{\n    if\(!pending \|\| !pending\.obj\) return;/, "so Replace cannot apply anything");
+  const el = s.slice(s.indexOf("function helpStageEl(stage, on){"), s.indexOf("var HELP_CARD_W"));
+  ok(/onSave:nop, onClose:nop/.test(el) && /onPick:nop, onCancel:nop/.test(el), "every staged sheet is wired to nothing");
+  ok(/HELP_SHEETS\[stage\.kind\]/.test(s), "and sheets are measured by what shows, not by what scrolls");
+  has(/h=pan \? Math\.ceil\(pan\.offsetHeight\)\+34/, "the staged panel's own height, capped as on a phone");
+});
+
+test("every manual component is defined exactly once", () => {
+  ["GuidesModal", "HelpStage", "HelpPicture", "HelpSteps", "HelpTryHold", "HelpIndexRow",
+   "helpStageEl", "helpSeedProject", "HelpTryBox", "HelpTryTaps", "HelpTrySwipe", "HelpPractice",
+   "ClockButton", "DisruptButton", "DisruptPresetList", "HeaderTicker", "HeaderMenuButton", "HelpTryLine", "HELP_NIGHTS"].forEach((f) => {
+    eq(count(new RegExp("^function " + f + "\\(", "gm")), 1, f + " is defined once");
+  });
+  eq(count(/^var HELP_PICTURES = \{/gm), 1, "one picture registry");
+  eq(count(/^var HELP_GUIDES = \{/gm), 1, "one guide registry");
+});
+
+test("the User Manual row opens a group holding Guides and the Practice Board", () => {
+  has(/"data-menugroup":"manual"/, "the row is a menu group");
+  has(/MenuIcon, \{ name:"manual", col:testMode\?S\.warnText:S\.chromeText \}/, "it wears the book glyph");
+  const g = slice('menuGroup==="manual"', 'menuGroup==="time"');
+  ok(/title:"User Manual"/.test(g), "the group is titled User Manual");
+  ok(/label:"Guides"/.test(g), "Guides is in it");
+  ok(/label:"Practice Board"/.test(g) && /label:"Leave Practice Board"/.test(g), "and the practice board, or the way out of it");
+  ok(/setShowTestConfirm\(true\)/.test(g), "leaving from here still asks first");
+  has(/MENU_GLYPHS = \{[\s\S]*?\n  manual: \[/, "the book is in MENU_GLYPHS, not drawn at a call site");
+});
+
+test("nothing a user can see still says tutorial", () => {
+  ["Interactive Tutorial\"", "\"Exit Tutorial", "Reset tutorial", "INTERACTIVE TUTORIAL", "[TUTORIAL]",
+   "you have built in the tutorial"].forEach((w) => {
+    eq(s.split(w).length - 1, 0, '"' + w + '" is gone');
+  });
+  // The internals keep their names so nobody's practice data moves.
+  has(/var TUTORIAL_SEED = "/, "TUTORIAL_SEED keeps its name");
+  has(/load\("tt_testmode",false\)/, "and the practice board is still testMode underneath");
+});
+
+test("the practice bar opens the Guides without leaving practice", () => {
+  const bar = slice('"data-tutorialbar":true', '"data-tutorialexit"');
+  ok(/"data-tutorialguides":true/.test(bar), "there is a book button in the bar");
+  ok(/setShowGuides\(true\)/.test(bar), "it opens the Guides");
+  ok(bar.indexOf("setTestMode(false)") < 0, "and does not leave the practice board");
+  has(/setShowGuides\(false\); setStartAsk\(null\);/, "closeAllPopups closes the Guides too");
+});
+
+test("a stage is a live, inert render whose marks are measured, never typed in", () => {
+  const st = slice("function HelpStage(props){", "function HelpNum(props){");
+  ok(/inert:!props\.live/.test(st) && /pointerEvents:props\.live\?"auto":"none"/.test(st), "a staged picture cannot be touched");
+  eq(count(/live:true/g), 1, "and exactly one stage is live: the practice outline, whose Save only says so");
+  has(/if\(stagedOutline\) return;\n    if\(!sel/, "a staged outline never scrolls the guide around it");
+  ok(/querySelectorAll\(m\.anchor\)/.test(st), "each mark is placed on its anchor's measured box");
+  ok(/x1=Math\.min\(x1,vis\.right\); y1=Math\.min\(y1,vis\.bottom\);/.test(st), "and cut to what is visible, so a ring never runs off the picture");
+  ok(/transform:"scale\("\+k\+"\)"/.test(st), "scaled, not re-laid-out");
+  ok(/position:"relative", flexShrink:0/.test(st), "and the stage never shrinks under the sheet's flex column");
+  const el = slice("function helpStageEl(stage, on){", "var HELP_CARD_W");
+  ok(/TEST_PROJECTS/.test(el) && !/tt_test_projects/.test(el), "stages draw from the shipped seed, never the user's practice edits");
+  ok(/still:true/.test(el), "a staged card ignores the board's remembered collapse");
+  ok(/todayStr\(\)/.test(el), "and finds today through the one work-day function");
+  ok(/StageCtx\.Provider, \{ value:true \}/.test(st), "a staged sheet is told it is staged");
+  has(/"data-modal-panel":staged\?undefined:true/, "so it never answers as the live sheet on top");
+});
+
+test("Try it here is the real hold control, and writes nothing", () => {
+  const t = slice("function HelpTryHold(props){", "function HelpIndexRow(props){");
+  ok(/React\.createElement\(HoldButton/.test(t), "it is the real HoldButton");
+  ok(/holdMs:HOLD_DELETE_MS/.test(t), "with the real hold time");
+  ok(!/localStorage|save\(|load\(/.test(t), "and no practice panel touches storage");
+  ok(/useTaps\(function\(\)\{ setRes\("one"\); \}/.test(t), "one tap or two is the board's own useTaps");
+  ok(/useSwipe\(function\(dir\)\{/.test(t), "and the swipe panel is the board's own useSwipe");
+});
+
+test("every manual view keeps its hooks at the top", () => {
+  ["function GuidesModal(props){", "function HelpPicture(props){", "function HelpSteps(props){",
+   "function HelpTryHold(){", "function HelpStage(props){"].forEach((f) => {
+    const body = s.slice(s.indexOf(f), s.indexOf("\nfunction ", s.indexOf(f) + 10));
+    // Only a return at the component's own level counts; one inside a
+    // callback (a .map, an effect) is not an early exit.
+    const m = body.match(/\n  (?:if\([^\n]*\) )?return /);
+    const firstReturn = m ? m.index : body.length;
+    const lastHook = Math.max(body.lastIndexOf("useState("), body.lastIndexOf("useEffect("), body.lastIndexOf("useRef("));
+    ok(lastHook < firstReturn, f.slice(9, f.indexOf("(")) + " declares every hook before its first return");
+  });
+});
 })();
 
 // ---- run --------------------------------------------------------------------

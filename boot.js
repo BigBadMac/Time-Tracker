@@ -20,7 +20,9 @@ const fn = new Function("React", "window", "localStorage", "navigator", "documen
         " ExtensionsModal: typeof ExtensionsModal !== 'undefined' ? ExtensionsModal : null," +
         " ToolsScreen: typeof ToolsScreen !== 'undefined' ? ToolsScreen : null," +
         " ToolsCheckoutSheet: typeof ToolsCheckoutSheet !== 'undefined' ? ToolsCheckoutSheet : null," +
-        " ToolsEditorSheet: typeof ToolsEditorSheet !== 'undefined' ? ToolsEditorSheet : null };");
+        " ToolsEditorSheet: typeof ToolsEditorSheet !== 'undefined' ? ToolsEditorSheet : null," +
+        " HELP: typeof HELP_PICTURES !== 'undefined' ? { pictures: HELP_PICTURES, guides: HELP_GUIDES, index: HELP_INDEX, practice: HELP_PRACTICE, panels: HELP_PANELS," +
+        "   stageEl: helpStageEl, Guides: GuidesModal, TryHold: HelpTryHold, seed: TEST_PROJECTS } : null };");
 const out = fn(React, win, localStorage, navigator, document, function Event(t){ return { type: t }; });
 
 const ok = [];
@@ -213,6 +215,71 @@ const P = (id, n, pid, o, role) => ({ id: id, name: n, lane: "Projects", notes: 
   if (out2.indexOf("ERR:") === 0) console.log("   " + out2);
   ok.push(["a nested project survives collapsing " + label, out2.indexOf(">Nested Proj<") >= 0]);
 });
+
+
+// ---- the User Manual: freshness checks against the BUILT file ----
+// tt-tests reads source; these evaluate it. A renamed or removed control, a
+// record dropped from the practice seed, or a figure typed into the prose turns
+// this red and names the guide that went stale.
+const H = out.HELP;
+ok.push(["the manual's registries are in the build", !!H]);
+if (H) {
+  const sel = (q) => { const m = /^\[([a-z-]+)(?:="([^"]+)")?\]$/.exec(q); return m; };
+  const stageHtml = {};
+  const render = (st) => { const k = JSON.stringify(st);
+    if (!(k in stageHtml)) { try { stageHtml[k] = renderToStaticMarkup(H.stageEl(st)); } catch (e) { stageHtml[k] = "ERR:" + e.message; } }
+    return stageHtml[k]; };
+  const hasAnchor = (html, q) => { const m = sel(q); if (!m) return false;
+    return m[2] ? html.indexOf(m[1] + '="' + m[2] + '"') >= 0 : new RegExp(" " + m[1] + "=").test(html); };
+  const stages = [];
+  Object.keys(H.pictures).forEach((id) => { const p = H.pictures[id];
+    stages.push([ "picture " + id, p.stage, p.parts.map((pt) => pt.anchor) ]); });
+  Object.keys(H.guides).forEach((id) => H.guides[id].steps.forEach((st, i) => {
+    // A practice-only step has no picture; it must then carry a Try it.
+    if (!st.stage) { ok.push(["guide " + id + " step " + (i + 1) + ": a step with no picture is a Try it", !!H.panels[st.tryit]]); return; }
+    stages.push([ "guide " + id + " step " + (i + 1), st.stage, [st.ring] ]); }));
+  const before = JSON.stringify(Array.from(store.entries()));
+  stages.forEach(([where, st, anchors]) => {
+    if (st.id != null) ok.push([where + ": its practice record ships in the seed", H.seed.some((p) => p.id === st.id)]);
+    const html = render(st);
+    ok.push([where + ": its stage renders", html.indexOf("ERR:") !== 0]);
+    if (html.indexOf("ERR:") === 0) console.log("   " + html);
+    anchors.forEach((q) => ok.push([where + ": " + q + " is really there to point at", hasAnchor(html, q)]));
+  });
+  ok.push(["every part's How > leads to a guide that exists",
+    Object.keys(H.pictures).every((id) => H.pictures[id].parts.every((pt) => !pt.guide || !!H.guides[pt.guide]))]);
+  ok.push(["every index row leads somewhere real",
+    H.index.every((sec) => sec.ids.every((id) => !!(sec.kind === "picture" ? H.pictures[id] : sec.kind === "practice" ? H.practice[id] : H.guides[id])))]);
+  ok.push(["every practice page names panels that exist",
+    Object.keys(H.practice).every((id) => H.practice[id].panels.every((k) => typeof H.panels[k] === "function"))]);
+  ok.push(["and every guide and picture is reachable from the index",
+    Object.keys(H.pictures).concat(Object.keys(H.guides), Object.keys(H.practice)).every((id) => H.index.some((sec) => sec.ids.indexOf(id) >= 0))]);
+  const prose = [];
+  Object.keys(H.pictures).forEach((id) => { const p = H.pictures[id]; prose.push(p.title, p.blurb);
+    p.parts.forEach((pt) => prose.push(pt.label, pt.text)); });
+  Object.keys(H.practice).forEach((id) => prose.push(H.practice[id].title, H.practice[id].blurb));
+  Object.keys(H.guides).forEach((id) => { const g = H.guides[id]; prose.push(g.title);
+    g.steps.forEach((st) => prose.push(st.title, st.text)); });
+  const figures = prose.filter((t) => /\d/.test(String(t)));
+  ok.push(["no guide quotes a figure - the practice board's numbers move daily", figures.length === 0]);
+  if (figures.length) console.log("   " + figures.join(" | "));
+  let idx = "";
+  try { idx = renderToStaticMarkup(React.createElement(H.Guides, { onClose(){} })); } catch (e) { idx = "ERR:" + e.message; }
+  ok.push(["the Guides index renders", idx.indexOf("ERR:") !== 0]);
+  has(idx, "What’s on my screen?", "with the picture way in");
+  has(idx, "How do I…?", "and the steps way in");
+  ok.push(["one row per entry", (idx.match(/data-helprow=/g) || []).length ===
+    H.index.reduce((a, sec) => a + sec.ids.length, 0)]);
+  let tryit = "";
+  try { tryit = renderToStaticMarkup(React.createElement(H.TryHold)); } catch (e) { tryit = "ERR:" + e.message; }
+  has(tryit, "data-tryhold", "Try it here draws the real hold control");
+  has(tryit, "data-holdfill", "with its charging fill");
+  Object.keys(H.panels).forEach((k) => { let h = "";
+    try { h = renderToStaticMarkup(React.createElement(H.panels[k])); } catch (e) { h = "ERR:" + e.message; }
+    ok.push(["the " + k + " practice panel renders", h.indexOf("ERR:") !== 0 && h.indexOf('data-tryit="' + k + '"') >= 0]); });
+  ok.push(["staging every picture and the practice panel wrote nothing to storage",
+    JSON.stringify(Array.from(store.entries())) === before]);
+}
 
 let bad = 0;
 ok.forEach(([label, pass]) => { if (!pass) { bad++; console.log("   x " + label); } });
