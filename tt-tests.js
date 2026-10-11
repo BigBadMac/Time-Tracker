@@ -729,7 +729,7 @@ test("enabled module nav entries render as menu rows", () => {
   has(/var modNav=ttModuleNav\(\);/, "nav list computed per render");
   has(/modGroups\.map\(function\(g\)\{/, "grouped rows rendered in the menu");
   has(/function openModule\(entry\)\{ closeAllPopups\(\);/, "opening a module closes every other popup first");
-  order("Backup & Restore", "modGroups.map", "module rows sit below the core rows");
+  order("Backup & Saves", "modGroups.map", "module rows sit below the core rows");
   // The tutorial row moved to the TOP of the menu at Brent's request; the
   // User Manual row (which now holds the practice board) took its place.
   order("// USER MANUAL row", "modGroups.map", "the User Manual row sits above the module rows");
@@ -1053,8 +1053,8 @@ test("every Delete that opens something is held, not tapped", () => {
   // tap on the way to Save cannot start a delete. The milestone step's Delete
   // had no confirmation at all, so there the hold IS the guard.
   has(/var HOLD_DELETE_MS = 1500;/, "the delete hold is a couple of seconds");
-  eq(count(/"data-holddelete":true/g), 4,
-    "four destructive entry points hold: project form, lane editor, milestone step, tutorial reset");
+  eq(count(/"data-holddelete":true/g), 5,
+    "five destructive entry points hold: project form, lane editor, milestone step, tutorial reset, board reset");
   ["onHold:onDelete, holdMs:HOLD_DELETE_MS", "onHold:function(){ setConfirm(true); }, holdMs:HOLD_DELETE_MS",
    "onHold:function(){ onDelete(step.id); }, holdMs:HOLD_DELETE_MS"].forEach((frag) => {
     ok(s.indexOf(frag) >= 0, "held: " + frag.slice(7, 40));
@@ -2841,10 +2841,12 @@ test("the Extensions screen exists and is reachable", () => {
 });
 
 test("it is a sibling overlay like every other modal", () => {
-  const i = s.indexOf("React.createElement(BackupModal");
-  const j = s.indexOf("React.createElement(ExtensionsModal");
-  const k = s.indexOf("ttModuleContext(modScreen.id");
-  ok(i < j && j < k, "sits between Backup and the module screens");
+  // From the board: the User Manual stages both sheets earlier in the file.
+  const b0 = s.indexOf("function TTBoard(){");
+  const i = s.indexOf("React.createElement(BackupModal", b0);
+  const j = s.indexOf("React.createElement(ExtensionsModal", b0);
+  const k = s.indexOf("ttModuleContext(modScreen.id", b0);
+  ok(i > 0 && i < j && j < k, "sits between Backup and the module screens");
   const mod = s.slice(s.indexOf("function ExtensionsModal(props){"));
   ok(/React\.createElement\(Modal, \{ title:"Extensions"/.test(mod), "built on the core Modal, no new layer");
 });
@@ -3395,6 +3397,16 @@ test("a staged sheet can show its later stages but never act", () => {
   has(/h=pan \? Math\.ceil\(pan\.offsetHeight\)\+34/, "the staged panel's own height, capped as on a phone");
 });
 
+
+test("every gesture the board uses has a practice panel", () => {
+  const pr = s.slice(s.indexOf("var HELP_PRACTICE = {"), s.indexOf("var HELP_INDEX = ["));
+  ["taps", "hold", "swipe", "msline", "outline"].forEach((g) => ok(pr.indexOf('"' + g + '"') >= 0, g + " can be practised"));
+  // and each is the board's own code, not a copy
+  ok(/useTaps\(function\(\)\{ setRes\("one"\)/.test(s), "taps: the board's useTaps");
+  ok(/HoldButton, \{ onTap:function\(\)\{ setRes\("early"\)/.test(s), "hold: the board's HoldButton");
+  ok(/React\.createElement\(MilestoneStrip, \{ kind:"practice"/.test(s), "zoom and pan: the board's MilestoneStrip");
+});
+
 test("every manual component is defined exactly once", () => {
   ["GuidesModal", "HelpStage", "HelpPicture", "HelpSteps", "HelpTryHold", "HelpIndexRow",
    "helpStageEl", "helpSeedProject", "HelpTryBox", "HelpTryTaps", "HelpTrySwipe", "HelpPractice",
@@ -3447,7 +3459,7 @@ test("a stage is a live, inert render whose marks are measured, never typed in",
   ok(/TEST_PROJECTS/.test(el) && !/tt_test_projects/.test(el), "stages draw from the shipped seed, never the user's practice edits");
   ok(/still:true/.test(el), "a staged card ignores the board's remembered collapse");
   ok(/todayStr\(\)/.test(el), "and finds today through the one work-day function");
-  ok(/StageCtx\.Provider, \{ value:true \}/.test(st), "a staged sheet is told it is staged");
+  ok(/StageCtx\.Provider, \{ value:stage\.full \? HELP_STAGE_FULL : true \}/.test(st), "a staged sheet is told it is staged (and whether to show its whole height)");
   has(/"data-modal-panel":staged\?undefined:true/, "so it never answers as the live sheet on top");
 });
 
@@ -3460,8 +3472,98 @@ test("Try it here is the real hold control, and writes nothing", () => {
   ok(/useSwipe\(function\(dir\)\{/.test(t), "and the swipe panel is the board's own useSwipe");
 });
 
+test("a picture's words sit in one box under it, never a list to scroll to", () => {
+  const pic = slice("function HelpWalk(props){", "function HelpPicture(props){");
+  ok(/useState\(Math\.min\(props\.start\|\|0, n-1\)\)/.test(pic), "the page opens on part one (or the part a search hit names), so the box is never empty");
+  ok(/"data-helpdetail":on\+1/.test(pic), "one box shows the picked part");
+  ok(/position:"sticky", bottom:barH\?\(barH-20\+8\)\+"px":0/.test(pic), "and rides the foot of the sheet when the picture is tall - above the action bar when that sits at the foot too");
+  ok(/"data-helpdetailnav":dir>0\?"next":"prev"/.test(pic) && /disabled:off/.test(pic), "arrows step through the items and stop at the ends");
+  ok(/done=guide && dir>0 && last/.test(pic) && /if\(done\) props\.onBack\(\);/.test(pic), "on a guide's last step the next arrow is Done");
+  ok(/marginTop:"auto"/.test(pic) && /fill:true/.test(pic), "and on a short page the box still sits at the sheet's foot, so it never moves");
+  ok(pic.indexOf("pic.parts.map(function(pt, i){") < 0 && !/"data-helppart":i\+1, onClick:function\(\)\{ setOn\(i\); \},\n *style:\{ display:"flex"/.test(pic), "the old legend list is gone");
+  ok(pic.indexOf('"data-helpdetailnav"') < pic.indexOf('"data-helpdetaillabel"'), "the controls sit above the words, so they never move under a thumb");
+});
+
+test("steady-box rule: a box whose words change keeps its tallest height", () => {
+  const sb = slice("function SteadyBox(props){", "function HelpNum(props){");
+  ok(/gridArea:"1 \/ 1"/.test(sb), "every variant shares one grid cell, so the cell is as tall as the longest");
+  ok(/visibility:ghost\?"hidden":"visible"/.test(sb) && /"aria-hidden":ghost\?true:undefined/.test(sb), "the rest are held invisibly and hidden from screen readers");
+  const pic = slice("function HelpWalk(props){", "function HelpPicture(props){");
+  ok(/SteadyBox, \{ count:n, at:on/.test(pic), "the instruction box - pictures and guides alike - is one");
+  ok(/"data-helphow":ghost\?undefined:p\.guide/.test(pic), "and a ghost part carries no How > hook");
+  const tb = slice("function HelpTryBox(props){", "function HelpTryHold(");
+  ok(/SteadyBox, \{ count:keys\.length/.test(tb), "every practice panel's reply is one");
+  eq(count(/, msg:msg,/g), 0, "no panel passes a single message any more - each lists all it can say");
+});
+
+test("picking a part from the box brings it to the middle of the clear band", () => {
+  const pic = slice("function HelpWalk(props){", "function HelpPicture(props){");
+  ok(/var pick=function\(i\)\{ wantScroll\.current=true; setOn\(i\); \};/.test(pic), "the box's chips and arrows ask for a scroll");
+  ok(/else if\(!off\) pick\(to\);/.test(pic) && /onClick:function\(\)\{ pick\(i\); \}/.test(pic), "both of them");
+  ok(/onPick:function\(\)\{ setOn\(i\); \}/.test(pic), "a tapped number does not - it is already on screen");
+  const c = slice("function helpCentrePart(box, i, onlyIfHidden){", "function HelpWalk(props){");
+  ok(/bandBot=P\.top\+panel\.clientTop\+panel\.clientHeight-sticky-box\.offsetHeight/.test(c), "the band ends at the box");
+  ok(/h<=room-16 \? bandTop\+\(room-h\)\/2 : bandTop\+8/.test(c), "centred when it fits, top-first when it does not");
+  ok(/prefers-reduced-motion: reduce/.test(c), "and no smooth scroll for anyone who asked for less motion");
+});
+
+test("Backup & Saves: copies live in IndexedDB, and every reset or load can be undone", () => {
+  const eng = slice("// ---------------- Saves: automatic backups", "function getMeta(laneMeta, lane){");
+  ok(/indexedDB\.open\(SNAP_DB, 1\)/.test(eng), "copies go to IndexedDB, not the 5 MB localStorage the board itself lives in");
+  ok(!/localStorage\.setItem/.test(eng), "the engine never writes localStorage directly - it is handed a storage");
+  ok(/new CompressionStream\("deflate-raw"\)/.test(eng) && /enc:"none", data:str/.test(eng), "compressed where the browser can, plain where it cannot");
+  ok(/MULTI-USER HURDLE/.test(eng), "and it carries its multi-user flag");
+  const then = slice("function snapThenReload(why, write, setMsg){", "function SnapTierSheet(props){");
+  ok(then.indexOf("snapTake(why)") < then.indexOf("write(localStorage)"), "a reset or load takes its backup BEFORE it writes");
+  ok(/could not take a backup first, so nothing was changed/i.test(then), "and writes nothing if that backup fails");
+  ok(/snapThenReload\("before-reset"/.test(s) && /snapThenReload\("before-load"/.test(s), "both go through it");
+  has(/if\(!testMode\) snapAfterClockOut\.current=true;/, "clock-out asks for the day's backup - never on the practice board");
+  has(/snapTake\("clockout"\)/, "and takes it once the clock-out is written");
+  has(/if\(load\("tt_session",\{\}\)\.atWorkStart\) return;/, "opening the app never backs up mid-shift");
+  has(/if\(!n \|\| Date\.now\(\)-n\.at > DAY_MS\) return snapTake\("open"\);/, "but does when the newest copy is over a day old");
+  const bm = slice("function BackupModal(props){", "function snapThenReload(");
+  ok(/if\(staged\) return Promise\.resolve\(\);/.test(bm), "a staged sheet in the manual never touches the copies");
+  ok(/"data-resetopen":true, disabled:clocked/.test(bm) && /"data-snapload":"latest", disabled:clocked/.test(bm), "nothing loads or resets while the clock runs");
+  has(/BackupModal, \{ clocked:!!atWorkStart,/, "the sheet is told");
+  ok(/HoldButton, \{ onHold:function\(\)\{ delSave\(r\.id\); \}/.test(bm), "deleting a save is held");
+});
+
+test("Day Summary lists the project tree, each job once", () => {
+  const ds = slice("function DaySummary(props){", "function ReportsModal(props){");
+  ok(/daySummaryTree\(projectLogs, props\.projects\)/.test(ds), "the listing comes from the tree");
+  ok(!/Object\.values\(byProject\)\.filter\(function\(c\)\{ return c\.parentId; \}\)/.test(s), "the loop that printed every nested job under every parent is gone");
+  has(/dayKey:todayStr2, projects:projects, onClose/, "the board hands it the projects");
+  has(/DaySummary, \{ dayKey:yday, testMode:true, onClose:nop, projects:TEST_PROJECTS,/, "and so does the manual's picture");
+});
+
+test("the manual is by topic, with a pinned search on every page", () => {
+  const idx = slice("var HELP_INDEX = [", "function helpEntry(");
+  ok(/topic:"Time Settings"/.test(idx) && /\["picture","paywork"\]/.test(idx) && /\["guide","setpay"\]/.test(idx), "Time Settings is a topic holding its pictures and guides");
+  const docs = slice("function helpSearchDocs(){", "function helpSearch(q){");
+  ok(/Object\.keys\(HELP_PICTURES\)/.test(docs) && /Object\.keys\(HELP_GUIDES\)/.test(docs), "search reads the registries, so new help is searchable at once");
+  ok(/pic\.parts\.forEach/.test(docs) && /g\.steps\.forEach/.test(docs), "every part and every step, not just titles");
+  const bar = slice("function HelpSearchBar(props){", "function HelpSearchResults(props){");
+  ok(/position:"sticky", top:top\+"px"/.test(bar), "the search is pinned");
+  ok(/bar\.offsetHeight-HELP_BAR_OVERHANG/.test(bar), "just under the action bar");
+  eq(count(/props\.setQuery \? React\.createElement\(HelpSearchBar, props\) : null/g), 2, "the walk (pictures and guides) and the practice page carry it");
+  has(/React\.createElement\(HelpSearchBar, search\),/, "and so does the index");
+  has(/var pick=function\(d\)\{ setQuery\(""\); setView\(\{ kind:d\.kind, id:d\.id, start:d\.at/, "a hit opens its page at that part or step");
+  has(/var onS=useState\(Math\.min\(props\.start\|\|0, n-1\)\);/, "a picture can open on any part, and a guide on any step");
+});
+
+test("pictures and guides are one page: the walk", () => {
+  const pic = slice("function HelpPicture(props){", "function HelpSteps(props){");
+  const st = slice("function HelpSteps(props){", "\nfunction ");
+  ok(/React\.createElement\(HelpWalk, /.test(pic) && /React\.createElement\(HelpWalk, /.test(st), "both draw through HelpWalk, so they cannot drift apart");
+  const w = slice("function HelpWalk(props){", "function HelpPicture(props){");
+  ok(/helpStageKey\(it\.stage\)===curKey/.test(w), "a guide numbers every step that shares the stage on show");
+  ok(/key:curKey/.test(w), "and swaps the stage when a step moves to another screen");
+  ok(/if\(moved && !wantScroll\.current\) wantScroll\.current="open";/.test(w), "bringing the new step into view once it has measured");
+  ok(/done:guide && i<on/.test(w), "steps already passed show as done on the chips");
+});
+
 test("every manual view keeps its hooks at the top", () => {
-  ["function GuidesModal(props){", "function HelpPicture(props){", "function HelpSteps(props){",
+  ["function GuidesModal(props){", "function HelpWalk(props){", "function HelpPicture(props){", "function HelpSteps(props){",
    "function HelpTryHold(){", "function HelpStage(props){"].forEach((f) => {
     const body = s.slice(s.indexOf(f), s.indexOf("\nfunction ", s.indexOf(f) + 10));
     // Only a return at the component's own level counts; one inside a

@@ -1,17 +1,17 @@
 # Time Tracker — session handover
 
-Current build: **`10-09 ring clip`**
+Current build: **`10-10 one walk`**
 
 ```
-tt-tests.js  1631 assertions   192 cases   (static, no browser)
-boot.js       189 checks                    (renders the built file)
+tt-tests.js  1693 assertions   200 cases   (static, no browser)
+boot.js       266 checks                    (renders the built file)
 shift.js       46 checks                    (work days, shifts, overtime)
-lifecycle.js  496 checks                    (projects, nesting, archive, scheduling)
-e2e.js        347 checks                    (Playwright, the real board in a browser)
+lifecycle.js  539 checks                    (projects, nesting, archive, scheduling)
+e2e.js        585 checks                    (Playwright, the real board in a browser)
 ```
 
 **Everything above is green at this build.** Pushing it is Brent's step
-(Working Copy -> GitHub Pages). `10-09 outline + milestones` was the build before.
+(Working Copy -> GitHub Pages). `10-09 ring clip` was the build before.
 
 ## Container resets lose the toolchain
 
@@ -96,6 +96,34 @@ which is what makes Backup & Restore whole.
 
 ## Rules that keep biting
 
+- **MULTI-USER IS COMING (Brent, 10-10 - a standing rule).** Cloud/server
+  storage will arrive with multi-user. Flag, in the work and in HANDOVER's
+  "Multi-user hurdles" list, anything built that would be a major hurdle when
+  the board is shared. Do not design around it yet; just never let it be a
+  surprise.
+
+- **THE STEADY-BOX RULE (Brent, 10-09 - a standing rule).** Any inline box
+  whose content changes, with anything below it, is ALWAYS as tall as the
+  largest content it can show, so nothing beneath it jumps up and down as the
+  content changes. Use `SteadyBox({count, at, render(i, ghost), attrs, style})`:
+  it lays every variant in one grid cell and shows only `at`; the rest are
+  invisible, aria-hidden, pointer-less, and drawn with `ghost=true` so they
+  carry NO data- hooks or live buttons (tests query by hook). No measuring, so
+  it holds at any width and text size. Used by: the picture's instruction box,
+  a guide's step words, and every practice panel's reply (`HelpTryBox` now
+  takes `msgs:{none:..., <res>:...}` - every message it can say - never one
+  `msg`). Any NEW box of this kind uses SteadyBox; tt-tests and e2e check it.
+  The rest of the app has NOT been audited against this rule yet.
+
+- **Every settings-menu row must have a help topic.** e2e (p25) clocks in,
+  opens the REAL menu, reads every row (status block included: Logging to,
+  Break / End Break) and every group's items, and fails naming any label no
+  topic lists in its `covers`. Exempt: the User Manual row and its own items.
+  Mutation-tested (removing Archive's covers fails with "no topic for:
+  Archive"). Add `covers:[...]` to a topic when it explains a row.
+- **Carousels and Toggles answer to `data-anchor="set-<name>"`** (their
+  `name` prop), so a guide can point at any of them.
+
 - **A ring is cut to what the picture shows.** Brent found the Reports
   "Milestones" ring running 128px down into the legend: that section goes on
   below the staged sheet's visible edge, and the ring layer is not clipped.
@@ -132,7 +160,8 @@ which is what makes Backup & Restore whole.
 - **A stage box needs `flexShrink:0`.** The sheet is a flex column and a
   stage's contents are all absolutely placed, so without it the box shrank to
   a sliver (28px for a 112px header) and the legend slid up under the picture.
-  e2e now asserts, for every picture, that the legend starts below it.
+  (e2e asserted the legend started below it; since the instruction box that
+  check is: the box is on screen without scrolling, for every part.)
 - **Markers are nudged apart, not hand-placed.** The practice board is dated
   relative to today, so on a milestone line the signs and "now" sit in
   different places at different hours. HelpStage slides any clashing mark
@@ -383,6 +412,151 @@ which is what makes Backup & Restore whole.
   behaving exactly as they did. Nothing migrates.
 
 ## Recent work, newest first
+
+- **Guides walk like pictures (10-10 `one walk`).** Brent: the "How do I"
+  pages should work exactly like "What's on screen". Both are now ONE
+  component, `HelpWalk(items, kind)`; HelpPicture and HelpSteps only map
+  their registry entries into items. The whole screen is staged and
+  scrolls; the item is ringed and brought into the band; the floating box
+  at the foot carries the words and a numbered chip per step, with ‹ ›.
+  Guide specifics: every step sharing the stage on show is numbered on it
+  (tap a number to jump); a step on a different stage swaps the stage
+  (keyed by `helpStageKey`) and is brought into view once measured
+  (350ms); chips already passed show as done; on the last step › becomes
+  ✓ Done (`data-helpnext="done"`) and leaves. A step's Try it panel sits
+  between the stage and the box. The top bar is just Back (to the picture
+  it came from, or the index) - stepping back is ‹. Modal `fill` makes the
+  sheet full height with the box at its foot (`marginTop:auto`), so the
+  box never moves, short page or tall. The old "Step x of n" header and
+  the guide's top Next/Back are gone; `data-helpstep` now sits on the box.
+  e2e: every step of every guide - ring on the real control, ring above
+  the box, box one height and one place throughout. (Stepping in e2e
+  waits for the step to change: a tap landing while the page still glides
+  to a new stage is retried - harmless, but noted.)
+
+- **User Manual by topic, with search, and Time Settings help (10-10
+  `manual by topic`).** Brent chose layout B from a mock:
+  - **HELP_INDEX is now topics**: `[{ id, topic, items:[[kind,id],...], flat? }]`
+    - The board / My day / Time Settings / Reports & records / Your data /
+    Look & add-ons, and Practise (flat). Each topic is a heading that opens
+    in place, pictures under "What's on screen" and guides under "How do
+    I...?". A guide may sit in two topics (night). Rows are only drawn when
+    their topic is open - e2e uses `openRow(pg, key)`.
+  - **Search**: `HelpSearchBar`, sticky just under the action bar (top =
+    bar height - 20; at the bottom-header layout, -20) on the index, every
+    picture, every guide and the practice page. It searches every title,
+    blurb, picture part and step (`helpSearchDocs`, read off the registries,
+    so new help is searchable at once); every word must match; title hits
+    rank first; snippets start on a word and mark the matches. A hit opens
+    the picture ON that part (`start`) or the guide ON that step; the ✕ goes
+    back to where you were. Results replace the page body inside the same
+    Modal so the field keeps focus while typing.
+  - **Time Settings help**: pictures Work Schedule (5 parts), Pay & Work
+    Week (6), Unpaid Breaks (3); guides Set my work schedule, Set up pay and
+    overtime, Add unpaid breaks. New stage kinds `paywork`, `unpaid`, and
+    `schedule` with `day:true` (HELP_DAYSCHED: a day-shift week, lunch, a
+    Friday safety meeting, hourly pay, weekend overtime, biweekly cycle).
+    `full:true` on a stage lets a staged sheet show its whole height
+    (StageCtx value HELP_STAGE_FULL; Modal drops its 85vh cap) - long
+    settings sheets are pictured end to end. Anchors: sch-pay,
+    sch-overnight, sch-unpaid, sch-total, data-schedtime, pay-base,
+    pay-week, pay-otdays, pay-otrate, pay-exclude, pay-cycle, ub-every,
+    ub-custom, ub-total. Schedule stage natural width now 470.
+  - A picture now opens with part one brought into view if the box would
+    hide it (350ms after opening, once the stage has measured); picks from
+    the box scroll at once. helpCentrePart's band starts below the pinned
+    search as well as the action bar.
+
+- **Day Summary is the project tree (10-10 `day summary tree`).** It printed
+  every nested job under EVERY top-level job, dropped a child whose parent
+  logged nothing that day under the wrong parents, flattened deeper levels,
+  and its lines did not add up to the Total (which was right) - and that text
+  is what gets copied out. Now `daySummaryTree(logs, projects)`: each job
+  once under its own parent, deeper levels indented further, a parent with no
+  time of its own still shown, and every line INCLUDES what sits under it
+  (Brent chose this) so the top-level lines add up to the Total. DaySummary
+  is now handed `projects` (board and the manual's picture). lifecycle builds
+  a three-level day and checks once-each, placement, indent, the empty
+  parent, and that the top lines sum to the day.
+
+- **Backup & Saves (10-10 `backup and saves`).** Designed with Brent over
+  three mocks. The menu row and sheet "Backup & Restore" are now **Backup &
+  Saves**:
+  - **Automatic backups**: Latest, plus the last copy of each of the last 7
+    days, 4 weeks and 12 months, each tier rolling off its oldest. Written at
+    clock-out (an effect after the save effects, 600ms later, so the copy
+    holds the finished day; never on the practice board) and when the app
+    opens with the newest automatic copy over a day old (a forgotten
+    clock-out; skipped while clocked in). Also asks navigator.storage.persist().
+  - **Saves**: five manual slots with an optional name, never rolling off -
+    "before I try something" and "my clean standard". Full -> pick one to
+    replace (held). Delete is held.
+  - **Reset...**: two picks, Reset state (time + finished ticks/milestone
+    marks; projects, Archive, settings, modules kept) and Factory reset
+    (everything, projects -> REAL_PROJECTS), with per-item ticks under Board
+    (time, ticks, projects & lanes, the Archive), Settings (look & layout,
+    work schedule & pay cycle - split because the schedule lives inside
+    tt_settings - disruption presets) and one per MODULE (its data only;
+    switched-on state kept). Projects locks time, ticks and Archive on.
+  - **Load**: settings "Keep mine / Use the copy's" and a tick per module.
+    Open-ended entries in a copy (saved mid-shift) are dropped on load.
+  - Every reset and load first takes a "Before reset"/"Before load" copy
+    (Latest + its own daily entry, which a later clock-out never
+    overwrites); if that copy fails nothing is written. Nothing loads or
+    resets while clocked in. Both reload the page, as Restore does.
+  - **Storage**: copies are in IndexedDB (`tt-saves`/`snaps`), deflate-raw
+    via CompressionStream (about 12x on this data), never in localStorage.
+    A copy = every tt_ key except tt_test* and tt_session. Restore-from-file
+    still wipes tt_ localStorage only, so copies survive it.
+  - Sizing (measured): about 5 KB of history per working day, 1.2 MB a year;
+    29 copies after a year about 4 MB compressed.
+  - Help: the backup guide is now "Back up, save and start over" with
+    three new steps (staged sections via `stage.only`).
+  - Tests: lifecycle (copy contents, tier ids, roll-off, every reset path,
+    load options), tt-tests (IndexedDB only, backup before write, clock-out
+    and open triggers, clocked-in lock, staged sheet never touches copies),
+    e2e (save, reset state, factory/custom picks, load back, clocked-in lock,
+    clock-out copy holds the finished day).
+
+- **Box brings its part into view (10-09 `box scrolls picture`).** Brent: on
+  tall pictures the number you step to can be off screen. Picking a part
+  from the BOX (chips, ‹ ›) now scrolls the sheet so that part's ring and
+  number sit centred in the clear band between the sticky action bar and the
+  sticky box; a part taller than the band shows from its top
+  (`helpCentrePart`). Tapping a number on the picture does not scroll - it is
+  already on screen. Smooth, or instant under prefers-reduced-motion.
+  **Found and fixed on the way:** with the header at the BOTTOM, the action
+  bar also sticks to the sheet's foot and covered the instruction box. The box
+  now measures the bar and sticks just above it. e2e: every part of every
+  picture, picked by arrow and by chip, lands in the band; and a new
+  header-at-bottom block checks the bar never covers the box.
+
+- **Steady boxes (10-09 `steady box`).** Brent: the instruction box must not
+  grow and shrink and move what is under it - made a standing rule (see
+  Rules). `SteadyBox` added; applied to the picture box, step words and
+  practice-panel replies. e2e: every picture's box keeps one height across
+  all its parts, every guide's step words keep one height across its steps,
+  and the practice panel under Taps does not move when its reply changes.
+
+- **Instruction box (10-09 `instruction box`).** Brent asked for the picture
+  page's words to sit in a box right under the picture instead of a list to
+  scroll to; shown side by side with the list, he chose the box. `HelpPicture`
+  only. Hooks: `data-helpdetail` (= shown part), `data-helpdetaillabel`,
+  `data-helpdetailnav="prev|next"`, `data-helppart` is now the chip. Tests:
+  a static case (box, sticky, arrows stop at the ends, list gone); e2e, for
+  EVERY picture and EVERY part, the box shows that part's label and only its
+  How ›, and is fully on screen; the card walk steps with the arrow and checks
+  the ring follows. Known trade: on a tall picture the box covers its foot
+  until scrolled (Reports part 5's number sits under it; chips/arrows reach it).
+
+- **Every menu row covered (10-09 `every row covered`).** New pictures:
+  Themes, Layout, Tracking, Day Summary, The Archive, Extensions; new guide:
+  Take a break. Night-shift guide now explains Logging to. The coverage check
+  is live. Stage kinds `themes`, `layout`, `tracking`, `summary`, `archive`,
+  `extensions`, `breaks`, `ticker`. Settings sheets stage on DEFAULT settings,
+  not the viewer's, so the picture reads the same for everyone; Extensions
+  stages the real module registry read-only.
+- **Day Summary repeated nested work - FIXED in `day summary tree`.**
 
 - **Ring clipping (10-09 `ring clip`)** - Brent's report: Reports part 5's
   ring ran into the descriptions. Fixed for every picture, with a test that
@@ -1005,8 +1179,13 @@ was rejected outright.)
   Each row says what is behind it: "5 parts" / "4 steps".
 - **Picture page (was layout C).** One real crop, numbered markers placed
   BESIDE or UNDER the part they name - never on it (they covered the labels in
-  the first mock). Legend rows below; tapping lights the part. A part with an
-  action carries a **How ›** button into its step-through. Keep a picture to
+  the first mock). **Under it, ONE instruction box** (Brent, 10-09, replaced
+  the legend list): it shows the picked part's name, words and How ›; it
+  opens on part 1; ‹ › arrows and 1..n chips sit ABOVE the words so they never
+  move under a thumb; it is `position:sticky; bottom:0` so on a tall picture
+  (Reports, Day Summary) it rides the foot of the sheet and the words are on
+  screen without scrolling. A part with an action carries a **How ›** button
+  into its step-through. Keep a picture to
   five or six parts; a busy screen becomes several pictures.
 - **Step-through (was layout B).** One step per screen, Next/Back through
   `ModalActions`. Every step picture carries the picture page's RING on the
@@ -1077,11 +1256,10 @@ did NOT need a new practice record after all: it stages the closure sheet for
 Install new workbench, whose Electrical hookup is open - no `TUTORIAL_SEED`
 bump.
 
-**Next, in rough order:** the **coverage test** (every menu row, gesture and
-enabled module has a topic) - rows still uncovered: Interface (Themes,
-Layout), Summary, Archive, Extensions; a short picture each closes it · the
+**Next, in rough order:** fix the Day Summary repetition (above) · the
 module `help` field in `TT.define()`, with Tool Tracker's own topic as the
-first user · "Show me on the practice board" last.
+first user - and extend the coverage check to enabled modules' menu rows
+(today it runs with every module off) · "Show me on the practice board" last.
 The zoom/pan Try it is live: if dragging the line fails on the iPhone it fails
 there too, and the agreed fallback (arrows on the zoom control) covers both.
 Every new topic adds its anchors as `data-anchor` and gets the boot and e2e
@@ -1090,6 +1268,19 @@ ring checks for free.
 **Option 3 ("Show me")** was discussed at length: it is the "Show me on the
 practice board" button above, built AFTER the guides have been used a while,
 for the three or four topics people actually get stuck on.
+
+## Multi-user hurdles (flag list - Brent, 10-10)
+
+- **Backup & Saves copies are per device** (IndexedDB) and **a load or a
+  reset replaces the whole board**. On a shared board both must become per
+  person or admin-only, and copies move server-side.
+- **The live board is in localStorage** (about 5 MB in Safari). At about
+  1.2 MB of history a year it fills in roughly three years of heavy use;
+  moving it (IndexedDB now, the server later) belongs with the cloud work.
+- **Project ids are local counters** (`addProject`: highest id + 1), so two
+  devices adding projects to one board would hand out the same id. Other
+  records use a short random `uid()` (7 characters), which is also too short
+  to trust across many devices. Needs ids that are unique across devices.
 
 ## Known gaps
 

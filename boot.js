@@ -248,12 +248,14 @@ if (H) {
   });
   ok.push(["every part's How > leads to a guide that exists",
     Object.keys(H.pictures).every((id) => H.pictures[id].parts.every((pt) => !pt.guide || !!H.guides[pt.guide]))]);
-  ok.push(["every index row leads somewhere real",
-    H.index.every((sec) => sec.ids.every((id) => !!(sec.kind === "picture" ? H.pictures[id] : sec.kind === "practice" ? H.practice[id] : H.guides[id])))]);
+  const items = H.index.reduce((a, t) => a.concat(t.items), []);
+  const reg = (k) => k === "picture" ? H.pictures : k === "practice" ? H.practice : H.guides;
+  ok.push(["every index row leads somewhere real", items.every((it) => !!reg(it[0])[it[1]])]);
+  ok.push(["every topic has a name and something in it", H.index.every((t) => t.id && t.topic && t.items.length > 0)]);
   ok.push(["every practice page names panels that exist",
     Object.keys(H.practice).every((id) => H.practice[id].panels.every((k) => typeof H.panels[k] === "function"))]);
   ok.push(["and every guide and picture is reachable from the index",
-    Object.keys(H.pictures).concat(Object.keys(H.guides), Object.keys(H.practice)).every((id) => H.index.some((sec) => sec.ids.indexOf(id) >= 0))]);
+    ["picture", "guide", "practice"].every((k) => Object.keys(reg(k)).every((id) => items.some((it) => it[0] === k && it[1] === id)))]);
   const prose = [];
   Object.keys(H.pictures).forEach((id) => { const p = H.pictures[id]; prose.push(p.title, p.blurb);
     p.parts.forEach((pt) => prose.push(pt.label, pt.text)); });
@@ -266,10 +268,10 @@ if (H) {
   let idx = "";
   try { idx = renderToStaticMarkup(React.createElement(H.Guides, { onClose(){} })); } catch (e) { idx = "ERR:" + e.message; }
   ok.push(["the Guides index renders", idx.indexOf("ERR:") !== 0]);
-  has(idx, "What’s on my screen?", "with the picture way in");
-  has(idx, "How do I…?", "and the steps way in");
-  ok.push(["one row per entry", (idx.match(/data-helprow=/g) || []).length ===
-    H.index.reduce((a, sec) => a + sec.ids.length, 0)]);
+  ok.push(["one heading per topic, closed until tapped", (idx.match(/data-helptopic=/g) || []).length === H.index.filter((t) => !t.flat).length &&
+    (idx.match(/aria-expanded="false"/g) || []).length === H.index.filter((t) => !t.flat).length]);
+  ok.push(["the search field sits at the top", idx.indexOf("data-helpsearch") >= 0 && idx.indexOf("data-helpsearch") < idx.indexOf("data-helptopic")]);
+  ok.push(["a flat topic's rows show straight away", H.index.filter((t) => t.flat).every((t) => t.items.every((it) => idx.indexOf('data-helprow="' + it[0] + ":" + it[1] + '"') >= 0))]);
   let tryit = "";
   try { tryit = renderToStaticMarkup(React.createElement(H.TryHold)); } catch (e) { tryit = "ERR:" + e.message; }
   has(tryit, "data-tryhold", "Try it here draws the real hold control");

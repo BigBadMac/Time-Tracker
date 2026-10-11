@@ -1097,6 +1097,37 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   t("with no page errors", errs24===0);
   await p24.close(); await ctx24.close();
 
+
+  // ---- every settings-menu row has a help topic ----
+  // Read off the REAL menu - clocked in, so the status block's rows (Logging
+  // to, Break) are there too - and every group's items, then checked against
+  // the `covers` lists in the manual. A new menu row with no topic fails here.
+  const ctx25=await b.newContext({viewport:{width:390,height:844}});
+  const p25=await ctx25.newPage();
+  let errs25=0; p25.on('pageerror',()=>{ errs25++; });
+  await p25.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(p25); await p25.waitForTimeout(600);
+  await p25.locator('[data-anchor="hdr-clock"]').click(); await p25.waitForTimeout(400);
+  for(let i=0;i<2;i++){ if(await p25.locator('[data-shiftchoice]').count()){ await p25.locator('[data-shiftchoice]').first().click(); await p25.waitForTimeout(400); } }
+  const menu25=async()=>{ await p25.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await p25.waitForTimeout(400); };
+  await menu25();
+  const rows25=await p25.evaluate(()=>[...new Set([...document.querySelectorAll('[data-menu-open="1"] button')].map(b=>b.innerText.trim().split("\n")[0]).filter(Boolean))]);
+  const items25=[];
+  for(const g of await p25.evaluate(()=>[...document.querySelectorAll('[data-menugroup]')].map(e=>e.getAttribute('data-menugroup')))){
+    if(!(await p25.locator('[data-menu-open="1"]').count())) await menu25();
+    await p25.locator('[data-menugroup="'+g+'"]').click(); await p25.waitForTimeout(350);
+    items25.push(...(await p25.locator('[data-groupitem]').allInnerTexts()));
+    await p25.locator('[data-modal-panel]').last().locator('button').filter({hasText:/^Close$/}).click(); await p25.waitForTimeout(300);
+  }
+  const covers25=await p25.evaluate(()=>[HELP_PICTURES,HELP_GUIDES,HELP_PRACTICE].map(r=>Object.keys(r).map(k=>r[k].covers||[])).flat(2).map(x=>String(x).toLowerCase()));
+  // The manual itself, and the way into the practice board, need no topic.
+  const exempt25=["user manual","guides","practice board","leave practice board"];
+  const missing25=rows25.concat(items25).filter(l=>exempt25.indexOf(l.toLowerCase())<0 && covers25.indexOf(l.toLowerCase())<0);
+  t("the menu was read clocked in, status block included", rows25.some(r=>/^logging to$/i.test(r)) && rows25.some(r=>/^break$/i.test(r)));
+  t("every settings-menu row and group item has a help topic", missing25.length===0);
+  if(missing25.length) console.log("   no topic for: "+missing25.join(", "));
+  t("with no page errors", errs25===0);
+  await p25.close(); await ctx25.close();
+
   // ---- the User Manual: Guides, pictures, steps, Try it here ----
   // The stages are LIVE renders of the real card and sheet, so this is the
   // only place that can show the rings actually land on what they name.
@@ -1119,9 +1150,43 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   t("the User Manual holds Guides and the way out of practice", items23.join("|")==="Guides|Leave Practice Board");
   await p23.locator('[data-groupitem]').filter({hasText:/^Guides$/}).click(); await p23.waitForTimeout(500);
   const before23=await store23();
-  const rows23=await p23.evaluate(()=>HELP_INDEX.reduce((a,s)=>a+s.ids.length,0));
-  t("the index offers every picture, guide and practice page", (await p23.locator('[data-helprow]').count())===rows23);
-  await p23.locator('[data-helprow="picture:card"]').click(); await p23.waitForTimeout(900);
+  // The index is by topic (layout B): every topic closed until tapped. A row
+  // in a closed topic is not drawn, so openRow opens its topic first.
+  const rows23=await p23.evaluate(()=>HELP_INDEX.filter(t=>!t.flat).length);
+  const items23n=await p23.evaluate(()=>HELP_INDEX.reduce((a,t)=>a+t.items.length,0));
+  const openRow=async(pg, key)=>{
+    if(!(await pg.locator('[data-helprow="'+key+'"]').count())){
+      const tid=await pg.evaluate((key)=>{ const t=HELP_INDEX.find(t=>t.items.some(it=>it[0]+":"+it[1]===key)); return t&&t.id; }, key);
+      await pg.locator('[data-helptopic="'+tid+'"]').click(); await pg.waitForTimeout(250);
+    }
+    await pg.locator('[data-helprow="'+key+'"]').first().click();
+  };
+  t("the index starts as one closed heading per topic", (await p23.locator('[data-helptopic]').count())===rows23 &&
+    (await p23.locator('[data-helptopic][aria-expanded="true"]').count())===0);
+  for(const tid of await p23.evaluate(()=>HELP_INDEX.filter(t=>!t.flat).map(t=>t.id))){ await p23.locator('[data-helptopic="'+tid+'"]').click(); await p23.waitForTimeout(350); }
+  t("opened, the topics offer every picture, guide and practice page", (await p23.locator('[data-helprow]').count())===items23n);
+  t("and every one of them is somewhere in the index", await p23.evaluate(()=>{ const keys=new Set(HELP_INDEX.reduce((a,t)=>a.concat(t.items.map(it=>it[0]+":"+it[1])),[]));
+    return Object.keys(HELP_PICTURES).every(id=>keys.has("picture:"+id)) && Object.keys(HELP_GUIDES).every(id=>keys.has("guide:"+id)); }));
+  for(const tid of await p23.evaluate(()=>HELP_INDEX.filter(t=>!t.flat).map(t=>t.id))){ await p23.locator('[data-helptopic="'+tid+'"]').click(); await p23.waitForTimeout(350); }
+  // Search, pinned at the top, finds parts and steps and jumps straight there.
+  await p23.locator('[data-helpquery]').fill('overtime'); await p23.waitForTimeout(300);
+  t("search finds picture parts and guide steps", (await p23.locator('[data-helphit^="picture:paywork:"]').count())>0 && (await p23.locator('[data-helphit^="guide:setpay:"]').count())>0);
+  await p23.locator('[data-helphit="picture:paywork:4"]').click(); await p23.waitForTimeout(1300);
+  t("a picture hit opens that picture on that part", (await p23.locator('[data-helpdetail]').getAttribute('data-helpdetail'))==="4" &&
+    /Overtime Rate/.test(await p23.locator('[data-helpdetaillabel]').innerText()));
+  await p23.locator('[data-helpquery]').fill('overnight'); await p23.waitForTimeout(300);
+  await p23.locator('[data-helphit="guide:setschedule:3"]').click(); await p23.waitForTimeout(900);
+  t("a step hit opens that guide on that step", (await p23.locator('[data-helpstep="3"]').count())===1);
+  await p23.evaluate(()=>{ document.querySelector('[data-modal-panel]').scrollTop=9999; }); await p23.waitForTimeout(300);
+  t("the search stays pinned at the top as the page scrolls", await p23.evaluate(()=>{ const q=document.querySelector('[data-helpsearch]').getBoundingClientRect(),
+    P=document.querySelector('[data-modal-panel]').getBoundingClientRect(); return q.top>=P.top-1 && q.bottom<P.top+200; }));
+  await p23.locator('[data-helpquery]').fill('zzzqqq'); await p23.waitForTimeout(250);
+  t("and says so when nothing matches", (await p23.locator('[data-helpresults="0"]').count())===1);
+  await p23.locator('[data-helpclear]').click(); await p23.waitForTimeout(300);
+  t("clearing it goes back to where you were", (await p23.locator('[data-helpstep="3"]').count())===1);
+  await panel23().locator('[data-helpback]').click(); await p23.waitForTimeout(400);
+  t("Back from a hit is the index", (await p23.locator('[data-helptopic]').count())===rows23);
+  await openRow(p23, "picture:card"); await p23.waitForTimeout(900);
   const marks23=await p23.locator('[data-helpmark]').count();
   t("the card picture shows five numbered parts", marks23===5);
   // Every mark sits inside the sheet and no two overlap - they once covered
@@ -1135,6 +1200,16 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     if(!r||!a) return null; const R=r.getBoundingClientRect(), A=a.getBoundingClientRect();
     return R.left<=A.left+1 && R.top<=A.top+1 && R.right>=A.right-1 && R.bottom>=A.bottom-1; });
   t("picking a part rings exactly that part on the live card", ring23===true);
+  // The box under the picture shows only the picked part: How > for
+  // Complete appears once Complete is the part showing.
+  t("the box shows the part just picked", (await p23.locator('[data-helpdetail]').getAttribute('data-helpdetail'))==="4");
+  t("and only that part's How >", (await p23.locator('[data-helphow]').count())===1 && (await p23.locator('[data-helphow="finish"]').count())===0);
+  await p23.locator('[data-helpdetailnav="next"]').click(); await p23.waitForTimeout(250);
+  t("the arrow steps the box to the next part", (await p23.locator('[data-helpdetail]').getAttribute('data-helpdetail'))==="5");
+  t("and moves the ring with it", await p23.evaluate(()=>{ const r=document.querySelector('[data-helpring]'); const a=document.querySelector('[data-helpstage] [data-complete]');
+    if(!r||!a) return false; const R=r.getBoundingClientRect(), A=a.getBoundingClientRect();
+    return R.left<=A.left+1 && R.top<=A.top+1 && R.right>=A.right-1 && R.bottom>=A.bottom-1; }));
+  t("on the last part the next arrow is off", await p23.locator('[data-helpdetailnav="next"]').isDisabled());
   // How > on Complete lands in the step-through, reached from the picture.
   await p23.locator('[data-helphow="finish"]').click(); await p23.waitForTimeout(900);
   t("How > opens Finish a job at step one", /Finish a job/.test(await panel23().innerText()) &&
@@ -1157,12 +1232,13 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     await panel23().locator('[data-helpnext]').click(); await p23.waitForTimeout(900);
     t("step "+n+" rings "+sel+" on the live render", await ringOn(sel));
   }
-  t("the last step's button says Done", (await panel23().locator('[data-helpnext]').innerText())==="Done");
+  t("on the last step the next arrow is Done", (await panel23().locator('[data-helpnext]').getAttribute('data-helpnext'))==="done" &&
+    (await panel23().locator('[data-helpnext]').getAttribute('aria-label'))==="Done");
   await panel23().locator('[data-helpnext]').click(); await p23.waitForTimeout(700);
   t("Done goes back to the card it came from", (await p23.locator('[data-helpmark]').count())===5);
   t("practising and reading changed nothing in storage", (await store23())===before23);
   await panel23().locator('[data-helpback]').click(); await p23.waitForTimeout(500);
-  t("and Back from the card is the index", (await p23.locator('[data-helprow]').count())===rows23);
+  t("and Back from the card is the index", (await p23.locator('[data-helptopic]').count())===rows23);
 
 
   // Every picture: each numbered mark inside the sheet, no two overlapping -
@@ -1170,7 +1246,7 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   // that the nudging holds at whatever hour the suite runs.
   const pics23=await p23.evaluate(()=>Object.keys(HELP_PICTURES));
   for(const id of pics23){
-    await p23.locator('[data-helprow="picture:'+id+'"]').click(); await p23.waitForTimeout(900);
+    await openRow(p23, "picture:"+id); await p23.waitForTimeout(900);
     const n=await p23.evaluate((id)=>HELP_PICTURES[id].parts.length, id);
     const mb=await p23.evaluate(()=>[...document.querySelectorAll('[data-helpmark]')].map(e=>{ const r=e.getBoundingClientRect(); return [r.left,r.top,r.right,r.bottom]; }));
     const pb=await panel23().boundingBox();
@@ -1179,42 +1255,103 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     const vis=await p23.evaluate(()=>{ const b=document.querySelector('[data-helpstage]').getBoundingClientRect(); return [b.top-60,b.bottom+4]; });
     t(id+": every mark sits on the picture, not off its bottom", mb.every(r=>r[1]>=vis[0] && r[3]<=vis[1]));
     t(id+": and no two marks overlap", mb.every((a,i)=>mb.every((c,j)=>i===j || a[2]<=c[0]+0.5||c[2]<=a[0]+0.5||a[3]<=c[1]+0.5||c[3]<=a[1]+0.5)));
-    const legendTop=await p23.evaluate(()=>{ const l=document.querySelector('[data-helppart="1"]'); return l?l.getBoundingClientRect().top:0; });
-    const stageBottom=await p23.evaluate(()=>{ const b=document.querySelector('[data-helpstage]'); const inner=b.firstChild.getBoundingClientRect(); return inner.bottom; });
-    t(id+": the legend starts below the picture, not under it", legendTop>=stageBottom);
-    // Tap every number: its ring must stay on the picture. The Reports
-    // milestones ring once ran down into the legend.
-    let ringsOk=true;
+    // The instructions box: on screen the moment the page opens, without a
+    // scroll - the reason it replaced the list.
+    const boxIn=async()=>p23.evaluate(()=>{ const b=document.querySelector('[data-helpdetail]'); if(!b) return false; const r=b.getBoundingClientRect();
+      return r.height>0 && r.top>=0 && r.bottom<=window.innerHeight+1; });
+    t(id+": the box opens on part one", (await p23.locator('[data-helpdetail]').getAttribute('data-helpdetail'))==="1");
+    t(id+": and is on screen without scrolling", await boxIn());
+    // Tap every number: the box follows it and stays on screen, and the ring
+    // stays on the picture. The Reports milestones ring once ran off it.
+    let ringsOk=true, boxOk=true; const boxH=new Set();
+    const parts=await p23.evaluate((id)=>HELP_PICTURES[id].parts.map(p=>({label:p.label, how:!!(p.guide&&HELP_GUIDES[p.guide])})), id);
     for(let k=1;k<=n;k++){
       await p23.locator('[data-helpmark="'+k+'"]').click(); await p23.waitForTimeout(200);
+      const shown=await p23.evaluate(()=>{ const b=document.querySelector('[data-helpdetail]'); return { n:b.getAttribute('data-helpdetail'),
+        label:b.querySelector('[data-helpdetaillabel]').textContent, how:b.querySelectorAll('[data-helphow]').length }; });
+      boxH.add(await p23.evaluate(()=>Math.round(document.querySelector('[data-helpdetail]').getBoundingClientRect().height)));
+      if(shown.n!==String(k) || shown.label!==parts[k-1].label || (shown.how===1)!==parts[k-1].how || !(await boxIn())){ boxOk=false; console.log("   box wrong: "+id+" part "+k); }
       const ok=await p23.evaluate(()=>{ const r=document.querySelector('[data-helpring]'); const b=document.querySelector('[data-helpstage]');
         if(!r||!b) return false; const R=r.getBoundingClientRect(), I=b.firstChild.getBoundingClientRect();
         return R.bottom<=I.bottom+8 && R.top>=I.top-8 && R.left>=I.left-8 && R.right<=I.right+8; });
       if(!ok){ ringsOk=false; console.log("   ring off the picture: "+id+" part "+k); }
     }
     t(id+": every part's ring stays on the picture", ringsOk);
+    t(id+": the box shows each part as it is picked, on screen", boxOk);
+    t(id+": and never changes height from part to part (steady-box rule)", boxH.size===1);
+    // Walk back with the arrow: each part must land in the clear band
+    // between the action bar and the box - centred when it fits.
+    const inBand=async(k)=>p23.evaluate((k)=>{
+      const st=document.querySelector('[data-helpstage]'), box=document.querySelector('[data-helpdetail]');
+      const panel=box.closest('[data-modal-panel]'), bar=panel.querySelector(':scope > [data-surface="menu"]');
+      const els=[st.querySelector('[data-helpring]'), st.querySelector('[data-helpmark="'+k+'"]')].filter(Boolean);
+      let top=1e9, bot=-1e9; els.forEach(e=>{ const r=e.getBoundingClientRect(); top=Math.min(top,r.top); bot=Math.max(bot,r.bottom); });
+      const P=panel.getBoundingClientRect(), B=box.getBoundingClientRect(), A=bar.getBoundingClientRect();
+      const Q=document.querySelector('[data-helpsearch]'); const qb=Q?Q.getBoundingClientRect().bottom:P.top;
+      const bandTop=Math.max(A.bottom<P.top+P.height/2 ? Math.max(P.top,A.bottom) : P.top, qb);
+      const bandBot=Math.min(B.top, A.top>P.top+P.height/2 ? A.top : 1e9);
+      if(bot-top<=bandBot-bandTop) return top>=bandTop-2 && bot<=bandBot+2;
+      return top>=bandTop-2 && top<=bandTop+40;   // too tall: its top shows
+    }, k);
+    let bandOk=true;
+    for(let k=n-1;k>=1;k--){
+      await p23.locator('[data-helpdetailnav="prev"]').click(); await p23.waitForTimeout(700);
+      if(!(await inBand(k))){ bandOk=false; console.log("   not brought into view: "+id+" part "+k); }
+    }
+    for(let k=2;k<=n;k++){
+      await p23.locator('[data-helppart="'+k+'"]').click(); await p23.waitForTimeout(700);
+      if(!(await inBand(k))){ bandOk=false; console.log("   not brought into view: "+id+" part "+k+" (chip)"); }
+    }
+    t(id+": every part picked from the box lands in view, clear of the bar and the box", bandOk);
     await panel23().locator('[data-helpback]').click(); await p23.waitForTimeout(500);
   }
   // Every guide, every step: the ring must CONTAIN the control it names, on
   // the live render. Read off the registry in the page, so a new guide is
   // covered the moment it is added.
   const guides23=await p23.evaluate(()=>Object.keys(HELP_GUIDES).map(id=>({id, rings:HELP_GUIDES[id].steps.map(s=>s.ring)})));
-  for(const g of guides23){
-    await p23.locator('[data-helprow="guide:'+g.id+'"]').click(); await p23.waitForTimeout(800);
-    for(let i=0;i<g.rings.length;i++){
-      if(g.rings[i]) t(g.id+" step "+(i+1)+" rings "+g.rings[i], await ringOn(g.rings[i]));
-      await panel23().locator('[data-helpnext]').click(); await p23.waitForTimeout(800);
+  // Next, then wait for the step to change (or the guide to close). A tap that
+  // lands while the page is still gliding to the last step is tried again.
+  const nextStep23=async()=>{
+    const was=await p23.evaluate(()=>{ const d=document.querySelector('[data-helpdetail]'); return d?d.getAttribute('data-helpdetail'):null; });
+    for(let k=0;k<2;k++){
+      await panel23().locator('[data-helpnext]').click();
+      const moved=await p23.waitForFunction((was)=>{ const d=document.querySelector('[data-helpdetail]'); return !d || d.getAttribute('data-helpdetail')!==was; }, was, { timeout:2500 }).then(()=>true, ()=>false);
+      if(moved) return;
     }
-    t(g.id+": Done lands back on the index", (await p23.locator('[data-helprow]').count())===rows23);
+  };
+  for(const g of guides23){
+    await openRow(p23, "guide:"+g.id); await p23.waitForTimeout(1000);
+    const textH=new Set(), boxTop=new Set(); let shown=true;
+    for(let i=0;i<g.rings.length;i++){
+      // The same walk as a picture: the box keeps one height and one place,
+      // and each step's ring is brought into the band above it.
+      const bx=await p23.evaluate(()=>{ const r=document.querySelector('[data-helpdetail]').getBoundingClientRect(); return [Math.round(r.height), Math.round(r.top), r.top>=0 && r.bottom<=window.innerHeight+1]; });
+      textH.add(bx[0]); boxTop.add(bx[1]); if(!bx[2]) shown=false;
+      if(g.rings[i]){
+        t(g.id+" step "+(i+1)+" rings "+g.rings[i], await ringOn(g.rings[i]));
+        const vis=await p23.evaluate(()=>{ const r=document.querySelector('[data-helpring]'), b=document.querySelector('[data-helpdetail]');
+          if(!r) return false; const R=r.getBoundingClientRect(), B=b.getBoundingClientRect(); return R.top<B.top-4; });
+        if(!vis) console.log("   step ring under the box: "+g.id+" "+(i+1));
+        t(g.id+" step "+(i+1)+": its ring shows above the box", vis);
+      }
+      await nextStep23(); await p23.waitForTimeout(1000);
+    }
+    t(g.id+": the box keeps one height and one place through the guide (steady-box rule)", textH.size===1 && boxTop.size===1);
+    t(g.id+": and is on screen at every step", shown);
+    t(g.id+": Done lands back on the index", (await p23.locator('[data-helptopic]').count())===rows23);
   }
   // The practice page: tap, hold and swipe, all live, all writing nothing.
-  await p23.locator('[data-helprow="practice:gestures"]').click(); await p23.waitForTimeout(700);
+  await openRow(p23, "practice:gestures"); await p23.waitForTimeout(700);
   t("the practice page has a panel per gesture", (await p23.locator('[data-tryit]').count())===
     (await p23.evaluate(()=>HELP_PRACTICE.gestures.panels.length)));
   const res23=(k)=>p23.locator('[data-tryit="'+k+'"] [data-tryresult]').getAttribute('data-tryresult');
   await p23.locator('[data-trytaps]').scrollIntoViewIfNeeded(); await p23.waitForTimeout(600);
+  const below23=()=>p23.evaluate(()=>{ const a=document.querySelector('[data-tryit="taps"]'), b=document.querySelector('[data-tryit="swipe"]');
+    return Math.round(b.getBoundingClientRect().top-a.getBoundingClientRect().top); });
+  const gap23=await below23();
   await p23.locator('[data-trytaps]').click(); await p23.waitForTimeout(500);
   t("one tap reads as one tap", (await res23('taps'))==="one");
+  t("and the panel under it does not move as the reply changes", (await below23())===gap23);
   await p23.locator('[data-trytaps]').dblclick(); await p23.waitForTimeout(500);
   t("two quick taps read as two", (await res23('taps'))==="two");
   const sw23=async(sel,dx)=>{ const l=p23.locator(sel); await l.scrollIntoViewIfNeeded(); await p23.waitForTimeout(600);
@@ -1241,13 +1378,105 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   t("practising every gesture changed nothing in storage", (await store23())===before23);
   await panel23().locator('[data-helpback]').click(); await p23.waitForTimeout(500);
   // Straight in from How do I...? - the same steps, a different way back.
-  await p23.locator('[data-helprow="guide:finish"]').click(); await p23.waitForTimeout(800);
+  await openRow(p23, "guide:finish"); await p23.waitForTimeout(800);
   t("the index opens the same steps directly", (await p23.locator('[data-helpstep="1"]').count())===1 &&
     /Guides › How do I…\?/.test(await p23.locator('[data-helpcrumb]').innerText()));
   await panel23().locator('[data-helpback]').click(); await p23.waitForTimeout(500);
-  t("whose Back is the index", (await p23.locator('[data-helprow]').count())===rows23);
+  t("whose Back is the index", (await p23.locator('[data-helptopic]').count())===rows23);
   t("with no page errors", errs23===0);
   await p23.close(); await ctx23.close();
+
+  // Header at the BOTTOM: the action bar sticks to the sheet's foot too. The
+  // instruction box must sit above it, never under it, and picking a part
+  // still brings it into the band above the box.
+  const ctxHB=await b.newContext({viewport:{width:390,height:844}});
+  const pHB=await ctxHB.newPage();
+  let errsHB=0; pHB.on('pageerror',()=>{ errsHB++; });
+  await pHB.addInitScript(()=>{ localStorage.setItem('tt_testmode','true');
+    localStorage.setItem('tt_settings', JSON.stringify({ layout:"comfortable", tracking:"timer", colorScheme:"bright-pastels", theme:"neon-dream", schemes:{}, fonts:{}, mode:"dark", handedness:"right", headerPos:"bottom" })); });
+  await pHB.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(pHB); await pHB.waitForTimeout(800);
+  await pHB.locator('[data-tutorialguides]').click(); await pHB.waitForTimeout(500);
+  await pHB.locator('[data-helptopic="reports"]').click(); await pHB.waitForTimeout(250);
+  await pHB.locator('[data-helprow="picture:reports"]').click(); await pHB.waitForTimeout(900);
+  const clearHB=()=>pHB.evaluate(()=>{ const box=document.querySelector('[data-helpdetail]'), panel=box.closest('[data-modal-panel]'),
+    bar=panel.querySelector(':scope > [data-surface="menu"]'); const B=box.getBoundingClientRect(), A=bar.getBoundingClientRect();
+    return { below:A.top>=B.bottom-1, onScreen:B.top>=0 && A.bottom<=window.innerHeight+1 }; });
+  let cHB=await clearHB();
+  t("header at the bottom: the action bar sits below the instruction box, not over it", cHB.below && cHB.onScreen);
+  for(let k=2;k<=5;k++){ await pHB.locator('[data-helpdetailnav="next"]').click(); await pHB.waitForTimeout(700); }
+  cHB=await clearHB();
+  t("and still does after stepping to the last part", cHB.below && cHB.onScreen);
+  t("which is brought into view above the box", await pHB.evaluate(()=>{ const st=document.querySelector('[data-helpstage]'), box=document.querySelector('[data-helpdetail]');
+    const r=st.querySelector('[data-helpmark="5"]').getBoundingClientRect(), B=box.getBoundingClientRect(), P=box.closest('[data-modal-panel]').getBoundingClientRect();
+    return r.top>=P.top && r.bottom<=B.top; }));
+  t("with no page errors", errsHB===0);
+  await pHB.close(); await ctxHB.close();
+
+  // ---- Backup & Saves on the REAL board: save, reset state, load it back,
+  // nothing while the clock runs, and a backup at clock-out. Served from a
+  // real origin so reloads keep their storage (see p20).
+  const ctxSV=await b.newContext({viewport:{width:390,height:844}});
+  await ctxSV.route('http://tt.test/**', (r)=>r.fulfill({ status:200, contentType:'text/html', body:fs.readFileSync('/tmp/e2e.html','utf8') }));
+  const pSV=await ctxSV.newPage();
+  let errsSV=0; pSV.on('pageerror',()=>{ errsSV++; });
+  await pSV.goto('http://tt.test/',{waitUntil:'load'});
+  await pSV.evaluate(()=>{ const now=Date.now(); localStorage.clear();
+    localStorage.setItem('tt_projects', JSON.stringify([{id:1,name:"Line 4 Rebuild",lane:"Daily Activity",notes:"",order:0,parentId:null,role:"project",kind:"ongoing",
+      stages:[{id:"a",label:"Strip",done:true,doneAt:now-5e6,note:""}]}]));
+    localStorage.setItem('tt_laneorder', JSON.stringify(['Daily Activity']));
+    localStorage.setItem('tt_logs', JSON.stringify([1,2,3].map(i=>({id:"l"+i,type:"project",projectId:1,projectName:"Line 4 Rebuild",lane:"Daily Activity",startTime:now-i*4e6,endTime:now-i*4e6+3e6,duration:3e6})))); });
+  const goSV=async()=>{ await pSV.reload({waitUntil:'load'}); await dropSplash(pSV); await pSV.waitForTimeout(700); };
+  await goSV();
+  const sheetSV=async()=>{ await pSV.locator('[data-anchor="hdr-menu"]').first().click(); await pSV.waitForTimeout(300);
+    await pSV.locator('button').filter({hasText:/^Backup & Saves$/}).click(); await pSV.waitForTimeout(800); };
+  const holdSV=async(sel)=>{ const l=pSV.locator(sel); await l.scrollIntoViewIfNeeded(); await pSV.waitForTimeout(400);
+    const bb=await l.boundingBox(); await pSV.mouse.move(bb.x+bb.width/2,bb.y+bb.height/2); await pSV.mouse.down(); await pSV.waitForTimeout(1800); await pSV.mouse.up(); };
+  const lsSV=()=>pSV.evaluate(()=>({ logs:JSON.parse(localStorage.getItem('tt_logs')||'[]').length,
+    done:(JSON.parse(localStorage.getItem('tt_projects')||'[]')[0]||{stages:[{}]}).stages[0].done }));
+  const idsSV=()=>pSV.evaluate(()=>snapList().then(l=>l.map(r=>r.id+'|'+r.why)));
+  await sheetSV();
+  t("the menu row and sheet are Backup & Saves", /Backup & Saves/.test(await pSV.locator('[data-modal-panel]').last().innerText()));
+  await pSV.locator('[data-savename]').fill('Clean setup'); await pSV.locator('[data-savenow]').click(); await pSV.waitForTimeout(900);
+  t("Save the board now adds a named save", (await pSV.locator('[data-snaprow^="save-"]').count())===1 &&
+    /Clean setup/.test(await pSV.locator('[data-snaprow^="save-"]').innerText()));
+  await pSV.locator('[data-resetopen]').click(); await pSV.waitForTimeout(500);
+  t("Reset opens on Reset state", (await pSV.locator('[data-resetmode]').getAttribute('data-resetmode'))==="state");
+  const hReset=await pSV.locator('[data-resetmode]').evaluate(e=>e.getBoundingClientRect().height);
+  await pSV.locator('[data-resetchip="factory"]').click(); await pSV.waitForTimeout(250);
+  t("Factory reset ticks everything, projects locking the time on", (await pSV.locator('[data-resetmode]').getAttribute('data-resetmode'))==="factory" &&
+    (await pSV.locator('[data-resetpick="time"]').getAttribute('data-locked'))==="1");
+  t("the words under the picks keep one height (steady-box rule)", Math.abs((await pSV.locator('[data-resetmode]').evaluate(e=>e.getBoundingClientRect().height))-hReset)<1);
+  await pSV.locator('[data-resetpick="look"]').click(); await pSV.waitForTimeout(200);
+  t("changing a tick makes it a custom mix", (await pSV.locator('[data-resetmode]').getAttribute('data-resetmode'))==="custom");
+  await pSV.locator('[data-resetchip="state"]').click(); await pSV.waitForTimeout(250);
+  await holdSV('[data-resetgo]'); await pSV.waitForTimeout(1800); await dropSplash(pSV); await pSV.waitForTimeout(500);
+  let sv=await lsSV();
+  t("reset state clears the time and the ticks, keeping the project", sv.logs===0 && sv.done===false);
+  let ids=await idsSV();
+  t("and a Before reset backup was taken first", ids.indexOf('latest|before-reset')>=0 && ids.some(x=>/^daily-.*\|before-reset$/.test(x)));
+  await sheetSV();
+  await pSV.locator('[data-snapload^="save-"]').first().click(); await pSV.waitForTimeout(500);
+  await holdSV('[data-loadgo]'); await pSV.waitForTimeout(1800); await dropSplash(pSV); await pSV.waitForTimeout(500);
+  sv=await lsSV();
+  t("loading the save puts the time and the ticks back", sv.logs===3 && sv.done===true);
+  ids=await idsSV();
+  t("after its own Before load backup", ids.indexOf('latest|before-load')>=0 && ids.indexOf('latest|before-reset')<0);
+  // Clocked in: nothing loads or resets. Clocking out takes the day's copy.
+  await pSV.evaluate(()=>{ const s=JSON.parse(localStorage.getItem('tt_session')||'{}'); s.savedAt=Date.now(); s.atWorkStart=Date.now()-3600e3; localStorage.setItem('tt_session', JSON.stringify(s));
+    const L=JSON.parse(localStorage.getItem('tt_logs')); L.push({ id:"aw1", type:"atwork", startTime:s.atWorkStart, endTime:null, duration:0 });
+    localStorage.setItem('tt_logs', JSON.stringify(L)); });
+  await goSV();
+  await sheetSV();
+  t("while clocked in, Reset and Load are off and it says why", (await pSV.locator('[data-resetopen]').isDisabled()) &&
+    (await pSV.locator('[data-snapload="latest"]').isDisabled()) && (await pSV.locator('[data-clockedout]').count())===1);
+  await pSV.locator('[data-modal-panel]').last().locator('button').filter({hasText:/^Close$/}).click(); await pSV.waitForTimeout(300);
+  await pSV.locator('[data-anchor="hdr-menu"]').first().click(); await pSV.waitForTimeout(300);
+  await pSV.locator('button').filter({hasText:/Clock Out/}).first().click(); await pSV.waitForTimeout(2000);
+  ids=await idsSV();
+  t("clocking out takes the day's automatic backup", ids.indexOf('latest|clockout')>=0 && ids.some(x=>/^weekly-.*\|clockout$/.test(x)) && ids.some(x=>/^monthly-.*\|clockout$/.test(x)));
+  t("which holds the finished day", await pSV.evaluate(()=>snapGet('latest').then(snapUnpack).then(j=>JSON.parse(JSON.parse(j).tt_logs).some(l=>l.id==="aw1"&&l.endTime>0))));
+  t("with no page errors", errsSV===0);
+  await pSV.close(); await ctxSV.close();
 
   await b.close();
   let bad=0; ok.forEach(([l,p])=>{ if(!p){ bad++; console.log("   x "+l); } });

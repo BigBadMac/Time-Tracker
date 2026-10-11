@@ -125,6 +125,230 @@ function backupApply(obj, storage){
     return { ok:false, error:"Could not write the backup: "+((e&&e.message)||"storage error") };
   }
 }
+// ---------------- Saves: automatic backups and save slots ----------------
+// A save is a copy of the REAL board at one moment: every tt_ key except the
+// practice board (tt_test*), and the live clock (tt_session, which says what
+// is running now, not what the board holds). They live in IndexedDB, not
+// localStorage: localStorage is capped near 5 MB in Safari and the board
+// itself lives there, while each copy carries the whole history. Copies are
+// deflated when the browser can (CompressionStream), about twelve-fold on
+// this data.
+//
+// Automatic tiers (Brent, 10-10): Latest, then the last of each day for the
+// last 7 days, of each week for 4 weeks, of each month for 12 months - each
+// rolling off its oldest. Clock-out writes them; so does opening the app when
+// the newest copy is over a day old (a forgotten clock-out). A reset or load
+// first writes Latest plus its own daily entry, so it can always be undone and
+// a later clock-out never overwrites it. Manual saves (5) never roll off.
+//
+// MULTI-USER HURDLE: copies are per device and a load replaces the whole
+// board. With a shared board both must become per person or admin-only, and
+// copies move server-side. See HANDOVER, "Multi-user hurdles".
+var SNAP_DB="tt-saves", SNAP_STORE="snaps", SNAP_MANUAL_MAX=5;
+var SNAP_KEEP={ daily:7, weekly:4, monthly:12 };
+var SNAP_SETTINGS_KEYS=["tt_settings","tt_distpresets","tt_modules"];
+function snapIsBoardKey(k){ return !!k && k.indexOf(TT_KEY_PREFIX)===0 && k.indexOf("tt_test")!==0 && k!=="tt_session"; }
+function snapCollect(storage){
+  var data={};
+  try{ for(var i=0;i<storage.length;i++){ var k=storage.key(i); if(snapIsBoardKey(k)) data[k]=storage.getItem(k); } }catch(e){}
+  return data;
+}
+function snapParse(data, key, def){ try{ return data[key]!=null ? JSON.parse(data[key]) : def; }catch(e){ return def; } }
+function snapSummary(data){
+  var ps=snapParse(data,"tt_projects",null), ls=snapParse(data,"tt_logs",[])||[];
+  var n=(ps||REAL_PROJECTS).filter(function(p){ return isProjectRole(p) && !isClosed(p); }).length;
+  var ms=0; ls.forEach(function(l){ if(l && l.type==="project" && l.duration>0) ms+=l.duration; });
+  return { projects:n, loggedMs:ms };
+}
+function snapModuleOf(k){
+  if(k.indexOf(TT_MOD_PREFIX)!==0) return null;
+  var rest=k.slice(TT_MOD_PREFIX.length), cut=rest.indexOf("_");
+  return cut>0 ? rest.slice(0,cut) : null;
+}
+// The ids a copy is filed under. Auto copies overwrite the period they fall
+// in, so each tier holds the LAST copy of its day, week or month.
+function snapIdsFor(why, at, weekStart){
+  var d=new Date(at), day=isoDate(d);
+  if(why==="manual") return [{ id:"save-"+at, kind:"manual" }];
+  var out=[{ id:"latest", kind:"latest" }];
+  if(why==="before-reset" || why==="before-load") out.push({ id:"daily-"+day+"-"+at, kind:"daily" });
+  else {
+    out.push({ id:"daily-"+day, kind:"daily" });
+    out.push({ id:"weekly-"+isoDate(periodRange("week",0,d,weekStart||"mon").startDate), kind:"weekly" });
+    out.push({ id:"monthly-"+day.slice(0,7), kind:"monthly" });
+  }
+  return out;
+}
+// What rolls off. Daily keeps every copy from its 7 most recent days; weekly
+// and monthly keep their newest 4 and 12. Manual and Latest never roll.
+function snapPrune(recs){
+  var drop=[];
+  var daily=recs.filter(function(r){ return r.kind==="daily"; });
+  var days=[]; daily.forEach(function(r){ if(days.indexOf(r.day)<0) days.push(r.day); });
+  days.sort().reverse();
+  var keepDays=days.slice(0, SNAP_KEEP.daily);
+  daily.forEach(function(r){ if(keepDays.indexOf(r.day)<0) drop.push(r.id); });
+  ["weekly","monthly"].forEach(function(kind){
+    recs.filter(function(r){ return r.kind===kind; }).sort(function(a,b){ return b.at-a.at; })
+      .slice(SNAP_KEEP[kind]).forEach(function(r){ drop.push(r.id); });
+  });
+  return drop;
+}
+// ---- storage (IndexedDB), every call resolves or rejects, never throws ----
+var snapDbP=null;
+function snapDb(){
+  if(snapDbP) return snapDbP;
+  snapDbP=new Promise(function(res, rej){
+    try{
+      if(typeof indexedDB==="undefined" || !indexedDB) return rej(new Error("no IndexedDB"));
+      var r=indexedDB.open(SNAP_DB, 1);
+      r.onupgradeneeded=function(){ try{ r.result.createObjectStore(SNAP_STORE, { keyPath:"id" }); }catch(e){} };
+      r.onsuccess=function(){ res(r.result); };
+      r.onerror=function(){ rej(r.error||new Error("IndexedDB open failed")); };
+    }catch(e){ rej(e); }
+  });
+  snapDbP.catch(function(){ snapDbP=null; });
+  return snapDbP;
+}
+function snapTx(mode, fn){
+  return snapDb().then(function(db){ return new Promise(function(res, rej){
+    try{
+      var tx=db.transaction(SNAP_STORE, mode), st=tx.objectStore(SNAP_STORE), out={};
+      fn(st, out);
+      tx.oncomplete=function(){ res(out.v); };
+      tx.onerror=function(){ rej(tx.error); }; tx.onabort=function(){ rej(tx.error); };
+    }catch(e){ rej(e); }
+  }); });
+}
+function snapList(){
+  return snapTx("readonly", function(st, out){ var q=st.getAll(); q.onsuccess=function(){ out.v=(q.result||[]).map(function(r){
+    return { id:r.id, kind:r.kind, why:r.why, at:r.at, day:r.day, name:r.name||"", summary:r.summary, bytes:r.bytes }; }); }; });
+}
+function snapGet(id){ return snapTx("readonly", function(st, out){ var q=st.get(id); q.onsuccess=function(){ out.v=q.result||null; }; }); }
+function snapDelete(id){ return snapTx("readwrite", function(st){ st.delete(id); }); }
+function snapPack(str){
+  try{
+    if(typeof CompressionStream!=="undefined"){
+      var s=new Blob([str]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+      return new Response(s).arrayBuffer().then(function(buf){ return { enc:"deflate-raw", data:buf }; },
+        function(){ return { enc:"none", data:str }; });
+    }
+  }catch(e){}
+  return Promise.resolve({ enc:"none", data:str });
+}
+function snapUnpack(rec){
+  if(!rec) return Promise.reject(new Error("That copy is gone."));
+  if(rec.enc!=="deflate-raw") return Promise.resolve(String(rec.data));
+  try{
+    var s=new Blob([rec.data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+    return new Response(s).text();
+  }catch(e){ return Promise.reject(e); }
+}
+// Take a copy of the board as it is in storage now. why: clockout | open |
+// before-reset | before-load | manual. opts: { name, replaceId }.
+function snapTake(why, opts, storage){
+  opts=opts||{};
+  var st=storage||localStorage, at=Date.now();
+  var data=snapCollect(st), json=JSON.stringify(data);
+  var sched=snapParse(data,"tt_settings",{}); sched=sched&&sched.workSchedule;
+  var ids=snapIdsFor(why, at, weekStartOf(sched));
+  var base={ why:why, at:at, day:isoDate(new Date(at)), name:String(opts.name||"").slice(0,40),
+             summary:snapSummary(data), bytes:json.length };
+  return snapPack(json).then(function(p){
+    return snapTx("readwrite", function(s){
+      if(opts.replaceId) s.delete(opts.replaceId);
+      ids.forEach(function(x){ s.put(Object.assign({}, base, { id:x.id, kind:x.kind, enc:p.enc, data:p.data })); });
+    });
+  }).then(snapList).then(function(list){
+    var drop=snapPrune(list);
+    if(!drop.length) return list;
+    return snapTx("readwrite", function(s){ drop.forEach(function(id){ s.delete(id); }); }).then(snapList);
+  });
+}
+function snapNewestAuto(list){
+  return (list||[]).filter(function(r){ return r.kind!=="manual"; })
+    .reduce(function(a,r){ return (!a||r.at>a.at) ? r : a; }, null);
+}
+// ---- applying a copy or a reset (pure on a storage object) ----
+// Running timers in a copy (an open entry, saved mid-shift) are dropped: the
+// copy holds finished time, and the clock itself is never part of it.
+function snapCloseOpen(json){
+  try{ var a=JSON.parse(json); if(!Array.isArray(a)) return json;
+    return JSON.stringify(a.filter(function(x){ return !(x && x.startTime && !x.endTime); })); }catch(e){ return json; }
+}
+function snapApplyLoad(data, storage, opts){
+  opts=opts||{};
+  var mods=opts.modules||{};
+  function keep(k){
+    if(opts.keepSettings && SNAP_SETTINGS_KEYS.indexOf(k)>=0) return true;
+    var m=snapModuleOf(k); return !!(m && mods[m]===false);
+  }
+  var cur=[]; for(var i=0;i<storage.length;i++){ var k=storage.key(i); if(snapIsBoardKey(k)) cur.push(k); }
+  cur.forEach(function(k){ if(!keep(k)) storage.removeItem(k); });
+  Object.keys(data).forEach(function(k){
+    if(!snapIsBoardKey(k) || keep(k)) return;
+    var v=data[k];
+    if(k==="tt_logs" || k==="tt_disruptions" || k==="tt_breaks") v=snapCloseOpen(v);
+    storage.setItem(k, v);
+  });
+}
+function settingsFactory(){
+  return { layout:"comfortable", tracking:"timer", colorScheme:"bright-pastels", theme:"neon-dream", schemes:{}, fonts:{}, mode:"dark", handedness:"right", headerPos:"top" };
+}
+// What a reset can clear. Projects takes time, ticks and the Archive with it.
+var RESET_PICKS={
+  state:   { time:true, ticks:true },
+  factory: { time:true, ticks:true, projects:true, archive:true, look:true, schedule:true, presets:true }
+};
+function resetNormalize(sel){
+  var s=Object.assign({}, sel, { modules:Object.assign({}, sel.modules||{}) });
+  if(s.projects){ s.time=true; s.ticks=true; s.archive=true; }
+  return s;
+}
+function resetApply(sel, storage){
+  sel=resetNormalize(sel);
+  function get(k, d){ try{ var v=storage.getItem(k); return v!=null?JSON.parse(v):d; }catch(e){ return d; } }
+  if(sel.time){
+    ["tt_logs","tt_disruptions","tt_breaks"].forEach(function(k){ storage.setItem(k,"[]"); });
+    storage.removeItem("tt_notif_fired");
+  }
+  if(sel.projects){
+    ["tt_projects","tt_laneorder","tt_lanemeta","tt_lanecollapse","tt_cardcollapse"].forEach(function(k){ storage.removeItem(k); });
+  } else if((sel.ticks || sel.archive) && storage.getItem("tt_projects")!=null){
+    var ps=get("tt_projects", []);
+    if(sel.archive){
+      var gone={}, grew=true;
+      ps.forEach(function(p){ if(isClosed(p)) gone[p.id]=true; });
+      while(grew){ grew=false; ps.forEach(function(p){ if(!gone[p.id] && p.parentId!=null && gone[p.parentId]){ gone[p.id]=true; grew=true; } }); }
+      ps=ps.filter(function(p){ return !gone[p.id]; }).map(function(p){
+        if(!p.milestones) return p;
+        return Object.assign({}, p, { milestones:p.milestones.map(function(m){
+          return Object.assign({}, m, { targets:(m.targets||[]).filter(function(t){ return !(t && gone[t.id]); }) }); }) });
+      });
+    }
+    if(sel.ticks){
+      ps=ps.map(function(p){
+        var q=Object.assign({}, p);
+        if(p.stages) q.stages=p.stages.map(function(st){ return Object.assign({}, st, { done:false, doneAt:null }); });
+        if(p.milestones) q.milestones=p.milestones.map(function(m){ return Object.assign({}, m, { doneAt:null }); });
+        return q;
+      });
+    }
+    storage.setItem("tt_projects", JSON.stringify(ps));
+  }
+  if(sel.look && sel.schedule) storage.removeItem("tt_settings");
+  else if(sel.look){
+    var keepSch=get("tt_settings",{}).workSchedule;
+    var fresh=settingsFactory(); if(keepSch) fresh.workSchedule=keepSch;
+    storage.setItem("tt_settings", JSON.stringify(fresh));
+  } else if(sel.schedule && storage.getItem("tt_settings")!=null){
+    var cur=get("tt_settings",{}); delete cur.workSchedule;
+    storage.setItem("tt_settings", JSON.stringify(cur));
+  }
+  if(sel.presets) storage.removeItem("tt_distpresets");
+  ttModules().forEach(function(m){ if(sel.modules[m.id]) ttClearModuleData(m.id, storage); });
+  return sel;
+}
 function getMeta(laneMeta, lane){
   var m = (laneMeta&&laneMeta[lane]) || DEFAULT_META[lane] || { label:lane, accent:"#888", bg:"#111", dim:"#333" };
   var set = S.lanes;
@@ -715,7 +939,11 @@ function Modal(props){
         style:{ background:S.modalBg,border:"2px solid "+S.border,borderRadius:S.radius2,
                 padding:"1.25rem",
                 width:"100%",maxWidth:wide?"520px":"400px",
-                maxHeight:props.shrinkBy?("calc(85vh - "+props.shrinkBy+")"):"85vh",
+                // A staged sheet marked full shows its whole height in the
+                // manual, so a long settings sheet can be pictured end to end.
+                maxHeight:(staged&&staged.full)?"none":props.shrinkBy?("calc(85vh - "+props.shrinkBy+")"):"85vh",
+                // fill: a full-height sheet, so a box pinned to its foot never moves.
+                height:(props.fill&&!staged)?"85vh":undefined,
                 alignSelf:props.shrinkBy?"flex-start":undefined,
                 marginTop:props.shrinkBy?"1.5rem":undefined,
                 overflowY:"auto",overscrollBehavior:"contain",
@@ -1500,7 +1728,7 @@ var MODAL_GLYPHS = {
   "Edit Project":"project", "Edit Task":"task", "Add Task":"task",
   "Edit Lanes":"lanes", "Time Settings":"clock",
   "Interface":"interface", "Day Summary":"summary", "Reports":"reports",
-  "Archive":"archive", "Backup & Restore":"backup", "Extensions":"extensions",
+  "Archive":"archive", "Backup & Saves":"backup", "Extensions":"extensions",
   "Leave Practice Board":"test", "Start Break":"break",
   "User Manual":"manual", "Guides":"manual"
 };
@@ -1799,7 +2027,7 @@ var HELP_PICTURES = {
       { anchor:'[data-anchor="hdr-menu"]', side:"below", label:"The menu",
         text:"The User Manual, Edit, the settings, Reports and the rest." }
     ] },
-  reports: { title:"Reports", back:"Back to Reports", stage:{ kind:"reports" }, padTop:16,
+  reports: { title:"Reports", covers:["Reports"], back:"Back to Reports", stage:{ kind:"reports" }, padTop:16,
     blurb:"Clocking out opens it on the day you just finished. Further down it lists every lane and project with its time, and Copy report puts the lot on the clipboard.",
     parts:[
       { anchor:'[data-anchor="rep-period"]', side:"right", label:"How much time",
@@ -1812,6 +2040,104 @@ var HELP_PICTURES = {
         text:"Time clocked, breaks, disruptions and the rest, side by side." },
       { anchor:"[data-msreport]", side:"corner", label:"Milestones",
         text:"Steps that fell due in the period: met on time, late or missed, and what is coming next." }
+    ] },
+  schedule: { title:"Work Schedule", covers:["Work Schedule"], back:"Back to the schedule", stage:{ kind:"schedule", day:true, full:true }, padTop:16,
+    blurb:"Under Time Settings in the menu. The days and hours you normally work: Reports measure your time against it, and clocking in outside it asks which shift the time belongs to.",
+    parts:[
+      { anchor:'[data-anchor="sch-pay"]', side:"right", label:"Pay & Work Week", guide:"setpay",
+        text:"A one-line summary of how you are paid and when your week starts. Edit opens the full sheet." },
+      { anchor:'[data-schedday="mon"]', side:"right", label:"Your days",
+        text:"Tap a day\u2019s name to switch it on or off, then set its start and end. Its hours, after unpaid breaks, show on the right.", guide:"setschedule" },
+      { anchor:'[data-anchor="sch-overnight"]', side:"right", label:"Overnight shifts", guide:"night",
+        text:"An end earlier than the start runs into the next morning. The row is marked and the whole shift counts as one work day." },
+      { anchor:'[data-anchor="sch-unpaid"]', side:"right", label:"Unpaid Breaks", guide:"setunpaid",
+        text:"Switch it on to take lunches and other unpaid time off the scheduled hours. Edit Breaks says which and when." },
+      { anchor:'[data-anchor="sch-total"]', side:"right", label:"Scheduled per week",
+        text:"Every day added up, less the unpaid breaks. This is the figure Reports measure your week against. Save keeps your changes." }
+    ] },
+  paywork: { title:"Pay & Work Week", covers:["Pay & Work Week"], back:"Back to Pay & Work Week", stage:{ kind:"paywork", full:true }, padTop:16,
+    blurb:"Work Schedule, then Edit beside Pay & Work Week. What Reports need to turn hours into pay. Every amount is gross, before deductions.",
+    parts:[
+      { anchor:'[data-anchor="pay-base"]', side:"corner", label:"Base Pay", guide:"setpay",
+        text:"Hourly with a rate, or salary with an amount per pay period. On salary, overtime uses the salary spread over the scheduled hours." },
+      { anchor:'[data-anchor="pay-week"]', side:"corner", label:"Week Starts On",
+        text:"The day a week begins, for weekly Reports and weekly pay." },
+      { anchor:'[data-anchor="pay-otdays"]', side:"corner", label:"Overtime Days", guide:"setpay",
+        text:"Tick the days where any time worked counts as overtime, such as weekends." },
+      { anchor:'[data-anchor="pay-otrate"]', side:"corner", label:"Overtime Rate", guide:"setpay",
+        text:"Time and a half, double time, or the regular rate plus a set amount per hour." },
+      { anchor:'[data-anchor="pay-exclude"]', side:"corner", label:"Hours excluded",
+        text:"The first overtime hours each week or each pay cycle that pay the base rate instead. On salary they are covered by the salary." },
+      { anchor:'[data-anchor="pay-cycle"]', side:"corner", label:"Pay Cycle",
+        text:"Daily, weekly, biweekly or monthly, counted from the start date. The Pay period in Reports follows it. Done keeps your changes." }
+    ] },
+  unpaid: { title:"Unpaid Breaks", covers:["Unpaid Breaks","Edit Breaks"], back:"Back to Unpaid Breaks", stage:{ kind:"unpaid", full:true }, padTop:16,
+    blurb:"Work Schedule, then Edit Breaks. Time that comes off your scheduled hours.",
+    parts:[
+      { anchor:'[data-anchor="ub-every"]', side:"corner", label:"Every Work Day", guide:"setunpaid",
+        text:"Breaks taken on every scheduled day, like lunch: a name, when it starts and how many minutes. Add Break adds another." },
+      { anchor:'[data-anchor="ub-custom"]', side:"corner", label:"Custom Daily Breaks", guide:"setunpaid",
+        text:"Extra breaks on one day of the week, on top of the ones above. Tap a day to open it; the badge counts its breaks." },
+      { anchor:'[data-anchor="ub-total"]', side:"corner", label:"Unpaid per week",
+        text:"Everything that comes off the week. Done keeps it, and Save on the schedule makes it stick." }
+    ] },
+  tracking: { title:"Tracking", back:"Back to Tracking", stage:{ kind:"tracking" }, padTop:16, covers:["Tracking"],
+    blurb:"Under Time Settings in the menu. How time is captured and shown.",
+    parts:[
+      { anchor:'[data-anchor="set-tracking"]', side:"right", label:"Capture",
+        text:"Timers runs a clock while you work. Manual Entry is for putting time on a job by hand instead." },
+      { anchor:'[data-anchor="set-timeinc"]', side:"right", label:"Time increments",
+        text:"Hours, minutes and seconds, or decimal hours for a timesheet that wants them. It changes every figure in the app at once." },
+      { anchor:'[data-anchor="set-shiftgrace"]', side:"right", label:"Shift boundary",
+        text:"How early or late you can clock in before it asks which shift the time belongs to." }
+    ] },
+  themes: { title:"Themes", covers:["Interface","Themes"], back:"Back to Themes", stage:{ kind:"themes" }, padTop:16,
+    blurb:"Under Interface in the menu. How the app looks; none of it changes your data.",
+    parts:[
+      { anchor:'[data-anchor="set-theme"]', side:"right", label:"Theme",
+        text:"Shape, texture and type together. Swipe or use the arrows to go through them." },
+      { anchor:'[data-anchor="set-palette"]', side:"right", label:"Palette",
+        text:"The colours, from the ones this theme allows." },
+      { anchor:'[data-anchor="set-typeface"]', side:"right", label:"Typeface",
+        text:"Each theme remembers the one you picked for it." },
+      { anchor:'[data-anchor="set-mode"]', side:"right", label:"Dark or light",
+        text:"Tap a side or slide the thumb across." }
+    ] },
+  layout: { title:"Layout", covers:["Layout"], back:"Back to Layout", stage:{ kind:"layout" }, padTop:16,
+    blurb:"Under Interface in the menu. Where the controls sit, so they fall under your thumb.",
+    parts:[
+      { anchor:'[data-anchor="set-hand"]', side:"right", label:"Handedness",
+        text:"Mirrors the whole app for a left or right hand: the menu, the Save buttons, the board." },
+      { anchor:'[data-anchor="set-header"]', side:"right", label:"Header position",
+        text:"Puts the header at the top or the bottom of the screen. Swipe up or down on it, or tap." }
+    ] },
+  summary: { title:"Day Summary", covers:["Summary"], back:"Back to the summary", stage:{ kind:"summary" }, padTop:16,
+    blurb:"Summary in the menu. The day so far as plain text, ready to paste into a log or a message.",
+    parts:[
+      { anchor:'[data-anchor="sum-copy"]', side:"corner", label:"Copy",
+        text:"Puts the whole summary on the clipboard." },
+      { anchor:'[data-anchor="sum-lines"]', side:"right", label:"The day",
+        text:"Each job once, with its nested work indented under it. A job\u2019s time includes what sits under it, so the top lines add up to the total. Then breaks and the time lost to disruptions." }
+    ] },
+  archive: { title:"The Archive", covers:["Archive"], back:"Back to the Archive", stage:{ kind:"archive" }, padTop:16,
+    blurb:"Archive in the menu. Everything that has been completed, abandoned or superseded, newest first, with all of its history kept.",
+    parts:[
+      { anchor:'[data-anchor="arch-time"]', first:true, side:"above", label:"Its time",
+        text:"Everything logged against it and its tasks, all-time." },
+      { anchor:'[data-anchor="arch-meta"]', first:true, side:"right", label:"Where it was",
+        text:"Its lane, whether it had an end, its tasks, and when it was closed." },
+      { anchor:'[data-anchor="arch-reopen"]', first:true, side:"left", label:"Reopen",
+        text:"Puts it back on the board where it was. Holding the grey pill on the board does the same." }
+    ] },
+  extensions: { title:"Extensions", covers:["Extensions"], back:"Back to Extensions", stage:{ kind:"extensions" }, padTop:16,
+    blurb:"Extensions in the menu. Extra kinds of record that ship inside the app and switch on here, like the Tool Tracker. Off, they are hidden everywhere and keep their data.",
+    parts:[
+      { anchor:'[data-anchor="ext-version"]', first:true, side:"above", label:"Which one",
+        text:"Its name and version." },
+      { anchor:'[data-anchor="set-Tool Tracker"]', side:"right", label:"On or off",
+        text:"Switching on adds its row to the menu under Modules. Switching off hides it and keeps everything." },
+      { anchor:'[data-anchor="ext-data"]', first:true, side:"below", label:"Its data",
+        text:"What it has stored. Delete data asks first, and only a backup brings it back. All of it is in Backup and Saves." }
     ] },
   msline: { title:"A milestone line", back:"Back to the line", stage:{ kind:"msline" }, padTop:52, tryit:"msline",
     blurb:"A project\u2019s milestones laid out in time. Each sign is a step, coloured by how it stands. Lanes and the board carry the same line, gathered from everything beneath them.",
@@ -1864,27 +2190,33 @@ var HELP_GUIDES = {
       { stage:{ kind:"card", id:103 }, ring:"[data-donerow]", title:"It stays on the board",
         text:"It shrinks to a grey pill below your live work, so you can see it happened. Hold the pill to reopen it." }
     ] },
-  night: { title:"Clock in for a night shift",
+  night: { title:"Clock in for a night shift", covers:["Time Settings","Work Schedule","Logging to"],
     steps:[
       { stage:{ kind:"schedule" }, ring:'[data-schedday="mon"]', side:"right", title:"Set the shift",
         text:"In Time Settings, Work Schedule, give the day an end earlier than its start. The row is marked as running into the next day, and the whole shift counts as one work day." },
       { stage:{ kind:"header", clocked:true, dmode:"idle" }, ring:'[data-anchor="hdr-clock"]', title:"Clock in as normal",
-        text:"Clock in when the shift starts. Everything you log after midnight still belongs to the day the shift began, so the board and Reports keep the night together." },
+        text:"Clock in when the shift starts. Everything you log after midnight still belongs to the day the shift began, so the board and Reports keep the night together. While you are clocked in, Logging to in the menu shows which day that is; tap it to change shift." },
       { stage:{ kind:"shiftask" }, ring:"[data-shiftchoice]", side:"right", title:"Outside the shift, it asks",
         text:"Start early, late or between shifts and it asks which shift the time belongs to: the one that just ended or the one coming up." },
       { stage:{ kind:"shiftask", ot:true }, ring:"[data-shiftchoice]", side:"right", title:"A day off asks one more thing",
         text:"Working a day that is not on your schedule? Say whether it is regular time or overtime. Reports uses that answer for pay." }
     ] },
-  backup: { title:"Back up my data",
+  backup: { title:"Back up, save and start over", covers:["Backup & Saves"],
     steps:[
-      { stage:{ kind:"backup" }, ring:'[data-anchor="backup-export"]', side:"right", title:"Export a backup",
-        text:"Everything lives on this phone, so deleting the app deletes your time with it. Tap Export Backup now and then. On a phone it offers to share the file: save it to Files or send it to yourself." },
-      { stage:{ kind:"backup" }, ring:'[data-anchor="backup-choose"]', side:"right", title:"Restore from a file",
+      { stage:{ kind:"backup", only:"auto" }, ring:'[data-anchor="saves-auto"]', side:"below", title:"Automatic backups",
+        text:"Every clock-out keeps a copy of the whole board. It holds the last of each of the last seven days, four weeks and twelve months, and the oldest rolls off as new ones come in. Load puts the board back to that copy." },
+      { stage:{ kind:"backup", only:"saves" }, ring:'[data-anchor="saves-save"]', side:"below", title:"Save before you try something",
+        text:"Save the board now keeps this exact moment until you delete it. Give it a name if you like, so you know later why you made it. There is room for five." },
+      { stage:{ kind:"backup", only:"reset" }, ring:'[data-anchor="saves-reset"]', side:"below", title:"Start over",
+        text:"Reset clears only what you tick. Reset state keeps your projects and clears the time; Factory reset puts everything back to how the app ships. A backup is taken first, so it can be undone." },
+      { stage:{ kind:"backup", only:"file" }, ring:'[data-anchor="backup-export"]', side:"right", title:"Export a backup file",
+        text:"Everything, saves included, lives on this phone, so deleting the app deletes it. Tap Export Backup now and then. On a phone it offers to share the file: save it to Files or send it to yourself." },
+      { stage:{ kind:"backup", only:"file" }, ring:'[data-anchor="backup-choose"]', side:"right", title:"Restore from a file",
         text:"Choose Backup File and pick the file you saved. Nothing changes yet." },
-      { stage:{ kind:"backup", preview:true }, ring:'[data-anchor="backup-replace"]', side:"right", title:"Check it, then replace",
+      { stage:{ kind:"backup", only:"file", preview:true }, ring:'[data-anchor="backup-replace"]', side:"right", title:"Check it, then replace",
         text:"It shows when the backup was made and what is in it. Replace All Data and Restore swaps everything in the app for the backup and reloads. Pick a Different File backs out." }
     ] },
-  outline: { title:"Rearrange with Edit\u2026",
+  outline: { title:"Rearrange with Edit\u2026", covers:["Edit\u2026"],
     steps:[
       { stage:{ kind:"outline" }, ring:'[data-outlinekey="L:Projects"]', side:"corner", title:"Everything in one list",
         text:"Edit in the menu opens the outline: every lane, with its projects, tasks and stages beneath it, in the order they sit on the board." },
@@ -1914,6 +2246,48 @@ var HELP_GUIDES = {
       { stage:{ kind:"msedit" }, ring:"[data-mssaveall]", side:"left", title:"Save",
         text:"Save keeps the steps on the project and its line updates. Cancel drops what you changed." }
     ] },
+  setschedule: { title:"Set my work schedule", covers:["Work Schedule"],
+    steps:[
+      { stage:{ kind:"schedule", day:true }, ring:'[data-schedday="sat"]', side:"right", title:"Turn days on and off",
+        text:"Time Settings, then Work Schedule. Tap a day\u2019s name to switch it on or off. A day that is off counts nothing." },
+      { stage:{ kind:"schedule", day:true }, ring:'[data-schedday="tue"]', side:"below", title:"Set the hours",
+        text:"Set when the day starts and ends. Its hours, after any unpaid breaks, show at the end of the row." },
+      { stage:{ kind:"schedule" }, ring:'[data-schedday="mon"]', side:"below", title:"Shifts that run past midnight",
+        text:"An end earlier than the start is an overnight shift: it is marked as ending the next day, and the whole shift counts as one work day." },
+      { stage:{ kind:"schedule", day:true, full:true }, ring:'[data-anchor="sch-total"]', side:"corner", title:"Check the week, then Save",
+        text:"Scheduled per week adds it all up, less unpaid breaks. Reports measure your time against it. Save keeps it." }
+    ] },
+  setpay: { title:"Set up pay and overtime", covers:["Pay & Work Week"],
+    steps:[
+      { stage:{ kind:"schedule", day:true }, ring:'[data-anchor="sch-pay"]', side:"below", title:"Open Pay & Work Week",
+        text:"In Work Schedule, the top row sums up your pay. Tap Edit beside it." },
+      { stage:{ kind:"paywork", full:true }, ring:'[data-anchor="pay-base"]', side:"below", title:"Hourly or salary",
+        text:"Pick one and enter the rate or the salary per pay period. Everything is gross, before any deductions." },
+      { stage:{ kind:"paywork", full:true }, ring:'[data-anchor="pay-otdays"]', side:"below", title:"Days that pay overtime",
+        text:"Tick the days where any time worked counts as overtime." },
+      { stage:{ kind:"paywork", full:true }, ring:'[data-anchor="pay-otrate"]', side:"corner", title:"How overtime pays",
+        text:"Time and a half, double time, or a set amount more per hour. Hours excluded lets the first overtime hours each week or pay cycle pay the base rate instead." },
+      { stage:{ kind:"paywork", full:true }, ring:'[data-anchor="pay-cycle"]', side:"corner", title:"When you are paid",
+        text:"Daily, weekly, biweekly or monthly, from the start date. Reports\u2019 Pay period follows it. Done, then Save on the schedule." }
+    ] },
+  setunpaid: { title:"Add unpaid breaks", covers:["Unpaid Breaks","Edit Breaks"],
+    steps:[
+      { stage:{ kind:"schedule", day:true, full:true }, ring:'[data-anchor="sch-unpaid"]', side:"corner", title:"Switch them on",
+        text:"In Work Schedule, tap Unpaid Breaks to switch it on, then Edit Breaks." },
+      { stage:{ kind:"unpaid", full:true }, ring:'[data-anchor="ub-every"]', side:"below", title:"Breaks every day",
+        text:"Every Work Day holds breaks taken on each scheduled day. Give each a name, a start and its minutes; Add Break adds another." },
+      { stage:{ kind:"unpaid", full:true }, ring:'[data-anchor="ub-custom"]', side:"corner", title:"Breaks on one day",
+        text:"Custom Daily Breaks adds extras on a single day of the week, on top of the ones above. Tap the day to open it." },
+      { stage:{ kind:"unpaid", full:true }, ring:'[data-anchor="ub-total"]', side:"corner", title:"Check the total",
+        text:"Unpaid per week shows what comes off. Done, then Save on the schedule." }
+    ] },
+  breaks: { title:"Take a break", covers:["Break","End Break"],
+    steps:[
+      { stage:{ kind:"breaks" }, ring:"[data-breakpreset]", side:"right", title:"Start a break",
+        text:"While you are clocked in, the menu opens with Break near the top. It offers the usual ones, or type your own. Whatever job is running stops, and the break is kept out of your worked time." },
+      { stage:{ kind:"ticker" }, ring:'[data-anchor="hdr-status"]', title:"While you are on it",
+        text:"The header says On Break, with how long it has run. When you are back, End Break in the same menu stops it; then start your job again from its card." }
+    ] },
   collapse: { title:"Collapse and expand",
     steps:[
       { stage:{ kind:"card", id:101 }, ring:'[data-anchor="card-title"]', side:"above", title:"Swipe left on its name", tryit:"swipe",
@@ -1927,16 +2301,127 @@ var HELP_PRACTICE = {
   gestures: { title:"Tap, double tap, hold and swipe", panels:["taps","hold","swipe","msline","outline"],
     blurb:"Every gesture the board uses, to try right here. Nothing you do on this page changes anything." }
 };
+// By topic (Brent, 10-10: layout B). Each topic holds its pictures and its
+// step-throughs together; a guide may sit under more than one topic. A
+// `flat` topic draws its rows straight on the index, no group to open.
 var HELP_INDEX = [
-  { head:"What\u2019s on my screen?", kind:"picture", ids:["header","card","msline","reports"] },
-  { head:"How do I\u2026?", kind:"guide", ids:["clock","disrupt","finish","collapse","outline","milestone","night","backup"] },
-  { head:"Practise the gestures", kind:"practice", ids:["gestures"] }
+  { id:"board", topic:"The board", items:[["picture","header"],["picture","card"],["picture","msline"],
+      ["guide","collapse"],["guide","outline"],["guide","milestone"],["guide","finish"]] },
+  { id:"day", topic:"My day: clock, breaks, disruptions", items:[["guide","clock"],["guide","breaks"],["guide","disrupt"],["guide","night"]] },
+  { id:"time", topic:"Time Settings", items:[["picture","schedule"],["picture","paywork"],["picture","unpaid"],["picture","tracking"],
+      ["guide","setschedule"],["guide","setpay"],["guide","setunpaid"],["guide","night"]] },
+  { id:"reports", topic:"Reports & records", items:[["picture","reports"],["picture","summary"],["picture","archive"]] },
+  { id:"data", topic:"Your data", items:[["guide","backup"]] },
+  { id:"look", topic:"Look & add-ons", items:[["picture","themes"],["picture","layout"],["picture","extensions"]] },
+  { id:"practice", topic:"Practise", flat:true, items:[["practice","gestures"]] }
 ];
+function helpEntry(kind, id){ return kind==="picture" ? HELP_PICTURES[id] : kind==="practice" ? HELP_PRACTICE[id] : HELP_GUIDES[id]; }
+function helpCount(kind, d){ return kind==="picture" ? d.parts.length+" parts" : kind==="practice" ? d.panels.length+" to try" : d.steps.length+" steps"; }
+// ---- search -----------------------------------------------------------------
+// Every title, picture part and step, read off the registries - so a new
+// picture or guide is searchable the moment it exists.
+function helpSearchDocs(){
+  var out=[];
+  Object.keys(HELP_PICTURES).forEach(function(id){
+    var pic=HELP_PICTURES[id];
+    out.push({ kind:"picture", id:id, at:0, title:pic.title, where:"What\u2019s on screen", text:pic.blurb||"" });
+    pic.parts.forEach(function(pt, i){ out.push({ kind:"picture", id:id, at:i, title:pt.label, where:pic.title+" \u00B7 part "+(i+1), text:pt.text }); });
+  });
+  Object.keys(HELP_GUIDES).forEach(function(id){
+    var g=HELP_GUIDES[id];
+    out.push({ kind:"guide", id:id, at:0, title:g.title, where:"How do I\u2026?", text:g.steps[0] ? g.steps[0].text : "" });
+    g.steps.forEach(function(st, i){ out.push({ kind:"guide", id:id, at:i, title:st.title, where:g.title+" \u00B7 step "+(i+1), text:st.text }); });
+  });
+  Object.keys(HELP_PRACTICE).forEach(function(id){
+    var pr=HELP_PRACTICE[id]; out.push({ kind:"practice", id:id, at:0, title:pr.title, where:"Practise", text:pr.blurb||"" });
+  });
+  return out;
+}
+function helpSearch(q){
+  var words=String(q||"").toLowerCase().split(/\s+/).filter(Boolean);
+  if(!words.length) return [];
+  return helpSearchDocs().map(function(d){
+    var t=d.title.toLowerCase(), x=d.text.toLowerCase(), w=d.where.toLowerCase(), score=0;
+    for(var i=0;i<words.length;i++){
+      var inT=t.indexOf(words[i])>=0, inX=x.indexOf(words[i])>=0, inW=w.indexOf(words[i])>=0;
+      if(!inT && !inX && !inW) return null;
+      score+=(inT?3:0)+(inX?1:0)+(inW?1:0);
+    }
+    return { d:d, score:score };
+  }).filter(Boolean).sort(function(a,b){ return b.score-a.score; }).slice(0,40).map(function(r){ return r.d; });
+}
+// A slice of the text around the first word found, with every word marked.
+function helpSnippet(text, q){
+  var words=String(q||"").toLowerCase().split(/\s+/).filter(Boolean), low=text.toLowerCase(), at=-1;
+  words.forEach(function(w){ var i=low.indexOf(w); if(i>=0 && (at<0 || i<at)) at=i; });
+  var from=Math.max(0, at-40), to=Math.min(text.length, from+130);
+  // Start and end on whole words.
+  if(from>0){ var sp=text.indexOf(" ", from); if(sp>=0 && sp<at) from=sp+1; }
+  if(to<text.length){ var sp2=text.lastIndexOf(" ", to); if(sp2>from) to=sp2; }
+  var cut=(from>0?"\u2026":"")+text.slice(from,to)+(to<text.length?"\u2026":"");
+  if(!words.length) return cut;
+  var re=new RegExp("("+words.map(function(w){ return w.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"); }).join("|")+")","ig");
+  return cut.split(re).map(function(piece, i){
+    return i%2 ? React.createElement("mark", { key:i, style:{ background:rgba(S.infoText,0.22), color:S.infoText, borderRadius:"3px", padding:"0 1px" } }, piece) : piece;
+  });
+}
+// The search field, pinned under the action bar on every page of the manual.
+function HelpSearchBar(props){
+  var ref=useRef(null);
+  var topS=useState(0); var setTop=topS[1]; var top=topS[0];
+  useEffect(function(){
+    var el=ref.current, panel=el&&el.closest("[data-modal-panel]");
+    var bar=panel&&panel.querySelector(":scope > [data-surface=\"menu\"]");
+    setTop(!UI.bottom && bar ? bar.offsetHeight-HELP_BAR_OVERHANG : -HELP_BAR_OVERHANG);
+  }, []);
+  return React.createElement("div", { ref:ref, "data-helpsearch":true, "data-stucktop":top,
+      style:{ position:"sticky", top:top+"px", zIndex:4, background:S.modalBg, margin:"0 -0.4rem 0.6rem", padding:(top<0?"1.6rem":"0.35rem")+" 0.4rem 0.5rem",
+              flexShrink:0 } },
+    React.createElement("div", { style:{ position:"relative" } },
+      React.createElement("input", { "data-helpquery":true, type:"text", enterKeyHint:"search", autoComplete:"off", value:props.query, placeholder:"Search the manual",
+        "aria-label":"Search the manual", onChange:function(e){ props.setQuery(e.target.value); },
+        style:Object.assign({}, INPUT_STYLE, { paddingLeft:"2.1rem", paddingRight:"2.2rem" }) }),
+      React.createElement("span", { "aria-hidden":true, style:{ position:"absolute", left:"0.75rem", top:"50%", transform:"translateY(-50%)",
+        color:S.textMuted, fontSize:"1rem", pointerEvents:"none" } }, "\u2315"),
+      props.query ? React.createElement("button", { "data-helpclear":true, "aria-label":"Clear search", onClick:function(){ props.setQuery(""); },
+        style:{ position:"absolute", right:"0.4rem", top:"50%", transform:"translateY(-50%)", background:"none", border:"none",
+                color:S.textDim, fontSize:"1rem", padding:"0.3rem 0.45rem", cursor:"pointer" } }, "\u2715") : null));
+}
+function HelpSearchResults(props){
+  var hits=helpSearch(props.query);
+  return React.createElement("div", { "data-helpresults":hits.length },
+    React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { margin:"0.3rem 0 0.5rem" }) },
+      hits.length ? (hits.length===1 ? "One match" : hits.length+" matches") : "Nothing matches that. Try a shorter word."),
+    hits.map(function(d, i){
+      return React.createElement("button", { key:d.kind+d.id+d.at+"-"+i, "data-helphit":d.kind+":"+d.id+":"+(d.at+1),
+          onClick:function(){ props.onPick(d); },
+          style:{ display:"block", width:"100%", textAlign:"left", background:S.bg1, border:"1px solid "+S.border, borderRadius:S.radius,
+                  padding:"0.6rem 0.75rem", marginBottom:"0.45rem", cursor:"pointer", fontFamily:S.fontBody } },
+        React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.55rem" } },
+          React.createElement(MenuIcon, { name:d.kind==="picture"?"project":d.kind==="practice"?"test":"manual", size:20, col:S.chromeText }),
+          React.createElement("span", { style:{ color:S.text, fontWeight:700, fontSize:"0.95rem" } }, d.title)),
+        React.createElement("div", { style:{ color:S.textMuted, fontSize:"0.74rem", margin:"0.2rem 0 0.15rem 1.8rem" } }, d.where),
+        React.createElement("div", { style:{ color:S.textDim, fontSize:"0.82rem", lineHeight:1.4, marginLeft:"1.8rem" } }, helpSnippet(d.text, props.query)));
+    }));
+}
+
 
 // Nights, finishing the next morning. `every` puts a shift on all seven days.
 function HELP_NIGHTS(every){
   var on={ on:true, start:"21:00", end:"05:30" }, off={ on:false };
   return normalizeSchedule({ mon:on, tue:on, wed:on, thu:on, fri:on, sat:every?on:off, sun:every?on:off });
+}
+// A plain day-shift week with a lunch break and an example pay setup, for
+// the Time Settings pictures. Shape comes from normalizeSchedule.
+function HELP_DAYSCHED(){
+  var sch=normalizeSchedule({});
+  sch.unpaidBreaks=Object.assign({}, sch.unpaidBreaks, { enabled:true,
+    weekly:[{ id:"hl1", name:"Lunch", start:"12:00", mins:30, note:"" }],
+    custom:Object.assign({}, sch.unpaidBreaks.custom, { fri:[{ id:"hl2", name:"Safety meeting", start:"14:00", mins:15, note:"" }] }) });
+  sch.payroll=Object.assign({}, sch.payroll, { otDays:["sat","sun"],
+    pay:Object.assign({}, sch.payroll.pay, { basis:"hourly", rate:30 }),
+    cycle:{ period:"biweekly", start:isoDate(new Date()) } });
+  return sch;
 }
 function helpSeedProject(id){ return TEST_PROJECTS.filter(function(p){ return p.id===id; })[0]||null; }
 // The element a stage draws. Pure apart from React.createElement, so the boot
@@ -1959,6 +2444,33 @@ function helpStageEl(stage, on){
     var step=stage.step ? (host.milestones||[]).filter(function(m){ return m.id===stage.step; })[0] : {};
     return React.createElement(MilestoneStepModal, { step:step||{}, records:beneath, onSave:nop, onDelete:nop, onCancel:nop });
   }
+  // Settings sheets on default settings, not the viewer's: the picture is of
+  // the sheet, and it must read the same for everyone.
+  if(stage.kind==="themes" || stage.kind==="layout")
+    return React.createElement(stage.kind==="themes" ? ThemesModal : LayoutModal, { onChange:nop, onClose:nop,
+      settings:{ layout:"comfortable", tracking:"timer", colorScheme:"bright-pastels", theme:"neon-dream", schemes:{}, fonts:{}, mode:"dark", handedness:"right", headerPos:"top" } });
+  // Yesterday on the practice board: the fullest day it has.
+  if(stage.kind==="summary"){
+    var yday=recordDay(TEST_BREAKS[0]);
+    return React.createElement(DaySummary, { dayKey:yday, testMode:true, onClose:nop, projects:TEST_PROJECTS,
+      logs:TEST_LOGS.filter(function(l){ return recordDay(l)===yday; }),
+      disruptions:TEST_DIST.filter(function(d){ return recordDay(d)===yday; }),
+      breaks:TEST_BREAKS.filter(function(b){ return recordDay(b)===yday; }) });
+  }
+  if(stage.kind==="tracking")
+    return React.createElement(TrackingModal, { onChange:nop, onClose:nop,
+      settings:{ layout:"comfortable", tracking:"timer", colorScheme:"bright-pastels", theme:"neon-dream", schemes:{}, fonts:{}, mode:"dark", handedness:"right", headerPos:"top" } });
+  if(stage.kind==="breaks")
+    return React.createElement(BreakModal, { onStart:nop, onCancel:nop });
+  // The ticker alone, on a break.
+  if(stage.kind==="ticker")
+    return React.createElement(HeaderTicker, { interrupting:false, activeProj:null, intElapsed:0, wsActive:null, elapsed:0,
+      onBreak:true, breakLabel:PRESET_BREAKS[1], breakElapsed:12*60000, clocked:true, atWorkElapsed:3*3600000, nowTick:Date.now(), bottom:false });
+  if(stage.kind==="archive")
+    return React.createElement(ArchiveModal, { projects:P, logs:TEST_LOGS, laneMeta:TEST_META, onReopen:nop, onClose:nop });
+  // The real module registry; a staged sheet only reads it.
+  if(stage.kind==="extensions")
+    return React.createElement(ExtensionsModal, { onClose:nop, onChange:nop });
   if(stage.kind==="reports")
     return React.createElement(ReportsModal, { logs:TEST_LOGS, projects:P, disruptions:TEST_DIST, breaks:TEST_BREAKS,
       laneMeta:TEST_META, laneOrder:TEST_ORDER, schedule:null, testMode:true, liveLogs:[], initialKind:"week", onClose:nop });
@@ -1987,7 +2499,13 @@ function helpStageEl(stage, on){
   }
   // A night roster, Monday to Friday, as the Work Schedule sheet shows it.
   if(stage.kind==="schedule")
-    return React.createElement(WorkScheduleModal, { schedule:HELP_NIGHTS(), onSave:nop, onClose:nop });
+    return React.createElement(WorkScheduleModal, { schedule:stage.day ? HELP_DAYSCHED() : HELP_NIGHTS(), onSave:nop, onClose:nop });
+  if(stage.kind==="paywork")
+    return React.createElement(PayWorkWeekModal, { value:HELP_DAYSCHED().payroll, onDone:nop, onClose:nop });
+  if(stage.kind==="unpaid"){
+    var dsch=HELP_DAYSCHED();
+    return React.createElement(UnpaidBreaksModal, { value:dsch.unpaidBreaks, schedule:dsch, onDone:nop, onClose:nop, initialOpenDay:"fri" });
+  }
   // The question a clock-in outside the shift asks: an early-morning tap on a
   // roster of nights every day (so it reads the same on any weekday), or the
   // pay question a day off adds.
@@ -1999,7 +2517,7 @@ function helpStageEl(stage, on){
     return React.createElement(ClockDayModal, { when:t.getTime(), position:ctx.position, choices:shiftChoices(ctx), onPick:nop, onCancel:nop });
   }
   if(stage.kind==="backup")
-    return React.createElement(BackupModal, { onClose:nop,
+    return React.createElement(BackupModal, { onClose:nop, only:stage.only||null,
       preview:stage.preview ? { exportedAt:new Date().toISOString(), projects:TEST_PROJECTS.length, logs:TEST_LOGS.length } : null });
   // A project's milestone line, as its card carries it: the practice
   // workbench, whose steps are in every state at once.
@@ -2034,10 +2552,13 @@ function helpStageEl(stage, on){
 // MEASURED from the live render, never typed in, so a layout change moves the
 // marks with it. A mark whose anchor is missing draws nothing.
 var HELP_CARD_W = 366, HELP_SHEET_W = 390, HELP_MARK = 22;
-var HELP_STAGE_W = { card:366, close:390, header:366, presets:300, headerfull:390, msline:366,
-                     schedule:390, shiftask:390, backup:390, outline:390, msedit:400, msstep:390, reports:400 };
+var HELP_STAGE_FULL = { full:true };
+var HELP_STAGE_W = { paywork:400, unpaid:400, card:366, close:390, header:366, presets:300, headerfull:390, msline:366,
+                     schedule:470, shiftask:390, backup:390, outline:390, msedit:400, msstep:390, reports:400,
+                     themes:400, layout:400, summary:400, archive:390, extensions:390, tracking:400, breaks:390, ticker:390 };
 // Kinds that stage a whole sheet: measured off the staged panel, not the content.
-var HELP_SHEETS = { close:true, schedule:true, shiftask:true, backup:true, outline:true, msedit:true, msstep:true, reports:true };
+var HELP_SHEETS = { paywork:true, unpaid:true, close:true, schedule:true, shiftask:true, backup:true, outline:true, msedit:true, msstep:true, reports:true,
+                    themes:true, layout:true, summary:true, archive:true, extensions:true, tracking:true, breaks:true };
 function HelpStage(props){
   var stage=props.stage, sheet=!!HELP_SHEETS[stage.kind];
   var natW=HELP_STAGE_W[stage.kind]||HELP_CARD_W, dispW=props.width||300, k=dispW/natW;
@@ -2112,7 +2633,7 @@ function HelpStage(props){
       style:{ position:"absolute", left:0, top:padTop+"px", width:natW+"px", height:sheet?meas.h+"px":undefined,
               transform:"scale("+k+")", transformOrigin:"0 0", pointerEvents:props.live?"auto":"none",
               overflow:"hidden", background:sheet?S.bg0:"transparent", borderRadius:S.radius3 } },
-      StageCtx ? React.createElement(StageCtx.Provider, { value:true }, helpStageEl(stage, props.on)) : helpStageEl(stage, props.on)),
+      StageCtx ? React.createElement(StageCtx.Provider, { value:stage.full ? HELP_STAGE_FULL : true }, helpStageEl(stage, props.on)) : helpStageEl(stage, props.on)),
     marks.map(function(m, i){
       var r=meas.rects[i]; if(!r) return null;
       var p=spots[i];
@@ -2131,10 +2652,27 @@ function HelpStage(props){
     }));
 }
 
+// THE STEADY-BOX RULE (Brent, 10-09): an inline box whose words change, with
+// anything below it, is always as tall as its LONGEST content - so nothing
+// under it jumps as the words change. Every variant is laid in the same grid
+// cell; only the shown one is visible, the rest hold the height. The ghosts
+// are aria-hidden and drawn with ghost=true, so they carry no data- hooks and
+// no live buttons. No measuring, so it holds at any width or text size.
+function SteadyBox(props){
+  var at=props.at;
+  return React.createElement("div", Object.assign({ style:Object.assign({ display:"grid" }, props.style) }, props.attrs||{}),
+    Array.from({ length:props.count }, function(_, i){
+      var ghost=i!==at;
+      return React.createElement("div", { key:i, "data-steadyghost":ghost?true:undefined, "aria-hidden":ghost?true:undefined,
+          style:{ gridArea:"1 / 1", minWidth:0, visibility:ghost?"hidden":"visible", pointerEvents:ghost?"none":undefined } },
+        props.render(i, ghost));
+    }));
+}
 function HelpNum(props){
+  // done: a step already passed in a guide - filled softly, so progress shows.
   return React.createElement("span", { style:{ flex:"0 0 auto", width:"26px", height:"26px", borderRadius:"50%",
     display:"inline-flex", alignItems:"center", justifyContent:"center", border:"2px solid "+S.infoText,
-    background:props.on?S.infoText:S.infoBg, color:props.on?S.bg0:S.infoText, fontWeight:800,
+    background:props.on?S.infoText:props.done?rgba(S.infoText,0.35):S.infoBg, color:props.on?S.bg0:S.infoText, fontWeight:800,
     fontSize:"0.82rem", fontFamily:S.fontBody } }, props.n);
 }
 function HelpCrumb(props){
@@ -2146,21 +2684,26 @@ function HelpCrumb(props){
 // writes nothing - no storage, no record - which e2e checks byte for byte.
 // The frame every practice panel sits in, so they read as one family.
 function HelpTryBox(props){
+  var keys=Object.keys(props.msgs);
   return React.createElement("div", { "data-tryit":props.kind,
       style:{ background:S.bg1, border:"1px dashed "+S.borderBright, borderRadius:S.radius,
               padding:"0.75rem 0.8rem", marginTop:"0.9rem" } },
     React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { marginBottom:"0.55rem" }) }, props.label||"Try it here"),
     props.children,
-    React.createElement("div", { "data-tryresult":props.res||"none", "aria-live":"polite",
+    // Every message the panel can say is held in one SteadyBox, so the
+    // panels under it never move as the reply changes.
+    React.createElement(SteadyBox, { count:keys.length, at:keys.indexOf(props.res||"none"),
+      attrs:{ "data-tryresult":props.res||"none", "aria-live":"polite" },
       style:{ marginTop:"0.55rem", fontSize:"0.88rem", lineHeight:1.4,
-              color:props.good?S.successText:props.warn?S.warnText:S.textDim } }, props.msg));
+              color:props.good?S.successText:props.warn?S.warnText:S.textDim },
+      render:function(i){ return props.msgs[keys[i]]; } }));
 }
 function HelpTryHold(props){
   var resS=useState(null); var setRes=resS[1]; var res=resS[0];
-  var msg = res==="held" ? "That’s it. On a real job, that opens the sheet in the next step."
-          : res==="early" ? "Let go too soon. Nothing happened — that’s the safety catch."
-          : "Hold it until the bar fills.";
-  return React.createElement(HelpTryBox, { kind:"hold", label:(props&&props.label)||"Try it here", res:res, msg:msg,
+  var msgs={ none:"Hold it until the bar fills.",
+              held:"That’s it. On a real job, that opens the sheet in the next step.",
+              early:"Let go too soon. Nothing happened — that’s the safety catch." };
+  return React.createElement(HelpTryBox, { kind:"hold", label:(props&&props.label)||"Try it here", res:res, msgs:msgs,
       good:res==="held", warn:res==="early" },
     React.createElement(HoldButton, { onTap:function(){ setRes("early"); }, onHold:function(){ setRes("held"); },
       holdMs:HOLD_DELETE_MS, fill:rgba(S.successText,0.35), attrs:{ "data-tryhold":true, "aria-label":"Practice hold" },
@@ -2175,10 +2718,10 @@ function HelpTryHold(props){
 function HelpTryTaps(props){
   var resS=useState(null); var setRes=resS[1]; var res=resS[0];
   var taps=useTaps(function(){ setRes("one"); }, function(){ setRes("two"); });
-  var msg = res==="one" ? "One tap. On the board, that opens its menu."
-          : res==="two" ? "Two taps. On the board, that opens its editor."
-          : "Tap the name once, then try two quick taps.";
-  return React.createElement(HelpTryBox, { kind:"taps", label:(props&&props.label)||"Try it here", res:res, msg:msg, good:!!res },
+  var msgs={ none:"Tap the name once, then try two quick taps.",
+              one:"One tap. On the board, that opens its menu.",
+              two:"Two taps. On the board, that opens its editor." };
+  return React.createElement(HelpTryBox, { kind:"taps", label:(props&&props.label)||"Try it here", res:res, msgs:msgs, good:!!res },
     React.createElement("button", { "data-trytaps":true, onClick:function(){ taps(); },
         style:{ width:"100%", display:"flex", alignItems:"center", gap:"0.45rem", background:S.bg0,
                 border:"2px solid "+S.chromeBdr, borderRadius:S.radius3, padding:"0.7rem 0.8rem", cursor:"pointer",
@@ -2192,12 +2735,12 @@ function HelpTrySwipe(props){
   var shutS=useState(false); var setShut=shutS[1]; var shut=shutS[0];
   var resS=useState(null); var setRes=resS[1]; var res=resS[0];
   var sw=useSwipe(function(dir){ var s2=dir==="left"; setShut(s2); setRes(s2?"shut":"open"); });
-  var msg = res==="shut" ? "Tucked away. Now swipe right on the pill to open it."
-          : res==="open" ? "Open again. A left swipe on a pill does nothing \u2014 try it."
-          : "Swipe left across the name.";
+  var msgs={ none:"Swipe left across the name.",
+              shut:"Tucked away. Now swipe right on the pill to open it.",
+              open:"Open again. A left swipe on a pill does nothing \u2014 try it." };
   var base={ width:"100%", boxSizing:"border-box", display:"flex", alignItems:"center", gap:"0.45rem",
              cursor:"grab", userSelect:"none", WebkitUserSelect:"none", touchAction:"pan-y", fontFamily:S.fontBody };
-  return React.createElement(HelpTryBox, { kind:"swipe", label:(props&&props.label)||"Try it here", res:res, msg:msg, good:!!res },
+  return React.createElement(HelpTryBox, { kind:"swipe", label:(props&&props.label)||"Try it here", res:res, msgs:msgs, good:!!res },
     shut
       ? React.createElement("div", Object.assign({ "data-tryswipe":"pill",
           style:Object.assign({}, base, { height:"22px", justifyContent:"center", border:"2.5px solid "+S.chromeBdr,
@@ -2220,65 +2763,147 @@ function HelpIndexRow(props){
     React.createElement("span", { style:{ color:S.textDim } }, "›"));
 }
 
-function HelpPicture(props){
-  var pic=HELP_PICTURES[props.id];
-  var onS=useState(null); var setOn=onS[1]; var on=onS[0];
-  var marks=pic.parts.map(function(pt, i){
-    return { anchor:pt.anchor, side:pt.side, first:!!pt.first, n:i+1, on:on===i, onPick:function(){ setOn(i); } };
+// Scroll the sheet so part i's ring and number sit in the middle of the
+// clear band between the sticky action bar and the sticky instruction box.
+// A part taller than the band is shown from its top. Smooth unless the
+// device asks for reduced motion.
+var HELP_BAR_OVERHANG=20;   // ModalActions sticks at -1.25rem
+function helpCentrePart(box, i, onlyIfHidden){
+  var panel=box && box.closest("[data-modal-panel]"); if(!panel) return;
+  var stage=panel.querySelector("[data-helpstage]"); if(!stage) return;
+  var els=[stage.querySelector("[data-helpring]"), stage.querySelector("[data-helpmark=\""+(i+1)+"\"]")].filter(Boolean);
+  if(!els.length) return;
+  var top=Infinity, bot=-Infinity;
+  els.forEach(function(e){ var r=e.getBoundingClientRect(); top=Math.min(top,r.top); bot=Math.max(bot,r.bottom); });
+  var P=panel.getBoundingClientRect();
+  var bar=panel.querySelector(":scope > [data-surface=\"menu\"]");
+  var barSpan=bar ? Math.max(0, bar.offsetHeight-HELP_BAR_OVERHANG) : 0;
+  var sticky=parseFloat(box.style.bottom)||0;
+  var srch=panel.querySelector("[data-helpsearch]");
+  var srchBot=srch ? (parseFloat(srch.getAttribute("data-stucktop"))||0)+srch.offsetHeight : 0;
+  var bandTop=P.top+panel.clientTop+Math.max(UI.bottom?0:barSpan, srchBot);
+  var bandBot=P.top+panel.clientTop+panel.clientHeight-sticky-box.offsetHeight;
+  var room=bandBot-bandTop, h=bot-top;
+  // On opening a picture, leave it alone if part one already shows.
+  if(onlyIfHidden && top>=bandTop && bot<=bandBot) return;
+  var want = h<=room-16 ? bandTop+(room-h)/2 : bandTop+8;
+  var reduce=window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  panel.scrollTo({ top:panel.scrollTop+(top-want), behavior:reduce?"auto":"smooth" });
+}
+// ---- THE WALK ---------------------------------------------------------------
+// One page for both kinds of help (Brent, 10-10): the whole screen staged and
+// scrollable, the item being explained ringed and brought to the middle, and
+// a floating box at the foot with the words and a numbered chip per item.
+// A picture is items on ONE stage, all numbered at once. A guide is items
+// (steps) that may each have their own stage; the steps sharing the stage on
+// show are numbered on it together, so a guide reads like a picture that
+// moves on. Every hook below is shared, so the two cannot drift apart.
+function helpStageKey(st){ return st ? JSON.stringify(st) : ""; }
+function helpStageWidth(st){ return !st ? 300 : st.kind==="close" ? 250 : st.kind==="presets" ? 220 : 300; }
+function HelpWalk(props){
+  var items=props.items, n=items.length, guide=props.kind==="guide";
+  var onS=useState(Math.min(props.start||0, n-1)); var setOn=onS[1]; var on=onS[0];
+  var barS=useState(0); var setBarH=barS[1]; var barH=barS[0];
+  var boxRef=useRef(null), wantScroll=useRef(props.start ? "open" : "ifHidden"), lastStage=useRef(null);
+  var cur=items[on], curKey=helpStageKey(cur.stage);
+  // Picked from the box (chips, arrows): bring that item to the middle of
+  // what shows between the bars and the box. A tapped number is already on
+  // screen, so a mark tap never scrolls - unless it moves to a new stage.
+  var pick=function(i){ wantScroll.current=true; setOn(i); };
+  // With the header at the bottom the action bar sticks to the sheet's foot
+  // too; the box sits just above it rather than under it.
+  useEffect(function(){
+    var b=boxRef.current, panel=b&&b.closest("[data-modal-panel]");
+    var bar=panel&&panel.querySelector(":scope > [data-surface=\"menu\"]");
+    setBarH(UI.bottom&&bar ? bar.offsetHeight : 0);
+  }, []);
+  useEffect(function(){
+    var moved=lastStage.current!==null && lastStage.current!==curKey;
+    lastStage.current=curKey;
+    if(moved && !wantScroll.current) wantScroll.current="open";
+    if(!wantScroll.current) return;
+    var how=wantScroll.current; wantScroll.current=false;
+    // A stage that has just mounted is still measuring: give it a moment.
+    var wait=(how==="open" || how==="ifHidden" || moved) ? 350 : 0;
+    var raf=0, t=setTimeout(function(){
+      // Two frames: the stage draws the new ring after it measures.
+      raf=requestAnimationFrame(function(){ raf=requestAnimationFrame(function(){ helpCentrePart(boxRef.current, on, how==="ifHidden"); }); });
+    }, wait);
+    return function(){ clearTimeout(t); cancelAnimationFrame(raf); };
+  }, [on]);
+  var marks=[];
+  items.forEach(function(it, i){
+    if(cur.stage && helpStageKey(it.stage)===curKey && it.anchor)
+      marks.push({ anchor:it.anchor, side:it.side||"below", first:!!it.first, n:i+1, on:on===i, onPick:function(){ setOn(i); } });
   });
-  return React.createElement(Modal, { title:pic.title, onClose:props.onClose, ownActions:true,
-      actions:[React.createElement("button", { key:"b", "data-helpback":true, onClick:props.onBack, style:MODAL_CANCEL() }, "Back")] },
-    React.createElement(HelpCrumb, { parts:["Guides", "What’s on my screen?"] }),
-    React.createElement("p", { style:{ color:S.textDim, fontSize:"0.95rem", lineHeight:1.5, margin:"0 0 1rem" } }, pic.blurb),
-    React.createElement(HelpStage, { stage:pic.stage, marks:marks, width:300, pad:"30px", padTop:pic.padTop||0 }),
-    React.createElement("div", { style:{ marginTop:"0.6rem" } },
-      pic.parts.map(function(pt, i){
-        return React.createElement("div", { key:i, "data-helppart":i+1, onClick:function(){ setOn(i); },
-            style:{ display:"flex", gap:"0.7rem", alignItems:"center", padding:"0.55rem 0.6rem", cursor:"pointer",
-                    borderRadius:S.radius3, marginBottom:"0.2rem",
-                    background:on===i?S.bg3:"transparent", border:"1px solid "+(on===i?S.borderBright:"transparent") } },
-          React.createElement(HelpNum, { n:i+1, on:on===i }),
+  var last=on===n-1;
+  var arrow=function(dir, label){
+    var to=on+dir, done=guide && dir>0 && last, off=!done && (to<0||to>=n);
+    return React.createElement("button", Object.assign({ "data-helpdetailnav":dir>0?"next":"prev", "aria-label":done?"Done":label, disabled:off,
+        onClick:function(){ if(done) props.onBack(); else if(!off) pick(to); },
+        style:{ flex:"none", width:"32px", height:"36px", borderRadius:S.radius3,
+                border:done?"2px solid "+S.actionBdr:"1px solid "+S.borderBright, background:done?S.infoBg:S.bg2,
+                color:off?S.textMuted:done?S.infoText:S.text, opacity:off?0.4:1, fontSize:"1.2rem", fontWeight:700,
+                fontFamily:S.fontBody, cursor:off?"default":"pointer", display:"inline-flex", alignItems:"center", justifyContent:"center" } },
+        guide && dir>0 ? { "data-helpnext":done?"done":"next" } : {}),
+      done ? "✓" : dir>0 ? "›" : "‹");
+  };
+  var Try=cur.tryit && HELP_PANELS[cur.tryit];
+  return React.createElement(Modal, { title:props.title, onClose:props.onClose, ownActions:true, fill:true,
+      actions:[React.createElement("button", { key:"b", "data-helpback":true, onClick:props.onBack, style:MODAL_CANCEL() }, props.backLabel||"Back")] },
+    props.setQuery ? React.createElement(HelpSearchBar, props) : null,
+    props.query ? React.createElement(HelpSearchResults, props) : React.createElement(React.Fragment, null,
+    React.createElement(HelpCrumb, { parts:props.crumb }),
+    props.blurb ? React.createElement("p", { style:{ color:S.textDim, fontSize:"0.95rem", lineHeight:1.5, margin:"0 0 1rem" } }, props.blurb) : null,
+    cur.stage ? React.createElement(HelpStage, { key:curKey, stage:cur.stage, marks:marks, width:helpStageWidth(cur.stage), pad:"30px", padTop:props.padTop||0 }) : null,
+    Try ? React.createElement(Try, { key:"try"+on }) : null,
+    React.createElement("div", { style:{ height:"0.6rem", flexShrink:0 } }),
+    React.createElement("div", { "data-helpdetail":on+1, "data-helpstep":guide?on+1:undefined, ref:boxRef,
+        // Sticky to the foot of the sheet, and pushed to the foot when the
+        // page is short (the sheet is full height): the box never moves.
+        style:{ position:"sticky", bottom:barH?(barH-20+8)+"px":0, zIndex:4, marginTop:"auto", background:S.bg3,
+                border:"1px solid "+S.borderBright, borderRadius:S.radius, boxShadow:"0 -6px 18px rgba(0,0,0,0.35)",
+                padding:"0.7rem 0.75rem 0.8rem", boxSizing:"border-box", flexShrink:0 } },
+      // Fixed controls on top so they never move under a thumb as the text below changes length.
+      React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.5rem", marginBottom:"0.6rem" } },
+        arrow(-1, guide?"Previous step":"Previous part"),
+        React.createElement("div", { style:{ flex:1, display:"flex", justifyContent:"center", flexWrap:"wrap", gap:"4px" } },
+          items.map(function(_, i){
+            return React.createElement("button", { key:i, "data-helppart":i+1, "aria-label":(guide?"Step ":"Part ")+(i+1),
+                onClick:function(){ pick(i); },
+                style:{ border:"none", background:"transparent", padding:0, cursor:"pointer", display:"inline-flex" } },
+              React.createElement(HelpNum, { n:i+1, on:on===i, done:guide && i<on }));
+          })),
+        arrow(1, guide?"Next step":"Next part")),
+      // Steady-box rule: as tall as the longest item, so nothing moves as you step through.
+      React.createElement(SteadyBox, { count:n, at:on, render:function(i, ghost){
+        var p=items[i], how=p.guide && HELP_GUIDES[p.guide];
+        return React.createElement("div", { style:{ display:"flex", gap:"0.7rem", alignItems:"flex-start" } },
           React.createElement("div", { style:{ flex:1 } },
-            React.createElement("div", { style:{ color:S.text, fontWeight:700, fontSize:"0.98rem" } }, pt.label),
-            React.createElement("div", { style:{ color:S.textDim, fontSize:"0.88rem", lineHeight:1.35 } }, pt.text)),
-          pt.guide && HELP_GUIDES[pt.guide] && React.createElement("button", { "data-helphow":pt.guide,
-              onClick:function(e){ e.stopPropagation(); props.onHow(pt.guide, pt.label); },
+            React.createElement("div", { "data-helpdetaillabel":ghost?undefined:true, style:{ color:S.text, fontWeight:700, fontSize:"1.02rem", marginBottom:"0.2rem" } }, p.label),
+            React.createElement("div", { style:{ color:S.textDim, fontSize:"0.92rem", lineHeight:1.45 } }, p.text)),
+          how && props.onHow && React.createElement("button", { "data-helphow":ghost?undefined:p.guide, tabIndex:ghost?-1:undefined,
+              onClick:function(){ props.onHow(p.guide, p.label); },
               style:{ flex:"none", border:"2px solid "+S.actionBdr, background:S.infoBg, color:S.infoText,
                       borderRadius:S.radius3, padding:"0.4rem 0.65rem", fontWeight:700, fontSize:"0.88rem",
                       fontFamily:S.fontBody, cursor:"pointer" } }, "How ›"));
-      })),
-    pic.tryit && HELP_PANELS[pic.tryit] && React.createElement(HELP_PANELS[pic.tryit]));
+      } })),
+    props.pageTry ? React.createElement(props.pageTry) : null));
 }
-
+function HelpPicture(props){
+  var pic=HELP_PICTURES[props.id];
+  var items=pic.parts.map(function(p){ return { stage:pic.stage, anchor:p.anchor, side:p.side, first:p.first, label:p.label, text:p.text, guide:p.guide }; });
+  return React.createElement(HelpWalk, Object.assign({}, props, { kind:"picture", title:pic.title, items:items,
+    crumb:["Guides", "What’s on my screen?"], blurb:pic.blurb, padTop:pic.padTop||0,
+    pageTry:pic.tryit && HELP_PANELS[pic.tryit] ? HELP_PANELS[pic.tryit] : null }));
+}
 function HelpSteps(props){
-  var g=HELP_GUIDES[props.id], n=g.steps.length;
-  var stepS=useState(0); var setStep=stepS[1]; var step=stepS[0];
-  var st=g.steps[step], last=step===n-1;
+  var g=HELP_GUIDES[props.id];
   var from=props.from;   // { picture, part } when reached through How >, else null
-  var crumb = from ? ["Guides", HELP_PICTURES[from.picture].title, from.part] : ["Guides", "How do I…?"];
-  var backLabel = step>0 ? "Back" : from ? (HELP_PICTURES[from.picture].back||"Back") : "Back";
-  return React.createElement(Modal, { title:g.title, onClose:props.onClose, ownActions:true,
-      actions:[
-        React.createElement("button", { key:"n", "data-helpnext":true,
-          onClick:function(){ if(last) props.onBack(); else setStep(step+1); }, style:MODAL_SAVE() }, last?"Done":"Next"),
-        React.createElement("button", { key:"b", "data-helpback":true,
-          onClick:function(){ if(step>0) setStep(step-1); else props.onBack(); }, style:MODAL_CANCEL() }, backLabel)
-      ] },
-    React.createElement(HelpCrumb, { parts:crumb }),
-    React.createElement("div", { style:{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"0.9rem" } },
-      React.createElement("span", { "data-helpstep":step+1, style:Object.assign({}, LABEL_STYLE, { margin:0 }) }, "Step "+(step+1)+" of "+n),
-      React.createElement("span", { style:{ display:"flex", gap:"6px" } },
-        g.steps.map(function(_, i){ return React.createElement("span", { key:i,
-          style:{ width:i===step?"18px":"8px", height:"8px", borderRadius:"4px", background:i===step?S.infoText:S.borderBright } }); }))),
-    st.stage && React.createElement("div", { style:{ background:S.bg0, border:"1px solid "+S.border, borderRadius:S.radius,
-                                        padding:"1rem 0.5rem 0.6rem", marginBottom:"1rem" } },
-      React.createElement(HelpStage, { key:step, stage:st.stage, width:st.stage.kind==="close"?250:st.stage.kind==="presets"?220:290, pad:"26px",
-        marks:[{ anchor:st.ring, n:step+1, on:true, side:st.side||"below" }] })),
-    React.createElement("div", { style:{ color:S.text, fontWeight:700, fontSize:"1.15rem", marginBottom:"0.4rem" } }, st.title),
-    React.createElement("div", { style:{ color:S.textDim, fontSize:"0.95rem", lineHeight:1.5 } }, st.text),
-    st.tryit==="hold" && React.createElement(HelpTryHold, { key:"try"+step }),
-    st.tryit==="swipe" && React.createElement(HelpTrySwipe, { key:"try"+step }),
-    st.tryit==="outline" && React.createElement(HelpTryOutline, { key:"try"+step }));
+  var items=g.steps.map(function(st){ return { stage:st.stage||null, anchor:st.ring, side:st.side||"below", label:st.title, text:st.text, tryit:st.tryit||null }; });
+  return React.createElement(HelpWalk, Object.assign({}, props, { kind:"guide", title:g.title, items:items, onHow:null,
+    crumb: from ? ["Guides", HELP_PICTURES[from.picture].title, from.part] : ["Guides", "How do I…?"],
+    backLabel: from ? (HELP_PICTURES[from.picture].back||"Back") : "Back" }));
 }
 
 // The real MilestoneStrip on the practice workbench's steps. Its zoom and pan
@@ -2286,9 +2911,9 @@ function HelpSteps(props){
 // move would open the milestones sheet, and here it only says so.
 function HelpTryLine(props){
   var resS=useState(null); var setRes=resS[1]; var res=resS[0];
-  var msg = res==="open" ? "A tap that does not move opens that project\u2019s milestones."
-          : "Tap the zoom button to step closer, hold it to see everything, and drag the line once you are zoomed in.";
-  return React.createElement(HelpTryBox, { kind:"msline", label:(props&&props.label)||"Try it here", res:res, msg:msg, good:!!res },
+  var msgs={ none:"Tap the zoom button to step closer, hold it to see everything, and drag the line once you are zoomed in.",
+              open:"A tap that does not move opens that project\u2019s milestones." };
+  return React.createElement(HelpTryBox, { kind:"msline", label:(props&&props.label)||"Try it here", res:res, msgs:msgs, good:!!res },
     React.createElement(MilestoneStrip, { kind:"practice", points:subtreePoints(TEST_PROJECTS, 103, Date.now()), width:250,
       offDays:[], tight:true, onOpen:function(){ setRes("open"); } }));
 }
@@ -2297,11 +2922,11 @@ function HelpTryLine(props){
 // state, so nothing reaches a record.
 function HelpTryOutline(props){
   var resS=useState(null); var setRes=resS[1]; var res=resS[0];
-  var msg = res==="save" ? "Saved. On the real outline, your moves would land on the board now."
-          : res==="close" ? "Cancelled. On the real outline, every move would be thrown away."
-          : res==="open" ? "That would open the row\u2019s details, and keep your moves."
-          : "Tap a row\u2019s glyph to pick it, then move it with the arrows.";
-  return React.createElement(HelpTryBox, { kind:"outline", label:(props&&props.label)||"Try it here", res:res, msg:msg, good:!!res },
+  var msgs={ none:"Tap a row\u2019s glyph to pick it, then move it with the arrows.",
+              save:"Saved. On the real outline, your moves would land on the board now.",
+              close:"Cancelled. On the real outline, every move would be thrown away.",
+              open:"That would open the row\u2019s details, and keep your moves." };
+  return React.createElement(HelpTryBox, { kind:"outline", label:(props&&props.label)||"Try it here", res:res, msgs:msgs, good:!!res },
     React.createElement(HelpStage, { live:true, stage:{ kind:"outline" }, width:282, marks:[],
       on:{ save:function(){ setRes("save"); }, close:function(){ setRes("close"); }, open:function(){ setRes("open"); } } }));
 }
@@ -2311,37 +2936,58 @@ function HelpPractice(props){
   var pr=HELP_PRACTICE[props.id];
   return React.createElement(Modal, { title:pr.title, onClose:props.onClose, ownActions:true,
       actions:[React.createElement("button", { key:"b", "data-helpback":true, onClick:props.onBack, style:MODAL_CANCEL() }, "Back")] },
+    props.setQuery ? React.createElement(HelpSearchBar, props) : null,
+    props.query ? React.createElement(HelpSearchResults, props) : React.createElement(React.Fragment, null,
     React.createElement(HelpCrumb, { parts:["Guides", "Practise the gestures"] }),
     React.createElement("p", { style:{ color:S.textDim, fontSize:"0.95rem", lineHeight:1.5, margin:"0 0 0.2rem" } }, pr.blurb),
-    pr.panels.map(function(k){ return React.createElement(HELP_PANELS[k], { key:k, label:HELP_PANEL_LABELS[k] }); }));
+    pr.panels.map(function(k){ return React.createElement(HELP_PANELS[k], { key:k, label:HELP_PANEL_LABELS[k] }); })));
 }
 
 // The Guides sheet. One mount, four views; each view is its own component so
 // every hook sits at the top of a component, never in a loop or a branch.
 function GuidesModal(props){
   var viewS=useState({ kind:"index" }); var setView=viewS[1]; var view=viewS[0];
+  var openS=useState({}); var setOpenT=openS[1]; var openT=openS[0];
+  var qS=useState(""); var setQuery=qS[1]; var query=qS[0];
   var home=function(){ setView({ kind:"index" }); };
+  // A search hit opens its picture on that part, or its guide on that step.
+  var pick=function(d){ setQuery(""); setView({ kind:d.kind, id:d.id, start:d.at, from:null, k:Date.now() }); };
+  var search={ query:query, setQuery:setQuery, onPick:pick };
   if(view.kind==="picture")
-    return React.createElement(HelpPicture, { id:view.id, onClose:props.onClose, onBack:home,
-      onHow:function(gid, part){ setView({ kind:"guide", id:gid, from:{ picture:view.id, part:part } }); } });
+    return React.createElement(HelpPicture, Object.assign({ key:"p"+view.id+(view.k||""), id:view.id, start:view.start||0, onClose:props.onClose, onBack:home,
+      onHow:function(gid, part){ setView({ kind:"guide", id:gid, from:{ picture:view.id, part:part } }); } }, search));
   if(view.kind==="practice")
-    return React.createElement(HelpPractice, { id:view.id, onClose:props.onClose, onBack:home });
+    return React.createElement(HelpPractice, Object.assign({ id:view.id, onClose:props.onClose, onBack:home }, search));
   if(view.kind==="guide")
-    return React.createElement(HelpSteps, { id:view.id, from:view.from||null, onClose:props.onClose,
-      onBack:function(){ if(view.from) setView({ kind:"picture", id:view.from.picture }); else home(); } });
+    return React.createElement(HelpSteps, Object.assign({ key:"g"+view.id+(view.k||""), id:view.id, start:view.start||0, from:view.from||null, onClose:props.onClose,
+      onBack:function(){ if(view.from) setView({ kind:"picture", id:view.from.picture }); else home(); } }, search));
+  var row=function(it, key){
+    var d=helpEntry(it[0], it[1]);
+    return React.createElement(HelpIndexRow, { key:key, kind:it[0], id:it[1], title:d.title, count:helpCount(it[0], d),
+      onOpen:function(){ setView({ kind:it[0], id:it[1] }); } });
+  };
   return React.createElement(Modal, { title:"Guides", onClose:props.onClose, cancelLabel:"Close" },
-    React.createElement("p", { style:{ color:S.textDim, fontSize:"0.95rem", lineHeight:1.5, margin:"0 0 0.4rem" } },
-      "Two ways in. Not sure what you are looking at? Start with a picture. Know what you want to do? Go straight to the steps."),
-    HELP_INDEX.map(function(sec){
-      return React.createElement("div", { key:sec.head },
-        React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { margin:"0.9rem 0 0.45rem" }) }, sec.head),
-        sec.ids.map(function(id){
-          var d=sec.kind==="picture"?HELP_PICTURES[id]:sec.kind==="practice"?HELP_PRACTICE[id]:HELP_GUIDES[id];
-          var cnt=sec.kind==="picture" ? d.parts.length+" parts" : sec.kind==="practice" ? d.panels.length+" to try" : d.steps.length+" steps";
-          return React.createElement(HelpIndexRow, { key:id, kind:sec.kind, id:id, title:d.title, count:cnt,
-            onOpen:function(){ setView({ kind:sec.kind, id:id }); } });
-        }));
-    }));
+    React.createElement(HelpSearchBar, search),
+    query ? React.createElement(HelpSearchResults, search) : React.createElement("div", null,
+    React.createElement("p", { style:{ color:S.textDim, fontSize:"0.95rem", lineHeight:1.5, margin:"0 0 0.6rem" } },
+      "Pick a topic. Pictures show what is on screen; guides walk you through it step by step."),
+    HELP_INDEX.map(function(t){
+      if(t.flat) return React.createElement("div", { key:t.id, style:{ marginTop:"0.9rem" } }, t.items.map(function(it, i){ return row(it, t.id+i); }));
+      var on=!!openT[t.id];
+      var pics=t.items.filter(function(it){ return it[0]==="picture"; }), how=t.items.filter(function(it){ return it[0]!=="picture"; });
+      var sub=function(label){ return React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { margin:"0.55rem 0 0.35rem 0.9rem", fontSize:"0.68rem" }) }, label); };
+      return React.createElement("div", { key:t.id, "data-helptopicwrap":t.id },
+        React.createElement("button", { "data-helptopic":t.id, "aria-expanded":on?"true":"false",
+            onClick:function(){ haptic(6); setOpenT(function(o){ var n=Object.assign({}, o); n[t.id]=!o[t.id]; return n; }); },
+            style:{ display:"flex", alignItems:"center", gap:"0.55rem", width:"100%", textAlign:"left", background:"none", border:"none",
+                    borderBottom:"1px solid "+S.border, padding:"0.75rem 0.2rem", cursor:"pointer", fontFamily:S.fontBody } },
+          React.createElement("span", { style:{ color:S.textDim, width:"0.9rem", fontSize:"0.8rem" } }, on?"\u25BE":"\u25B8"),
+          React.createElement("span", { style:{ flex:1, color:S.text, fontWeight:700, fontSize:MENU_FONT } }, t.topic),
+          React.createElement("span", { style:{ color:S.textMuted, fontSize:"0.8rem" } }, String(t.items.length))),
+        on && React.createElement("div", { style:{ paddingLeft:"0.9rem", paddingTop:"0.3rem" } },
+          pics.length ? sub("What\u2019s on screen") : null, pics.map(function(it, i){ return row(it, t.id+"p"+i); }),
+          how.length ? sub("How do I\u2026?") : null, how.map(function(it, i){ return row(it, t.id+"g"+i); })));
+    })));
 }
 
 // ---- STAGES MODAL ------------------------------------------------------------
@@ -2973,15 +3619,15 @@ function ArchiveModal(props){
             var meta=getMeta(laneMeta,p.lane);
             var kids=getChildren(projects,p.id);
             var ms=(msById[p.id]||0)+getDescendantIds(projects,p.id).reduce(function(a,id){ return a+(msById[id]||0); },0);
-            return React.createElement("div", { key:p.id, style:{background:S.bg1,border:"1px solid "+S.border,
+            return React.createElement("div", { key:p.id, "data-anchor":"arch-row", style:{background:S.bg1,border:"1px solid "+S.border,
               borderRadius:S.radius,padding:"0.7rem 0.85rem"} },
               React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem"} },
                 React.createElement("span", { style:{width:"8px",height:"8px",borderRadius:"50%",flexShrink:0,background:meta.accent} }),
                 React.createElement("span", { style:{flex:1,minWidth:0,color:S.text,fontWeight:700,fontSize:"0.92rem",
                   overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"} }, p.name),
-                React.createElement(Mono, { style:{color:S.textDim,fontSize:"0.8rem",fontWeight:700,flexShrink:0} }, fmtDur(ms,true))
+                React.createElement(Mono, { "data-anchor":"arch-time", style:{color:S.textDim,fontSize:"0.8rem",fontWeight:700,flexShrink:0} }, fmtDur(ms,true))
               ),
-              React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted,marginTop:"0.25rem"} },
+              React.createElement("div", { "data-anchor":"arch-meta", style:{fontSize:"0.72rem",color:S.textMuted,marginTop:"0.25rem"} },
                 meta.label+"  \u00B7  "+(isFinite_(p)?"Has an end":"Ongoing")
                   +(p.parentId?"  \u00B7  task":"")
                   +(kids.length?"  \u00B7  "+kids.length+" task"+(kids.length!==1?"s":""):"")
@@ -2990,7 +3636,7 @@ function ArchiveModal(props){
                   +(projEnd(p)!=null ? "  \u00B7  due "+fmtDate(projEnd(p)) : "")),
               p.closedNote ? React.createElement("div", { style:{fontSize:"0.78rem",color:S.textDim,marginTop:"0.3rem",lineHeight:1.35} }, p.closedNote) : null,
               React.createElement("div", { style:{display:"flex",justifyContent:"flex-end",marginTop:"0.5rem"} },
-                React.createElement("button", { "data-flat":true, onClick:function(){ onReopen(p); },
+                React.createElement("button", { "data-flat":true, "data-anchor":"arch-reopen", onClick:function(){ onReopen(p); },
                   style:{background:"none",border:"1.5px solid "+S.actionBdr,borderRadius:S.radius3,
                          padding:"0.4rem 0.7rem",color:S.actionText,cursor:"pointer",fontWeight:700,
                          fontFamily:S.fontBody,fontSize:"0.78rem"} }, "Reopen")
@@ -3161,7 +3807,7 @@ function BreakModal(props){
     React.createElement(Modal, { title:"Start Break", onClose:onCancel },
       React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.5rem"} },
         PRESET_BREAKS.map(function(label){
-          return React.createElement("button", { key:label, onClick:function(){ onStart(label); },
+          return React.createElement("button", { key:label, "data-breakpreset":label, onClick:function(){ onStart(label); },
             style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.85rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.95rem",textAlign:"left"} },
             label
           );
@@ -4376,7 +5022,7 @@ function Carousel(props){
              color:S.chromeText,cursor:"pointer",fontSize:"1.2rem",lineHeight:1,fontFamily:S.fontBody} },
       dir<0 ? "\u2039" : "\u203a");
   }
-  return React.createElement("div", { dir:"ltr" },
+  return React.createElement("div", { dir:"ltr", "data-anchor":props.name ? "set-"+props.name : undefined },
     React.createElement("div", {
       onMouseDown:function(e){ begin(e.clientX,e.clientY); },
       onMouseMove:function(e){ if(startX.current!==null) move(e.clientX,e.clientY); },
@@ -4470,7 +5116,7 @@ function Toggle(props){
     thumb.top="3px"; thumb.bottom="3px";
   }
 
-  return React.createElement("div", { dir:"ltr", ref:track, role:"radiogroup",
+  return React.createElement("div", { dir:"ltr", ref:track, role:"radiogroup", "data-anchor":props.name ? "set-"+props.name : undefined,
     "aria-label": props.name || "option",
     onMouseDown:function(e){ begin(e.clientX,e.clientY); },
     onMouseMove:function(e){ if(startA.current!==null) move(e.clientX,e.clientY); },
@@ -5227,7 +5873,7 @@ function PayWorkWeekModal(props){
   };
   return React.createElement(Modal, { title:"Pay & Work Week", onClose:props.onClose, wide:true,
     onSave:function(){ props.onDone(pr); }, saveLabel:"Done" },
-    React.createElement("div", { style:sectionWrap },
+    React.createElement("div", { style:sectionWrap, "data-anchor":"pay-base" },
       React.createElement("div", { style:sectionHead }, "Base Pay"),
       React.createElement("div", { style:sectionNote },
         "All pay calculations are gross and do not include any state or federal deductions."),
@@ -5243,13 +5889,13 @@ function PayWorkWeekModal(props){
           color:S.textMuted,fontFamily:S.fontBody} },
         "Overtime multipliers use the effective rate: salary divided by the scheduled hours in the pay period.")
     ),
-    React.createElement("div", { style:sectionWrap },
+    React.createElement("div", { style:sectionWrap, "data-anchor":"pay-week" },
       React.createElement("div", { style:sectionHead }, "Week Starts On"),
       React.createElement("div", { style:sectionNote }, "Sets the week boundary for reports and weekly pay."),
       chipRow("ws", function(k){ return pr.weekStart===k; },
         function(k){ mutate(function(n){ n.weekStart=k; }); })
     ),
-    React.createElement("div", { style:sectionWrap },
+    React.createElement("div", { style:sectionWrap, "data-anchor":"pay-otdays" },
       React.createElement("div", { style:sectionHead }, "Overtime Days"),
       React.createElement("div", { style:sectionNote }, "Days where worked time counts as overtime."),
       chipRow("ot", function(k){ return pr.otDays.indexOf(k)>=0; },
@@ -5258,7 +5904,7 @@ function PayWorkWeekModal(props){
           if(i>=0) n.otDays.splice(i,1); else n.otDays.push(k);
         }); })
     ),
-    React.createElement("div", { style:sectionWrap },
+    React.createElement("div", { style:sectionWrap, "data-anchor":"pay-otrate" },
       React.createElement("div", { style:sectionHead }, "Overtime Rate"),
       React.createElement("div", { style:sectionNote }, otHint),
       segRow("otk", [ {k:"1.5x",label:"1.5x"}, {k:"2x",label:"2x"}, {k:"flat",label:"+$/hr"} ],
@@ -5272,7 +5918,7 @@ function PayWorkWeekModal(props){
             border:"2px solid "+(flatBad?S.dangerText:S.border), color:flatBad?S.dangerText:S.text}) }),
         React.createElement("span", { style:{fontSize:"0.8rem",color:S.textDim,fontFamily:S.fontBody} }, "more per hour")
       ),
-      React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",marginTop:"0.55rem"} },
+      React.createElement("div", { "data-anchor":"pay-exclude", style:{display:"flex",alignItems:"center",gap:"0.5rem",marginTop:"0.55rem"} },
         React.createElement("span", { style:{fontSize:"0.8rem",color:S.textDim,fontFamily:S.fontBody,flexShrink:0} }, "Hours excluded"),
         React.createElement("input", { type:"number", inputMode:"numeric", min:0, step:1, value:pr.ot.excludeHrs,
           onChange:function(e){ mutate(function(n){ n.ot.excludeHrs=e.target.value; }); },
@@ -5293,7 +5939,7 @@ function PayWorkWeekModal(props){
           ? "are covered by salary - no extra pay."
           : "pay the base rate, not the overtime rate."))
     ),
-    React.createElement("div", { style:{marginBottom:"0.4rem"} },
+    React.createElement("div", { style:{marginBottom:"0.4rem"}, "data-anchor":"pay-cycle" },
       React.createElement("div", { style:sectionHead }, "Pay Cycle"),
       React.createElement("div", { style:sectionNote }, cycleHints[pr.cycle.period]),
       segRow("cyc", [ {k:"daily",label:"Daily"}, {k:"weekly",label:"Weekly"},
@@ -5349,7 +5995,7 @@ function WorkScheduleModal(props){
   var timeInput = function(k, field){
     var invalid = draft[k].on && schMinutes(draft[k])===0;
     var col = draft[k].on ? (invalid?S.dangerText:S.text) : S.textMuted;
-    return React.createElement("input", { type:"time", value:draft[k][field], disabled:!draft[k].on,
+    return React.createElement("input", { type:"time", value:draft[k][field], disabled:!draft[k].on, "data-schedtime":k+"-"+field,
       onChange:function(e){ patch(k, field, e.target.value); },
       style:Object.assign(TIME_FIELD_STYLE(col, invalid?S.dangerText:S.border),
         { flex:"0 1 94px", minWidth:"80px", opacity:draft[k].on?1:0.45 }) });
@@ -5360,7 +6006,7 @@ function WorkScheduleModal(props){
     React.createElement("div", { style:{fontSize:"0.8rem",color:S.textDim,marginBottom:"0.9rem"} },
       "Days and hours you normally work. Reports will measure tracked time against this."),
     // ---- pay & work week ----
-    React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.6rem",padding:"0.15rem 0 0.7rem",
+    React.createElement("div", { "data-anchor":"sch-pay", style:{display:"flex",alignItems:"center",gap:"0.6rem",padding:"0.15rem 0 0.7rem",
         borderBottom:"1px solid "+S.border} },
       React.createElement("div", { style:{flex:1,minWidth:0,fontFamily:S.fontBody} },
         React.createElement("div", { style:{color:S.text,fontWeight:600,fontSize:"0.9rem",whiteSpace:"nowrap"} }, "Pay & Work Week"),
@@ -5374,7 +6020,7 @@ function WorkScheduleModal(props){
                fontWeight:600,fontSize:"0.82rem",whiteSpace:"nowrap"} },
         "Edit")
     ),
-    React.createElement("div", { style:{fontSize:"0.76rem",color:S.textMuted,lineHeight:1.4,
+    React.createElement("div", { "data-anchor":"sch-overnight", style:{fontSize:"0.76rem",color:S.textMuted,lineHeight:1.4,
       padding:"0.15rem 0 0.5rem"} },
       "Set an end earlier than the start for an overnight shift - 21:00 to 05:30 is "+
       "marked +1d and counts as one work day."),
@@ -5415,7 +6061,7 @@ function WorkScheduleModal(props){
       );
     }),
     // ---- unpaid breaks ----
-    React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.6rem",padding:"0.7rem 0",
+    React.createElement("div", { "data-anchor":"sch-unpaid", style:{display:"flex",alignItems:"center",gap:"0.6rem",padding:"0.7rem 0",
         borderBottom:"1px solid "+S.border} },
       React.createElement("button", { "data-flat":true,
         onClick:function(){ haptic(10); setUB(Object.assign({},ub,{enabled:!ub.enabled})); },
@@ -5439,7 +6085,7 @@ function WorkScheduleModal(props){
       React.createElement("span", { style:{color:S.textDim,fontSize:"0.8rem"} }, "Unpaid breaks per week"),
       React.createElement("span", { style:{color:S.warnText,fontSize:"0.8rem",fontFamily:S.fontMono} }, "-"+fmtHours(breakWeek))
     ),
-    React.createElement("div", { style:{display:"flex",justifyContent:"space-between",padding:"0.85rem 0 0.2rem",fontFamily:S.fontBody} },
+    React.createElement("div", { "data-anchor":"sch-total", style:{display:"flex",justifyContent:"space-between",padding:"0.85rem 0 0.2rem",fontFamily:S.fontBody} },
       React.createElement("span", { style:{color:S.textDim,fontSize:"0.85rem"} }, "Scheduled per week"),
       React.createElement("span", { style:{color:S.text,fontWeight:700,fontFamily:S.fontMono} }, fmtHours(weekMins))
     )
@@ -5461,21 +6107,82 @@ function WorkScheduleModal(props){
 // Restore: pick a file, review the summary, then an explicit replace-all
 // confirm. The app reloads afterward so everything re-boots through the
 // normalizers.
+// ---- BACKUP & SAVES ---------------------------------------------------------
+function snapWhen(at){
+  try{ var d=new Date(at);
+    return d.toLocaleDateString([], {weekday:"short",month:"short",day:"numeric"})+" · "+
+           d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}); }catch(e){ return ""; }
+}
+var SNAP_WHY = { clockout:"At clock-out", open:"When the app opened", "before-reset":"Before reset",
+                 "before-load":"Before load", manual:"" };
+function snapWhat(r){
+  var s=r.summary||{}, h=Math.round((s.loggedMs||0)/3600000);
+  return (s.projects||0)+" project"+(s.projects===1?"":"s")+" · "+
+         ((s.loggedMs||0)>0 ? (h<1?"under 1h":h+"h")+" logged" : "nothing logged");
+}
+function SnapRow(props){
+  var r=props.rec, tag=SNAP_WHY[r.why];
+  return React.createElement("div", { "data-snaprow":r.id,
+      style:Object.assign({ display:"flex", alignItems:"center", gap:"0.6rem", background:S.bg1, border:"1px solid "+S.border,
+              borderRadius:S.radius, padding:"0.6rem 0.7rem", marginBottom:"0.45rem" }, props.style||{}) },
+    React.createElement("div", { style:{ flex:1, minWidth:0 } },
+      React.createElement("div", { style:{ color:S.text, fontWeight:700, fontSize:"0.92rem", fontFamily:S.fontBody } },
+        r.name || snapWhen(r.at)),
+      React.createElement("div", { style:{ color:S.textDim, fontSize:"0.78rem", fontFamily:S.fontBody, marginTop:"0.1rem" } },
+        (r.name ? snapWhen(r.at)+" · " : (tag && props.showWhy ? tag+" · " : ""))+snapWhat(r))),
+    props.children);
+}
+function snapBtn(extra){
+  return Object.assign({ flex:"none", border:"2px solid "+S.actionBdr, background:S.infoBg, color:S.infoText,
+    borderRadius:S.radius3, padding:"0.4rem 0.7rem", fontWeight:700, fontSize:"0.84rem", fontFamily:S.fontBody,
+    cursor:"pointer" }, extra||{});
+}
 function BackupModal(props){
+  var staged = (StageCtx && React.useContext) ? React.useContext(StageCtx) : false;
   var statusS=useState(null); var setStatus=statusS[1]; var status=statusS[0];
   // `preview` is the manual staging this sheet: it opens on the "check it"
   // stage with a summary and NO backup object, so there is nothing to apply.
   var pendingS=useState(props.preview ? { obj:null, summary:props.preview } : null); var setPending=pendingS[1]; var pending=pendingS[0];
+  var listS=useState(null); var setList=listS[1]; var list=listS[0];
+  var nameS=useState(""); var setName=nameS[1]; var name=nameS[0];
+  var subS=useState(null); var setSub=subS[1]; var sub=subS[0];     // { kind:"load"|"reset"|"tier"|"full", ... }
+  var busyS=useState(false); var setBusy=busyS[1]; var busy=busyS[0];
+  var clocked=!!props.clocked;
+  var only=props.only||null;   // a staged picture shows one section
+
+  function refresh(){
+    if(staged) return Promise.resolve();
+    return snapList().then(function(l){ setList(l); }, function(){ setList([]); });
+  }
+  useEffect(function(){ refresh(); }, []);
+  var all=list||[];
+  var manual=all.filter(function(r){ return r.kind==="manual"; }).sort(function(a,b){ return b.at-a.at; });
+  var latest=all.filter(function(r){ return r.kind==="latest"; })[0]||null;
+  function tier(kind){ return all.filter(function(r){ return r.kind===kind; }).sort(function(a,b){ return b.at-a.at; }); }
+
+  function saveNow(replaceId){
+    if(busy) return;
+    if(!replaceId && manual.length>=SNAP_MANUAL_MAX){ setSub({ kind:"full" }); return; }
+    haptic(10); setBusy(true);
+    snapTake("manual", { name:name.trim(), replaceId:replaceId||null }).then(function(l){
+      setList(l); setName(""); setSub(null); setBusy(false);
+      setStatus({ ok:true, msg:"Saved." });
+    }, function(){ setBusy(false); setStatus({ ok:false, msg:"Could not save on this device." }); });
+  }
+  function delSave(id){
+    haptic([20,50,20]);
+    snapDelete(id).then(refresh, refresh);
+  }
 
   function doExport(){
     haptic(10);
     var obj=backupBuild(localStorage);
     var json=JSON.stringify(obj);
-    var name="time-tracker-backup-"+isoDate(new Date())+".json";
+    var fname="time-tracker-backup-"+isoDate(new Date())+".json";
     try{
       if(typeof File!=="undefined" && navigator.share && navigator.canShare &&
-         navigator.canShare({ files:[new File([json],name,{type:"application/json"})] })){
-        navigator.share({ files:[new File([json],name,{type:"application/json"})], title:name })
+         navigator.canShare({ files:[new File([json],fname,{type:"application/json"})] })){
+        navigator.share({ files:[new File([json],fname,{type:"application/json"})], title:fname })
           .then(function(){ setStatus({ok:true,msg:"Backup shared."}); })
           .catch(function(){ setStatus(null); });
         return;
@@ -5484,10 +6191,10 @@ function BackupModal(props){
     try{
       var url=URL.createObjectURL(new Blob([json],{type:"application/json"}));
       var a=document.createElement("a");
-      a.href=url; a.download=name;
+      a.href=url; a.download=fname;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       setTimeout(function(){ URL.revokeObjectURL(url); },5000);
-      setStatus({ok:true,msg:"Backup downloaded as "+name+"."});
+      setStatus({ok:true,msg:"Backup downloaded as "+fname+"."});
       return;
     }catch(e){}
     try{
@@ -5529,19 +6236,70 @@ function BackupModal(props){
     try{ return new Date(iso).toLocaleDateString([], {month:"short",day:"numeric",year:"numeric"}); }
     catch(e){ return String(iso||""); }
   }
-  var note={fontSize:"0.78rem",color:S.textDim,fontFamily:S.fontBody,marginBottom:"0.7rem"};
+  var note={fontSize:"0.78rem",color:S.textDim,fontFamily:S.fontBody,marginBottom:"0.7rem",lineHeight:1.45};
   var btn={display:"block",width:"100%",background:S.bg1,border:"1.5px solid "+S.borderBright,
            borderRadius:S.radius,padding:"0.75rem",color:S.text,cursor:"pointer",
            fontFamily:S.fontBody,fontWeight:700,fontSize:"0.9rem"};
+  var head=function(text, right){
+    return React.createElement("div", { style:{ display:"flex", justifyContent:"space-between", margin:"1.1rem 0 0.45rem",
+        fontSize:"0.72rem", textTransform:"uppercase", letterSpacing:"0.08em", color:S.textDim, fontWeight:700, fontFamily:S.fontBody } },
+      React.createElement("span", null, text), right ? React.createElement("span", null, right) : null);
+  };
+  var show=function(sec){ return !only || only===sec; };
+  var held=clocked ? React.createElement("div", { "data-clockedout":"needed", style:Object.assign({}, note, { color:S.warnText, marginBottom:"0.4rem" }) },
+    "Clock out to load a copy or reset the board.") : null;
 
-  return React.createElement(Modal, { title:"Backup & Restore", onClose:props.onClose, cancelLabel:"Close" },
+  var autoSec = show("auto") && React.createElement("div", { "data-anchor":"saves-auto" },
+    head("Automatic backups"),
+    held,
+    latest
+      ? React.createElement(SnapRow, { rec:latest, showWhy:true,
+          style:{ border:"2px solid "+S.successText, background:S.successBg } },
+          React.createElement("button", { "data-snapload":"latest", disabled:clocked,
+            onClick:function(){ setSub({ kind:"load", id:"latest", rec:latest }); },
+            style:snapBtn({ opacity:clocked?0.4:1 }) }, "Load"))
+      : React.createElement("div", { "data-snapnone":true, style:note },
+          staged ? "Made for you at every clock-out." : (list ? "None yet. The first is made when you clock out." : "Reading…")),
+    React.createElement("div", { style:{ display:"flex", gap:"0.45rem" } },
+      ["daily","weekly","monthly"].map(function(k){
+        var n=tier(k).length;
+        return React.createElement("button", { key:k, "data-snaptier":k, onClick:function(){ if(n) setSub({ kind:"tier", tier:k }); },
+            style:Object.assign({}, btn, { flex:1, padding:"0.55rem 0.3rem", opacity:n?1:0.55, cursor:n?"pointer":"default" }) },
+          React.createElement("div", null, k.charAt(0).toUpperCase()+k.slice(1)),
+          React.createElement("div", { style:{ fontWeight:500, color:S.textDim, fontSize:"0.75rem" } }, n+" of "+SNAP_KEEP[k]));
+      })));
+
+  var saveSec = show("saves") && React.createElement("div", { "data-anchor":"saves-save" },
+    head("Saves", manual.length+" of "+SNAP_MANUAL_MAX),
+    React.createElement("div", { style:note }, "A save keeps this exact moment until you delete it. Use one before trying something new."),
+    React.createElement("input", { "data-savename":true, value:name, maxLength:40, placeholder:"Name (optional)",
+      onChange:function(e){ setName(e.target.value); }, style:Object.assign({}, INPUT_STYLE, { marginBottom:"0.45rem" }) }),
+    React.createElement("button", { "data-savenow":true, disabled:busy, onClick:function(){ saveNow(null); },
+      style:Object.assign({}, btn, { background:S.infoBg, border:"2px solid "+S.actionBdr, color:S.infoText, marginBottom:"0.55rem" }) },
+      "+ Save the board now"),
+    manual.map(function(r){
+      return React.createElement(SnapRow, { key:r.id, rec:r },
+        React.createElement("button", { "data-snapload":r.id, disabled:clocked,
+          onClick:function(){ setSub({ kind:"load", id:r.id, rec:r }); }, style:snapBtn({ opacity:clocked?0.4:1 }) }, "Load"),
+        React.createElement(HoldButton, { onHold:function(){ delSave(r.id); }, holdMs:HOLD_DELETE_MS, fill:rgba(S.dangerText,0.38),
+          attrs:{ "data-snapdelete":r.id, "aria-label":"Delete this save (hold)" },
+          style:{ flex:"none", width:"34px", height:"34px", borderRadius:S.radius3, border:"1px solid "+S.borderBright,
+                  background:S.bg2, color:S.textMuted, fontWeight:700, fontFamily:S.fontBody, padding:0 } }, "✕"));
+    }));
+
+  var resetSec = show("reset") && React.createElement("div", { "data-anchor":"saves-reset" },
+    head("Start over"),
+    React.createElement("button", { "data-resetopen":true, disabled:clocked, onClick:function(){ setSub({ kind:"reset" }); },
+      style:Object.assign({}, btn, { background:S.dangerBg, border:"1.5px solid "+S.dangerText, color:S.dangerText, opacity:clocked?0.45:1 }) },
+      "Reset…"));
+
+  var fileSec = show("file") && React.createElement("div", null,
+    head("Backup file"),
     React.createElement("div", { style:note },
-      "Everything lives on this phone: deleting the app from the home screen deletes your tracked time with it. Export a backup regularly and keep it somewhere safe."),
+      "Saves live on this phone: deleting the app from the home screen deletes them and your tracked time with it. Export a backup file regularly and keep it somewhere safe."),
     React.createElement("button", { "data-flat":true, "data-anchor":"backup-export", onClick:doExport, style:btn }, "Export Backup"),
-    React.createElement("div", { style:{margin:"1rem 0 0.4rem",fontSize:"0.72rem",textTransform:"uppercase",
-      letterSpacing:"0.08em",color:S.textDim,fontWeight:700,fontFamily:S.fontBody} }, "Restore"),
-    React.createElement("div", { style:note },
-      "Restoring replaces everything currently in the app with the backup."),
+    React.createElement("div", { style:Object.assign({}, note, { margin:"0.7rem 0 0.5rem" }) },
+      "Restoring from a file replaces everything in the app, practice board included."),
     !pending && React.createElement("label", { "data-anchor":"backup-choose", style:Object.assign({},btn,{textAlign:"center"}) },
       "Choose Backup File",
       React.createElement("input", { type:"file", accept:"application/json,.json",
@@ -5563,10 +6321,184 @@ function BackupModal(props){
       React.createElement("button", { "data-flat":true, onClick:function(){ setPending(null); setStatus(null); },
         style:Object.assign({},btn,{marginTop:"0.45rem",fontWeight:600,color:S.textDim}) },
         "Pick a Different File")
-    ),
-    status && React.createElement("div", { style:{marginTop:"0.6rem",fontSize:"0.8rem",fontFamily:S.fontBody,
+    ));
+
+  var main=React.createElement(Modal, { title:"Backup & Saves", onClose:props.onClose, cancelLabel:"Close" },
+    autoSec, saveSec, resetSec, fileSec,
+    status && React.createElement("div", { "data-snapstatus":status.ok?"ok":"bad", style:{marginTop:"0.6rem",fontSize:"0.8rem",fontFamily:S.fontBody,
       color:status.ok?S.successText:S.dangerText} }, status.msg)
   );
+  var close=function(){ setSub(null); };
+  var subEl=null;
+  if(sub && sub.kind==="load") subEl=React.createElement(SnapLoadSheet, { rec:sub.rec, onClose:close });
+  else if(sub && sub.kind==="reset") subEl=React.createElement(ResetSheet, { onClose:close });
+  else if(sub && sub.kind==="tier") subEl=React.createElement(SnapTierSheet, { tier:sub.tier, recs:tier(sub.tier), clocked:clocked, onClose:close,
+    onPick:function(r){ setSub({ kind:"load", id:r.id, rec:r }); } });
+  else if(sub && sub.kind==="full") subEl=React.createElement(SnapFullSheet, { recs:manual, onClose:close,
+    onReplace:function(id){ saveNow(id); } });
+  return React.createElement(React.Fragment, null, main, subEl);
+}
+// Taking a copy first, then writing, then reloading: the board state lives
+// in React and only a reload re-reads storage, exactly as Restore does.
+function snapThenReload(why, write, setMsg){
+  return snapTake(why).then(function(){
+    write(localStorage);
+    setMsg({ ok:true, msg:"Done. Reloading…" });
+    setTimeout(function(){ try{ location.reload(); }catch(e){} }, 400);
+  }, function(){ setMsg({ ok:false, msg:"Could not take a backup first, so nothing was changed." }); });
+}
+function SnapTierSheet(props){
+  var names={ daily:"Daily backups", weekly:"Weekly backups", monthly:"Monthly backups" };
+  var words={ daily:"The last copy of each of the last seven days.", weekly:"The last copy of each of the last four weeks.",
+              monthly:"The last copy of each of the last twelve months." };
+  return React.createElement(Modal, { title:names[props.tier], onClose:props.onClose, cancelLabel:"Back" },
+    React.createElement("div", { style:{ color:S.textDim, fontSize:"0.85rem", fontFamily:S.fontBody, marginBottom:"0.8rem", lineHeight:1.45 } },
+      words[props.tier]+" The oldest rolls off as a new one comes in."),
+    props.recs.map(function(r){
+      return React.createElement(SnapRow, { key:r.id, rec:r, showWhy:true },
+        React.createElement("button", { "data-snapload":r.id, disabled:props.clocked, onClick:function(){ props.onPick(r); },
+          style:snapBtn({ opacity:props.clocked?0.4:1 }) }, "Load"));
+    }));
+}
+function SnapFullSheet(props){
+  var pickS=useState(null); var setPick=pickS[1]; var pick=pickS[0];
+  var oldest=props.recs.length ? props.recs[props.recs.length-1].id : null;
+  return React.createElement(Modal, { title:"Saves are full", onClose:props.onClose,
+      actions:[React.createElement("button", { key:"c", onClick:props.onClose, style:MODAL_CANCEL() }, "Cancel")], ownActions:true },
+    React.createElement("div", { style:{ color:S.textDim, fontSize:"0.88rem", fontFamily:S.fontBody, marginBottom:"0.8rem", lineHeight:1.45 } },
+      "You have "+SNAP_MANUAL_WORD+" of "+SNAP_MANUAL_WORD+". Pick the one to replace with the board as it is now."),
+    props.recs.map(function(r){
+      var on=pick===r.id;
+      return React.createElement("div", { key:r.id, "data-snappick":r.id, onClick:function(){ setPick(r.id); }, style:{ cursor:"pointer" } },
+        React.createElement(SnapRow, { rec:r, style:{ border:on?"2px solid "+S.warnText:"1px solid "+S.border } },
+          r.id===oldest ? React.createElement("span", { style:{ color:S.textMuted, fontSize:"0.72rem", fontWeight:700 } }, "OLDEST") : null));
+    }),
+    React.createElement(HoldButton, { disabled:!pick, onHold:function(){ props.onReplace(pick); }, holdMs:HOLD_DELETE_MS,
+      fill:rgba(S.dangerText,0.38), attrs:{ "data-snapreplace":true },
+      style:{ width:"100%", marginTop:"0.5rem", background:S.dangerBg, border:"1px solid "+S.dangerText, borderRadius:S.radius,
+              padding:"0.7rem", color:S.dangerText, fontFamily:S.fontBody, fontWeight:700, fontSize:"0.9rem", opacity:pick?1:0.45 } },
+      pick ? "Replace it · hold" : "Pick one to replace"));
+}
+var SNAP_MANUAL_WORD="five";
+function snapCheck(on, locked, label, sub, onTap, attr){
+  return React.createElement("div", { key:attr, "data-resetpick":attr, "data-on":on?"1":"0", "data-locked":locked?"1":"0",
+      onClick:locked?null:onTap, style:{ display:"flex", gap:"0.6rem", alignItems:"flex-start", padding:"0.45rem 0.1rem",
+      cursor:locked?"default":"pointer", opacity:locked?0.65:1 } },
+    React.createElement("span", { style:{ width:"20px", height:"20px", flex:"none", marginTop:"1px", borderRadius:"5px",
+        border:"2px solid "+(on?S.dangerText:S.borderBright), background:on&&!locked?S.dangerText:"transparent",
+        color:on&&!locked?S.dangerBg:S.dangerText, display:"inline-flex", alignItems:"center", justifyContent:"center",
+        fontSize:"0.8rem", fontWeight:900 } }, on?"✓":""),
+    React.createElement("span", { style:{ flex:1 } },
+      React.createElement("span", { style:{ display:"block", color:S.text, fontWeight:700, fontSize:"0.92rem", fontFamily:S.fontBody } }, label),
+      sub ? React.createElement("span", { style:{ display:"block", color:S.textDim, fontSize:"0.76rem", fontFamily:S.fontBody, marginTop:"0.1rem" } }, sub) : null));
+}
+function snapGroup(title, kids){
+  return React.createElement("div", null,
+    React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { margin:"0.8rem 0 0.35rem", fontWeight:700 }) }, title),
+    React.createElement("div", { style:{ background:S.bg1, border:"1px solid "+S.border, borderRadius:S.radius, padding:"0.15rem 0.7rem" } }, kids));
+}
+function resetPickOf(sel, mods){
+  function same(p){
+    var want=Object.assign({ time:false, ticks:false, projects:false, archive:false, look:false, schedule:false, presets:false }, RESET_PICKS[p]);
+    var allMods=p==="factory";
+    return Object.keys(want).every(function(k){ return !!sel[k]===!!want[k]; }) &&
+           mods.every(function(m){ return !!sel.modules[m.id]===allMods; });
+  }
+  return same("state") ? "state" : same("factory") ? "factory" : "custom";
+}
+function resetFromPick(p, mods){
+  var sel=Object.assign({ modules:{} }, RESET_PICKS[p]);
+  mods.forEach(function(m){ sel.modules[m.id]=p==="factory"; });
+  return sel;
+}
+function ResetSheet(props){
+  var mods=ttModules();
+  var selS=useState(function(){ return resetFromPick("state", mods); }); var setSel=selS[1]; var sel=selS[0];
+  var msgS=useState(null); var setMsg=msgS[1]; var msg=msgS[0];
+  var eff=resetNormalize(sel), pick=resetPickOf(sel, mods);
+  function flip(k){ setSel(function(s){ var n=Object.assign({}, s); n[k]=!s[k]; return n; }); }
+  function flipMod(id){ setSel(function(s){ var m=Object.assign({}, s.modules); m[id]=!m[id]; return Object.assign({}, s, { modules:m }); }); }
+  var lockByProj=!!sel.projects;
+  var n=["time","ticks","projects","archive","look","schedule","presets"].filter(function(k){ return eff[k]; }).length +
+        mods.filter(function(m){ return eff.modules[m.id]; }).length;
+  var chip=function(p, label){
+    var on=pick===p;
+    return React.createElement("button", { key:p, "data-resetchip":p, onClick:function(){ haptic(8); setSel(resetFromPick(p, mods)); },
+      style:{ flex:1, borderRadius:"999px", padding:"0.55rem 0.4rem", fontFamily:S.fontBody, fontWeight:700, fontSize:"0.86rem", cursor:"pointer",
+              border:on?"2px solid "+S.actionBdr:"1px solid "+S.borderBright, background:on?S.infoBg:S.bg1, color:on?S.infoText:S.textDim } }, label);
+  };
+  function go(){
+    haptic([20,50,20]);
+    snapThenReload("before-reset", function(st){ resetApply(sel, st); }, setMsg);
+  }
+  return React.createElement(Modal, { title:"Reset", onClose:props.onClose, cancelLabel:"Cancel" },
+    React.createElement("div", { style:{ display:"flex", gap:"0.45rem", marginBottom:"0.2rem" } },
+      chip("state","Reset state"), chip("factory","Factory reset")),
+    React.createElement("div", { "data-resetmode":pick, style:{ color:S.textDim, fontSize:"0.78rem", fontFamily:S.fontBody, margin:"0.45rem 0 0", minHeight:"2.3em", lineHeight:1.4 } },
+      pick==="state" ? "Keeps your projects and setup. Clears the time so you can start recording clean."
+      : pick==="factory" ? "Everything back to how the app ships."
+      : "Your own mix. Tick what should go."),
+    snapGroup("Board", [
+      snapCheck(eff.time, lockByProj, "Logged time", lockByProj?"Goes with the projects":"Every entry, break and disruption", function(){ flip("time"); }, "time"),
+      snapCheck(eff.ticks, lockByProj, "Finished ticks & milestone marks", lockByProj?"Goes with the projects":"Stages and steps go back to open", function(){ flip("ticks"); }, "ticks"),
+      snapCheck(eff.projects, false, "Projects & lanes", "Back to the starter board", function(){ flip("projects"); }, "projects"),
+      snapCheck(eff.archive, lockByProj, "The Archive", lockByProj?"Goes with the projects":"Closed projects are deleted", function(){ flip("archive"); }, "archive")
+    ]),
+    snapGroup("Settings", [
+      snapCheck(eff.look, false, "Look & layout", "Theme, header, hand, tracking, alerts", function(){ flip("look"); }, "look"),
+      snapCheck(eff.schedule, false, "Work schedule & pay cycle", null, function(){ flip("schedule"); }, "schedule"),
+      snapCheck(eff.presets, false, "Disruption presets", null, function(){ flip("presets"); }, "presets")
+    ]),
+    mods.length ? snapGroup("Modules", mods.map(function(m){
+      return snapCheck(!!eff.modules[m.id], false, m.title, "Its data only. It stays installed.", function(){ flipMod(m.id); }, "mod:"+m.id);
+    })) : null,
+    React.createElement("div", { style:{ display:"flex", gap:"0.5rem", color:S.textDim, fontSize:"0.78rem", fontFamily:S.fontBody, lineHeight:1.45,
+        background:S.bg1, border:"1px dashed "+S.borderBright, borderRadius:S.radius, padding:"0.6rem 0.7rem", margin:"0.9rem 0 0.7rem" } },
+      "A “Before reset” backup is taken first, so loading it puts everything back if this was a mistake. The practice board and your saves are never touched."),
+    React.createElement(HoldButton, { disabled:n===0, onHold:go, holdMs:HOLD_DELETE_MS, fill:rgba(S.dangerText,0.38),
+      attrs:{ "data-resetgo":n, "data-holddelete":true },
+      style:{ width:"100%", background:S.dangerBg, border:"1px solid "+S.dangerText, borderRadius:S.radius, padding:"0.75rem",
+              color:S.dangerText, fontFamily:S.fontBody, fontWeight:700, fontSize:"0.92rem", opacity:n?1:0.45 } },
+      n ? "Reset "+(n===1?"one thing":n+" things")+" · hold" : "Tick something to reset"),
+    msg && React.createElement("div", { "data-snapstatus":msg.ok?"ok":"bad", style:{ marginTop:"0.6rem", fontSize:"0.8rem", fontFamily:S.fontBody,
+      color:msg.ok?S.successText:S.dangerText } }, msg.msg));
+}
+function SnapLoadSheet(props){
+  var r=props.rec, mods=ttModules();
+  var setS=useState("keep"); var setSet=setS[1]; var settingsPick=setS[0];
+  var modS=useState(function(){ var o={}; mods.forEach(function(m){ o[m.id]=true; }); return o; }); var setModPick=modS[1]; var modPick=modS[0];
+  var msgS=useState(null); var setMsg=msgS[1]; var msg=msgS[0];
+  function go(){
+    haptic([20,50,20]);
+    snapGet(r.id).then(snapUnpack).then(function(json){
+      var data=JSON.parse(json);
+      return snapThenReload("before-load", function(st){
+        snapApplyLoad(data, st, { keepSettings:settingsPick==="keep", modules:modPick });
+      }, setMsg);
+    }).catch(function(){ setMsg({ ok:false, msg:"That copy could not be read, so nothing was changed." }); });
+  }
+  return React.createElement(Modal, { title:r.kind==="manual"?"Load this save?":"Load this backup?", onClose:props.onClose, cancelLabel:"Cancel" },
+    React.createElement(SnapRow, { rec:r, showWhy:true }),
+    React.createElement("div", { style:{ color:S.textDim, fontSize:"0.88rem", fontFamily:S.fontBody, margin:"0.4rem 0 0.8rem" } },
+      "Your board becomes exactly this copy."),
+    React.createElement("div", { style:{ background:S.bg1, border:"1px solid "+S.border, borderRadius:S.radius, padding:"0.7rem 0.8rem" } },
+      React.createElement("div", { style:{ color:S.text, fontWeight:700, fontSize:"0.92rem", fontFamily:S.fontBody, marginBottom:"0.45rem" } }, "Settings"),
+      React.createElement(Toggle, { name:"loadsettings", keys:["keep","use"], value:settingsPick, onChange:setSet,
+        labelOf:function(k){ return k==="keep" ? "Keep mine" : "Use the copy’s"; } }),
+      mods.length ? React.createElement("div", { style:{ color:S.text, fontWeight:700, fontSize:"0.92rem", fontFamily:S.fontBody, margin:"0.8rem 0 0.1rem" } }, "Modules") : null,
+      mods.map(function(m){
+        return React.createElement("div", { key:m.id }, snapCheck(!!modPick[m.id], false, m.title,
+          modPick[m.id] ? "Load its data from the copy too" : "Keep its data as it is now",
+          function(){ setModPick(function(o){ var n=Object.assign({}, o); n[m.id]=!o[m.id]; return n; }); }, "loadmod:"+m.id));
+      })),
+    React.createElement("div", { style:{ color:S.textDim, fontSize:"0.78rem", fontFamily:S.fontBody, lineHeight:1.45,
+        background:S.bg1, border:"1px dashed "+S.borderBright, borderRadius:S.radius, padding:"0.6rem 0.7rem", margin:"0.9rem 0 0.7rem" } },
+      "A “Before load” backup is taken first, so you can come straight back."),
+    React.createElement(HoldButton, { onHold:go, holdMs:HOLD_DELETE_MS, fill:rgba(S.infoText,0.3), attrs:{ "data-loadgo":r.id },
+      style:{ width:"100%", background:S.infoBg, border:"2px solid "+S.actionBdr, borderRadius:S.radius, padding:"0.75rem",
+              color:S.infoText, fontFamily:S.fontBody, fontWeight:700, fontSize:"0.92rem" } }, "Load · hold"),
+    msg && React.createElement("div", { "data-snapstatus":msg.ok?"ok":"bad", style:{ marginTop:"0.6rem", fontSize:"0.8rem", fontFamily:S.fontBody,
+      color:msg.ok?S.successText:S.dangerText } }, msg.msg));
 }
 
 // ---- EXTENSIONS MODAL -------------------------------------------------------
@@ -5623,7 +6555,7 @@ function ExtensionsModal(props){
             React.createElement("div", { style:titleRow },
               React.createElement("span", { style:{ flex:1, minWidth:0, color:S.text, fontWeight:700,
                 fontSize:"0.95rem", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" } }, m.title),
-              React.createElement(Mono, { style:{ fontSize:"0.7rem", color:S.textMuted, flexShrink:0 } }, "v"+m.version)
+              React.createElement(Mono, { "data-anchor":"ext-version", style:{ fontSize:"0.7rem", color:S.textMuted, flexShrink:0 } }, "v"+m.version)
             ),
             m.summary && React.createElement("div", { style:summary }, m.summary),
             React.createElement(Toggle, {
@@ -5631,7 +6563,7 @@ function ExtensionsModal(props){
               labelOf:function(k){ return k==="on" ? "On" : "Off"; },
               onChange:function(v){ flip(m, v==="on"); }
             }),
-            React.createElement("div", { style:metaRow },
+            React.createElement("div", { "data-anchor":"ext-data", style:metaRow },
               React.createElement("span", null,
                 use.keys ? (use.keys+(use.keys===1?" key":" keys")+" \u00B7 "+fmtBytes(use.bytes)) : "no data stored"),
               use.keys>0 && !asking && React.createElement("button", { "data-flat":true,
@@ -5664,7 +6596,7 @@ function ExtensionsModal(props){
   return React.createElement(Modal, { title:"Extensions", onClose:props.onClose, cancelLabel:"Close" },
     React.createElement("div", { style:{ fontSize:"0.8rem", color:S.textDim, marginBottom:"0.85rem", lineHeight:1.4 } },
       "Switching one off hides it everywhere and keeps its data. Everything here "+
-      "is included in Backup & Restore."),
+      "is included in Backup & Saves."),
     body
   );
 }
@@ -5772,14 +6704,14 @@ function UnpaidBreaksModal(props){
   return React.createElement(Modal, { title:"Unpaid Breaks", onClose:props.onClose, wide:true,
     onSave:function(){ props.onDone(ub); }, saveLabel:"Done" },
     // every work day
-    React.createElement("div", { style:{marginBottom:"1.1rem"} },
+    React.createElement("div", { style:{marginBottom:"1.1rem"}, "data-anchor":"ub-every" },
       React.createElement("div", { style:sectionHead }, "Every Work Day"),
       React.createElement("div", { style:sectionNote }, "Deducted from each scheduled day."),
       ub.weekly.map(function(b){ return breakCard(null, b); }),
       addBtn(null)
     ),
     // custom daily
-    React.createElement("div", { style:{marginBottom:"0.9rem"} },
+    React.createElement("div", { style:{marginBottom:"0.9rem"}, "data-anchor":"ub-custom" },
       React.createElement("div", { style:sectionHead }, "Custom Daily Breaks"),
       React.createElement("div", { style:sectionNote }, "Extra breaks for specific days, combined with the ones above."),
       DAY_KEYS.map(function(k){
@@ -5811,7 +6743,7 @@ function UnpaidBreaksModal(props){
         );
       })
     ),
-    weekDeduct>0 && React.createElement("div", { style:{display:"flex",justifyContent:"space-between",
+    weekDeduct>0 && React.createElement("div", { "data-anchor":"ub-total", style:{display:"flex",justifyContent:"space-between",
         padding:"0.7rem 0 0.1rem",fontFamily:S.fontBody} },
       React.createElement("span", { style:{color:S.textDim,fontSize:"0.85rem"} }, "Unpaid per week"),
       React.createElement("span", { style:{color:S.warnText,fontWeight:700,fontFamily:S.fontMono} }, "-"+fmtHours(weekDeduct))
@@ -6564,6 +7496,50 @@ function DeleteProjectModal(props){
 }
 
 // ---- DAY SUMMARY ------------------------------------------------------------
+// The day's work as the project tree: each job once, under its own parent,
+// deeper levels indented further. A parent that logged nothing itself still
+// appears so its children have somewhere to sit, and every line is that job's
+// time INCLUDING what sits under it - so the top-level lines add up to the
+// Total. (It used to print every nested job under every top-level job.)
+function daySummaryTree(projectLogs, projects){
+  var byId={}; (projects||[]).forEach(function(p){ byId[p.id]=p; });
+  var node={};
+  function get(id, name, parentId){
+    if(!node[id]) node[id]={ id:id, name:name||"", parentId:parentId, own:0, kids:[], total:0 };
+    else if(!node[id].name && name) node[id].name=name;
+    return node[id];
+  }
+  projectLogs.forEach(function(l){
+    var p=byId[l.projectId];
+    var n=get(l.projectId, p ? p.name : l.projectName, p ? p.parentId : l.parentId);
+    n.own+=(l.duration||0);
+    if(!p && l.parentId!=null) get(l.parentId, l.parentName, null);
+  });
+  // Walk every logged job up to its root, adding parents that logged nothing.
+  Object.keys(node).forEach(function(k){
+    var n=node[k], guard=0;
+    while(n.parentId!=null && guard++<50){
+      var pp=byId[n.parentId];
+      var par=get(n.parentId, pp ? pp.name : null, pp ? pp.parentId : null);
+      n=par;
+    }
+  });
+  var all=Object.keys(node).map(function(k){ return node[k]; });
+  all.forEach(function(n){ if(n.parentId!=null && node[n.parentId] && node[n.parentId]!==n) node[n.parentId].kids.push(n); });
+  function sum(n, d){ if(d>50) return 0; n.total=n.own+n.kids.reduce(function(a,c){ return a+sum(c, d+1); },0); return n.total; }
+  var roots=all.filter(function(n){ return n.parentId==null || !node[n.parentId] || node[n.parentId]===n; });
+  roots.forEach(function(r){ sum(r, 0); });
+  function order(a,b){ return (b.total-a.total) || String(a.name).localeCompare(String(b.name)); }
+  var out=[];
+  function emit(n, d){
+    if(n.total<=0 || d>50) return;
+    var pre=d===0 ? "" : new Array(d+1).join("  ")+"> ";
+    out.push(pre+String(n.name||"(parent job)").padEnd(Math.max(1,36-pre.length))+fmtDur(n.total,true).padStart(8));
+    n.kids.sort(order).forEach(function(c){ emit(c, d+1); });
+  }
+  roots.sort(order).forEach(function(r){ emit(r, 0); });
+  return out;
+}
 function DaySummary(props){
   var logs=props.logs, disruptions=props.disruptions, breaks=props.breaks, onClose=props.onClose, testMode=props.testMode;
   var copiedS = useState(false); var setCopied=copiedS[1]; var copied=copiedS[0];
@@ -6577,20 +7553,7 @@ function DaySummary(props){
   var projectLogs=logs.filter(function(l){ return l.type!=="atwork"; });
   var totalMs=projectLogs.reduce(function(a,l){ return a+l.duration; },0);
 
-  var byProject={};
-  projectLogs.forEach(function(l){
-    var k=l.projectId;
-    if(!byProject[k]) byProject[k]={name:l.projectName,lane:l.lane,ms:0,parentId:l.parentId};
-    byProject[k].ms+=l.duration;
-  });
-
-  var lines=["Day Summary - "+today+(testMode?" [PRACTICE]":""),""];
-  Object.values(byProject).filter(function(p){ return !p.parentId; }).sort(function(a,b){ return b.ms-a.ms; }).forEach(function(p){
-    lines.push(p.name.padEnd(36)+fmtDur(p.ms,true).padStart(8));
-    Object.values(byProject).filter(function(c){ return c.parentId; }).forEach(function(c){
-      lines.push("  > "+c.name.padEnd(32)+fmtDur(c.ms,true).padStart(8));
-    });
-  });
+  var lines=["Day Summary - "+today+(testMode?" [PRACTICE]":""),""].concat(daySummaryTree(projectLogs, props.projects));
   lines.push("","Total: "+fmtDur(totalMs,true));
   if(breakTotal>0) lines.push("Breaks: "+fmtDur(breakTotal,true));
   if(distTotal>0) lines.push("Disruptions ("+done.length+"): "+fmtDur(distTotal,true)+" lost");
@@ -6600,9 +7563,9 @@ function DaySummary(props){
   return (
     React.createElement(Modal, { title:"Day Summary", onClose:onClose, wide:true },
       React.createElement("div", { style:{display:"flex",gap:"0.5rem",marginBottom:"1rem"} },
-        React.createElement("button", { onClick:copy, style:{flex:1,background:copied?S.successBg2:S.bg1,border:"1px solid "+(copied?S.successBorder:S.border),borderRadius:S.radius,padding:"0.7rem",color:copied?S.successText:S.textDim,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600} }, copied?"Copied!":"Copy")
+        React.createElement("button", { "data-anchor":"sum-copy", onClick:copy, style:{flex:1,background:copied?S.successBg2:S.bg1,border:"1px solid "+(copied?S.successBorder:S.border),borderRadius:S.radius,padding:"0.7rem",color:copied?S.successText:S.textDim,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600} }, copied?"Copied!":"Copy")
       ),
-      React.createElement("div", { style:{background:S.bg0,borderRadius:S.radius,padding:"0.85rem",maxHeight:"400px",overflowY:"auto"} },
+      React.createElement("div", { "data-anchor":"sum-lines", style:{background:S.bg0,borderRadius:S.radius,padding:"0.85rem",maxHeight:"400px",overflowY:"auto"} },
         lines.map(function(line,i){
           return React.createElement("div", { key:i, style:{fontFamily:S.fontMono,fontSize:"0.8rem",color:line.startsWith("Day")||line.startsWith("Total")?S.text:S.textDim,marginBottom:"0.1rem",whiteSpace:"pre"} }, line||"\u00a0");
         })
@@ -7807,7 +8770,7 @@ function LaneSection(props){
 // CORE - never a module, always present:
 //   the timer engine and session restore, lanes / projects / sub-tasks, logs,
 //   disruptions and breaks, the schedule + unpaid-break + pay-cycle engine,
-//   Reports, Backup & Restore, themes and tokens, settings.
+//   Reports, Backup & Saves, themes and tokens, settings.
 //
 // MODULE TERRITORY - anything that introduces a new kind of record alongside
 //   the timer: Tool Tracker, Materials Tracker, Project Builder, and whatever
@@ -7838,7 +8801,7 @@ function LaneSection(props){
 //
 // RULES a module lives by:
 //   - Storage only through ctx.storage. Never touch localStorage directly -
-//     that is what keeps Backup & Restore whole and enable/disable reversible.
+//     that is what keeps Backup & Saves whole and enable/disable reversible.
 //   - Tokens are live. Call TT.tokens() inside render; never cache S at load
 //     time, because the palette changes underneath when the theme does.
 //   - Any dropdown a module opens broadcasts TT.closeMenus() first.
@@ -8993,7 +9956,7 @@ function TTBoard(){
   var reportsKindS=useState("week"); var setReportsKind=reportsKindS[1]; var reportsKind=reportsKindS[0];
   var showArchiveS=useState(false); var setShowArchive=showArchiveS[1]; var showArchive=showArchiveS[0];
   var settingsS=useState(function(){
-    var st = load("tt_settings",{ layout:"comfortable", tracking:"timer", colorScheme:"bright-pastels", theme:"neon-dream", schemes:{}, fonts:{}, mode:"dark", handedness:"right", headerPos:"top" });
+    var st = load("tt_settings",settingsFactory());
     // Settings saved before the schedule existed get the default merged in, so
     // every consumer can rely on the shape being present.
     // Every saved schedule shape - missing entirely, or from before unpaid
@@ -9047,6 +10010,31 @@ function TTBoard(){
       atWorkStart:atWorkStart, breakStart:breakStart, breakLabel:breakLabel,
       interrupting:interrupting, intStart:intStart, workDay:workDay, workDayOt:workDayOt });
   },[activeId,activeStart,atWorkStart,breakStart,breakLabel,interrupting,intStart,workDay,workDayOt]);
+
+  // ---- Automatic backups ----
+  // After clock-out: this effect runs after the save effects above in the
+  // same commit, and a beat later still, so the copy holds the finished day.
+  var snapAfterClockOut=useRef(false);
+  useEffect(function(){
+    if(atWorkStart || !snapAfterClockOut.current) return;
+    snapAfterClockOut.current=false;
+    var t=setTimeout(function(){ snapTake("clockout").catch(function(){}); }, 600);
+    return function(){ clearTimeout(t); };
+  },[atWorkStart, realLogs]);
+  // Opening the app when the newest automatic copy is over a day old (a
+  // forgotten clock-out) takes one then - unless the clock is running, when
+  // the clock-out will. Also asks the browser to keep this app's storage.
+  useEffect(function(){
+    var t=setTimeout(function(){
+      try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function(){}); }catch(e){}
+      if(load("tt_session",{}).atWorkStart) return;
+      snapList().then(function(l){
+        var n=snapNewestAuto(l);
+        if(!n || Date.now()-n.at > DAY_MS) return snapTake("open");
+      }).catch(function(){});
+    }, 2500);
+    return function(){ clearTimeout(t); };
+  },[]);
 
   // Timer tick
   useEffect(function(){
@@ -9285,6 +10273,9 @@ function TTBoard(){
   }
   function clockOut(){
     haptic([20,50,20]);
+    // The day's automatic backup, once the clock-out has been written - the
+    // effect below takes it. Never for the practice board.
+    if(!testMode) snapAfterClockOut.current=true;
     var now=Date.now();
     if(activeId) finalizeProject(now);
     if(openDist) closeDisruption(now);
@@ -9726,11 +10717,11 @@ function TTBoard(){
                   return n ? React.createElement(Mono, { style:{color:S.textDim,fontSize:"0.8rem",fontWeight:700} }, String(n)) : null;
                 })()
               ),
-              // Backup & Restore
+              // Backup & Saves
               React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowBackup(true); },
                 style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
                 React.createElement(MenuIcon, { name:"backup", col:S.text }),
-                "Backup & Restore"
+                "Backup & Saves"
               ),
               // Extensions
               React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowExtensions(true); },
@@ -9917,7 +10908,7 @@ function TTBoard(){
         onCancel:function(){ setDayAsk(null); } }),
       showDisrupt && React.createElement(DisruptionModal, { projName:disruptTarget?disruptTarget.name:null, onStart:startDisruption, onCancel:function(){ setShowDisrupt(false); } }),
       showBreak && React.createElement(BreakModal, { onStart:startBreak, onCancel:function(){ setShowBreak(false); } }),
-      showDay && React.createElement(DaySummary, { logs:todayLogs, disruptions:todayDist, breaks:todayBreaks, dayKey:todayStr2, onClose:function(){ setShowDay(false); }, testMode:testMode }),
+      showDay && React.createElement(DaySummary, { logs:todayLogs, disruptions:todayDist, breaks:todayBreaks, dayKey:todayStr2, projects:projects, onClose:function(){ setShowDay(false); }, testMode:testMode }),
       notifToast && React.createElement("div", { "data-surface":"panel", role:"status",
         onClick:function(){ setNotifToast(null); },
         style:{position:"fixed",left:"50%",transform:"translateX(-50%)",
@@ -9927,7 +10918,7 @@ function TTBoard(){
         React.createElement("div", { style:{color:S.text,fontWeight:700,fontSize:"0.86rem",fontFamily:S.fontBody} }, notifToast.title),
         React.createElement("div", { style:{color:S.textDim,fontSize:"0.78rem",marginTop:"0.15rem",fontFamily:S.fontBody} }, notifToast.body)
       ),
-      showBackup && React.createElement(BackupModal, { onClose:function(){ setShowBackup(false); } }),
+      showBackup && React.createElement(BackupModal, { clocked:!!atWorkStart, onClose:function(){ setShowBackup(false); } }),
       showExtensions && React.createElement(ExtensionsModal, {
         onChange:function(){ setModTick(function(x){ return x+1; }); },
         onClose:function(){ setShowExtensions(false); } }),

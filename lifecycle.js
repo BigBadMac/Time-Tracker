@@ -28,7 +28,9 @@ const out = new Function("React", "window", "localStorage", "navigator", "docume
         " outlineRows, outlineSpan, outlineCommit, " +
         " stepUp, stepDown, stepIn, stepOut, stepOptions, prevSibling, nextSibling, parentIndex, nestRoles, mergeOutline," +
         " worstStatus, stepActual, stepStatus, stepPoint, aggregatePoint, hasMilestonesBeneath, projectLine, projectCurrent," +
-        " laneLine, laneCurrent, boardLine, lineSpan, tickUnit, groupMarks, MS_DAY, subtreePoints, tickScale, lineTicks, arcHeight, driftArcs, driftHeadroom, MS_ZOOMS, zoomAt, nextZoom, zoomSpan, panSpan, milestoneReport };")(
+        " laneLine, laneCurrent, boardLine, lineSpan, tickUnit, groupMarks, MS_DAY, subtreePoints, tickScale, lineTicks, arcHeight, driftArcs, driftHeadroom, MS_ZOOMS, zoomAt, nextZoom, zoomSpan, panSpan, milestoneReport," +
+        " snapIsBoardKey, snapCollect, snapSummary, snapModuleOf, snapIdsFor, snapPrune, snapApplyLoad, snapCloseOpen," +
+        " daySummaryTree, resetApply, resetNormalize, resetPickOf, resetFromPick, RESET_PICKS, settingsFactory, ttModules, SNAP_KEEP, SNAP_MANUAL_MAX };")(
   React, win, localStorage, navigator, document, function (t){ return { type: t }; });
 
 const ok = [];
@@ -1379,6 +1381,140 @@ t("and never more than the ceiling allows", out.driftHeadroom(arcs) <= 34 + 9);
 t("a line with no drift asks for none", out.driftHeadroom([]) === 0);
 t("and small drifts ask for less than big ones",
   out.driftHeadroom(out.driftArcs([dpts[0]], dspan, dpx)) < out.driftHeadroom(arcs));
+
+// ---- Backup & Saves: what a copy holds, how tiers roll, what a reset clears ----
+function mkSnapStore(obj){
+  const m=new Map(Object.entries(obj||{}));
+  return { get length(){ return m.size; }, key:(i)=>Array.from(m.keys())[i], getItem:(k)=>m.has(k)?m.get(k):null,
+           setItem:(k,v)=>m.set(k,String(v)), removeItem:(k)=>m.delete(k), _m:m };
+}
+const SNOW=Date.now();
+const seedBoard=()=>mkSnapStore({
+  tt_projects:JSON.stringify([
+    { id:1, name:"Rebuild", lane:"Daily Activity", parentId:null, role:"project", kind:"ongoing",
+      stages:[{ id:"a", label:"Strip", done:true, doneAt:SNOW-5e6 }],
+      milestones:[{ id:"m1", label:"Parts", dueAt:SNOW+8e7, targets:[{ kind:"project", id:2 }, { kind:"project", id:1 }], doneAt:SNOW-1e6 }] },
+    { id:2, name:"Old bench", lane:"Daily Activity", parentId:null, role:"project", kind:"finite", closedAt:SNOW-2e6, stages:[] },
+    { id:3, name:"Bench task", lane:"Daily Activity", parentId:2, role:"task", stages:[] }]),
+  tt_logs:JSON.stringify([{ id:"l1", type:"project", startTime:SNOW-4e6, endTime:SNOW-1e6, duration:3e6 },
+                          { id:"l2", type:"atwork", startTime:SNOW-9e6, endTime:null }]),
+  tt_disruptions:"[]", tt_breaks:"[]", tt_laneorder:JSON.stringify(["Daily Activity"]),
+  tt_settings:JSON.stringify(Object.assign(out.settingsFactory(), { theme:"forest", workSchedule:{ mine:true } })),
+  tt_distpresets:JSON.stringify(["Phone"]), tt_modules:JSON.stringify({ tools:true }),
+  tt_mod_tools_tools:JSON.stringify([{ id:"t1" }]),
+  tt_test_projects:"[]", tt_testmode:"true", tt_session:JSON.stringify({ atWorkStart:SNOW })
+});
+{
+  const st=seedBoard(), data=out.snapCollect(st);
+  t("a copy holds the real board", "tt_projects" in data && "tt_logs" in data && "tt_mod_tools_tools" in data && "tt_settings" in data);
+  t("never the practice board", !Object.keys(data).some(k=>k.indexOf("tt_test")===0));
+  t("and never the running clock", !("tt_session" in data));
+  const sm=out.snapSummary(data);
+  t("its summary counts open projects, not closed ones or tasks", sm.projects===1);
+  t("and the time logged against projects", sm.loggedMs===3e6);
+  t("a module key names its module", out.snapModuleOf("tt_mod_tool-room_items")==="tool-room" && out.snapModuleOf("tt_logs")===null);
+}
+{
+  const at=new Date(2026,9,7,17,0).getTime();
+  const ids=out.snapIdsFor("clockout", at, "mon").map(x=>x.id);
+  t("a clock-out files Latest and the day, week and month it falls in",
+    ids.join(",")==="latest,daily-2026-10-07,weekly-2026-10-05,monthly-2026-10");
+  const ids2=out.snapIdsFor("before-reset", at, "mon").map(x=>x.id);
+  t("a before-reset copy gets Latest and its own daily entry, so a clock-out never overwrites it",
+    ids2.length===2 && ids2[0]==="latest" && ids2[1]==="daily-2026-10-07-"+at);
+  t("a manual save is its own slot", out.snapIdsFor("manual", at)[0].id==="save-"+at);
+  const recs=[];
+  for(let d=0; d<10; d++) recs.push({ id:"daily-"+d, kind:"daily", day:"2026-10-"+String(10+d), at:d });
+  recs.push({ id:"daily-x", kind:"daily", day:"2026-10-19", at:99 });
+  for(let w=0; w<6; w++) recs.push({ id:"weekly-"+w, kind:"weekly", at:w });
+  for(let m=0; m<14; m++) recs.push({ id:"monthly-"+m, kind:"monthly", at:m });
+  for(let s=0; s<5; s++) recs.push({ id:"save-"+s, kind:"manual", at:-s });
+  recs.push({ id:"latest", kind:"latest", at:1 });
+  const drop=out.snapPrune(recs);
+  t("daily keeps every copy from its seven newest days", drop.filter(x=>x.indexOf("daily")===0).sort().join()==="daily-0,daily-1,daily-2");
+  t("weekly keeps four, monthly twelve", drop.filter(x=>x.indexOf("weekly")===0).sort().join()==="weekly-0,weekly-1" &&
+    drop.filter(x=>x.indexOf("monthly")===0).sort().join()==="monthly-0,monthly-1");
+  t("saves and Latest never roll off", !drop.some(x=>x.indexOf("save-")===0 || x==="latest"));
+  t("the numbers Brent set", out.SNAP_KEEP.daily===7 && out.SNAP_KEEP.weekly===4 && out.SNAP_KEEP.monthly===12 && out.SNAP_MANUAL_MAX===5);
+}
+{
+  // Reset state: time and ticks go; projects, the Archive, settings and modules stay.
+  const st=seedBoard(); out.resetApply(out.resetFromPick("state", out.ttModules()), st);
+  const ps=JSON.parse(st.getItem("tt_projects"));
+  t("reset state clears every entry", st.getItem("tt_logs")==="[]" && st.getItem("tt_disruptions")==="[]" && st.getItem("tt_breaks")==="[]");
+  t("keeps every project, closed ones included", ps.length===3);
+  t("and opens every stage and milestone again", ps[0].stages[0].done===false && ps[0].milestones[0].doneAt===null);
+  t("but leaves settings, presets and modules alone", JSON.parse(st.getItem("tt_settings")).theme==="forest" &&
+    st.getItem("tt_distpresets")!==null && st.getItem("tt_mod_tools_tools")!==null);
+  t("and never touches the practice board or the clock", st.getItem("tt_test_projects")==="[]" && st.getItem("tt_session")!==null);
+}
+{
+  const st=seedBoard(); out.resetApply({ archive:true, modules:{} }, st);
+  const ps=JSON.parse(st.getItem("tt_projects"));
+  t("clearing the Archive deletes closed projects and what sits under them", ps.length===1 && ps[0].id===1);
+  t("and a milestone stops pointing at a project that is gone", ps[0].milestones[0].targets.length===1 && ps[0].milestones[0].targets[0].id===1);
+  t("its time stays: the Archive is not the time", JSON.parse(st.getItem("tt_logs")).length===2);
+}
+{
+  const st=seedBoard(); out.resetApply({ projects:true, modules:{} }, st);
+  t("clearing projects takes the time and the lanes with them",
+    st.getItem("tt_projects")===null && st.getItem("tt_laneorder")===null && st.getItem("tt_logs")==="[]");
+  t("projects locks time, ticks and the Archive on", (function(){ const n=out.resetNormalize({ projects:true }); return n.time&&n.ticks&&n.archive; })());
+}
+{
+  const st=seedBoard(); out.resetApply({ look:true, modules:{} }, st);
+  const s2=JSON.parse(st.getItem("tt_settings"));
+  t("resetting the look keeps the work schedule", s2.theme==="neon-dream" && s2.workSchedule && s2.workSchedule.mine===true);
+  const st2=seedBoard(); out.resetApply({ schedule:true, modules:{} }, st2);
+  const s3=JSON.parse(st2.getItem("tt_settings"));
+  t("and resetting the schedule keeps the look", s3.theme==="forest" && !("workSchedule" in s3));
+  const st3=seedBoard(); out.resetApply(out.resetFromPick("factory", out.ttModules()), st3);
+  t("factory reset clears settings, presets and every module's data", st3.getItem("tt_settings")===null &&
+    st3.getItem("tt_distpresets")===null && st3.getItem("tt_mod_tools_tools")===null);
+  t("but leaves which modules are switched on", st3.getItem("tt_modules")!==null);
+  const mods=out.ttModules();
+  t("the two picks are recognised back from their ticks",
+    out.resetPickOf(out.resetFromPick("state", mods), mods)==="state" && out.resetPickOf(out.resetFromPick("factory", mods), mods)==="factory");
+  t("and any other mix is custom", out.resetPickOf(Object.assign(out.resetFromPick("state", mods), { presets:true }), mods)==="custom");
+}
+{
+  // Loading: settings and each module can be kept as they are.
+  const copy=out.snapCollect(seedBoard());
+  const st=mkSnapStore({ tt_projects:"[]", tt_logs:"[]", tt_settings:JSON.stringify({ theme:"mine" }), tt_mod_tools_tools:"[\"now\"]",
+                     tt_extra:"1", tt_test_logs:"[9]", tt_session:"{}" });
+  out.snapApplyLoad(copy, st, { keepSettings:true, modules:{ tools:false } });
+  t("a load puts the copy's board back", JSON.parse(st.getItem("tt_projects")).length===3);
+  t("drops what the copy did not have", st.getItem("tt_extra")===null);
+  t("keeps my settings when asked", JSON.parse(st.getItem("tt_settings")).theme==="mine");
+  t("and a module left unticked keeps its data", st.getItem("tt_mod_tools_tools")==="[\"now\"]");
+  t("never touches the practice board or the clock", st.getItem("tt_test_logs")==="[9]" && st.getItem("tt_session")==="{}");
+  t("a timer running when the copy was made is dropped, not resumed", JSON.parse(st.getItem("tt_logs")).length===1);
+  const st2=mkSnapStore({ tt_settings:JSON.stringify({ theme:"mine" }) });
+  out.snapApplyLoad(copy, st2, { keepSettings:false, modules:{} });
+  t("or takes the copy's settings and modules", JSON.parse(st2.getItem("tt_settings")).theme==="forest" && st2.getItem("tt_mod_tools_tools")!==null);
+}
+
+// ---- Day Summary: each job once, under its own parent, adding up ----
+{
+  const H=3600e3, L=(pid,name,pp,ppn,ms)=>({ type:"project", projectId:pid, projectName:name, parentId:pp, parentName:ppn, duration:ms });
+  const projs=[{id:1,name:"Line 4 Rebuild",parentId:null},{id:2,name:"Strip old line",parentId:1},
+    {id:10,name:"Bench install",parentId:null},{id:11,name:"Order parts",parentId:10},{id:12,name:"Call supplier",parentId:11},
+    {id:20,name:"Paint booth",parentId:null},{id:21,name:"Mask panels",parentId:20}];
+  const logs=[L(1,"Line 4 Rebuild",null,null,2*H),L(2,"Strip old line",1,"Line 4 Rebuild",H),L(10,"Bench install",null,null,1.5*H),
+    L(11,"Order parts",10,"Bench install",0.5*H),L(12,"Call supplier",11,"Order parts",0.25*H),L(21,"Mask panels",20,"Paint booth",0.75*H)];
+  const lines=out.daySummaryTree(logs, projs);
+  const names=lines.map(x=>x.replace(/\s+\S+( \S+)?$/,"").trim());
+  t("every job appears exactly once", ["Strip old line","Order parts","Call supplier","Mask panels"].every(n=>names.filter(x=>x.endsWith(n)).length===1));
+  t("under its own parent", lines.indexOf(lines.find(x=>/Strip old line/.test(x)))===lines.indexOf(lines.find(x=>/^Line 4 Rebuild/.test(x)))+1);
+  t("deeper levels indent further", /^    > Call supplier/.test(lines.find(x=>/Call supplier/.test(x))) && /^  > Order parts/.test(lines.find(x=>/Order parts/.test(x))));
+  t("a parent that logged nothing still holds its children", /^Paint booth\s+45m/.test(lines.find(x=>/^Paint booth/.test(x))||""));
+  const mins=x=>{ const m=x.match(/(\d+)h (\d+)m\s*$/), m2=x.match(/(\d+)m \d+s\s*$/); return m ? +m[1]*60+ +m[2] : m2 ? +m2[1] : 0; };
+  const top=lines.filter(x=>!/^\s/.test(x)).reduce((a,x)=>a+mins(x),0);
+  t("and the top-level lines add up to the day's total", top===6*60);
+  t("each line includes what sits under it", /^Bench install\s+2h 15m/.test(lines.find(x=>/^Bench install/.test(x))));
+  const flat=out.daySummaryTree([L(21,"Mask panels",20,"Paint booth",0.75*H)], []);
+  t("without the project list, the log's own parent name is used", /^Paint booth/.test(flat[0]) && /^  > Mask panels/.test(flat[1]));
+}
 
 let bad = 0;
 ok.forEach(([label, pass]) => { if (!pass) { bad++; console.log("   x " + label); } });
