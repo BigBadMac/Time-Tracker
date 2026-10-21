@@ -1,17 +1,112 @@
 # Time Tracker — session handover
 
-Current build: **`10-10 one walk`**
+Current build: **`10-20 v1.2 ids and tracking`** (public version **1.2**, `APP_VERSION` - bumped 10-20 because Brent is pushing this build)
 
 ```
-tt-tests.js  1693 assertions   200 cases   (static, no browser)
-boot.js       266 checks                    (renders the built file)
+tt-tests.js  1809 assertions   208 cases   (static, no browser)
+boot.js       319 checks                    (renders the built file)
 shift.js       46 checks                    (work days, shifts, overtime)
-lifecycle.js  539 checks                    (projects, nesting, archive, scheduling)
-e2e.js        585 checks                    (Playwright, the real board in a browser)
+lifecycle.js  573 checks                    (projects, nesting, archive, scheduling)
+e2e.js        650 checks                    (Playwright, the real board in a browser)
 ```
 
 **Everything above is green at this build.** Pushing it is Brent's step
-(Working Copy -> GitHub Pages). `10-09 ring clip` was the build before.
+(Working Copy -> GitHub Pages). `10-10 one walk` was the build before (all
+five green at it too, re-run 10-20 before anything changed).
+
+## START HERE - modules bring their own help: DONE (10-20). Brent picks next.
+
+The phase handed over 10-19 is built, all five steps:
+
+1. **`help` is a field of the `TT.define()` contract** (`TT_FIELDS`,
+   `TT_HELP_FIELDS`, `ttValidateHelp` called from `ttValidateModule`).
+   `{ topic, pictures, guides, stage(stage, ctx) }`, same entry shapes as the
+   core registries. Keys MUST be `<moduleId>:<slug>` - a bare key or another
+   module's prefix is rejected at load. Every picture needs a stage; every
+   guide step needs stage, ring, title and text (a module has no
+   practice-only steps). `stage` is required once there is anything to draw.
+2. **`helpAll()` is the one accessor.** Core registries + every ENABLED
+   module's, merged; module topics (`id:"module-<id>"`) sit after the core
+   topics and before the flat Practise topic. It feeds `helpEntry`,
+   `helpSearchDocs`, `HelpPicture`, `HelpSteps`, the How > lookup in
+   `HelpWalk` and the `GuidesModal` index. Nothing in the manual reads
+   `HELP_PICTURES` / `HELP_GUIDES` / `HELP_INDEX` directly any more.
+   Module stages are tagged `module:<id>` inside `helpAll` (a module never
+   writes the tag) and `helpStageEl` hands a tagged stage to the module's own
+   `stage(stage, ctx)`, with `helpStageCtx(id)`: the screen-context shape on
+   the practice board's projects, and **`ctx.storage` is `ttMemoryStorage()`**
+   - in memory, seeded by the module from its own sample data. So staging a
+   module writes nothing, exactly as for the core.
+3. **Tests follow `helpAll()`.** boot runs the manual checks with Tool Tracker
+   ON (anchors in the staged render, no digits, every index row and How >
+   resolves, staging writes nothing, no `tt_mod_tools_` key written), and
+   checks the topic and search appear when it is on and vanish when it is
+   off. Mutation-tested: an anchor dropped, a figure typed into the prose and
+   a stage that writes real storage each fail it, naming the page. e2e routes
+   every registry read through `helpAll()`, walks the manual with Tool
+   Tracker on, and **p25 runs twice** - all modules off, then Tool Tracker
+   on - requiring its Tools row in the menu and covered.
+4. **Tool Tracker's topic** (`TOOLS_HELP` in its module block): pictures
+   `tools:screen` (Out tab: summary, the Out/All/History toggle, an out
+   record, Check in) and `tools:checkout` (who, which job, note, Check Out);
+   guides `tools:out` (All tab, Add tool, Check out, who, job, Check Out) and
+   `tools:back` (Out tab, the record, Check in, History). Sample data is
+   `toolsHelpSample` - three tools, one out, two back, times relative to now,
+   jobs from the practice board (103, 107). Anchors: `tools-summary`,
+   `tools-record`, `tools-checkin`, `tools-add`, `tools-row`, `tools-edit`,
+   `tools-checkout`, `tools-log`, `tools-holder`, `tools-job`, `tools-note`,
+   `tools-save`, and the Toggle's own `set-Tool view`.
+5. **MODULES.md** documents the field (it was attached this session - Git is
+   still the master copy) and is mirrored to the Project.
+
+Two small core changes came with it: `Modal` takes `saveAnchor` (puts a
+`data-anchor` on the Save button; undefined renders nothing), and
+`ToolsScreen` reads `ctx.initialView` so a stage can open on a tab. `paint.js`
+proved the board's first paint byte-identical to `10-10 one walk`.
+
+**Not settled with Brent - look first.** The Tool Tracker pages reuse the
+manual's existing layout (no new graphic), but which pictures and guides it
+has and their wording are a first draft. Walk them on the phone (Extensions
+-> Tool Tracker on -> User Manual -> Guides -> Tool Tracker) before building
+on them.
+
+**NEXT, agreed 10-20 - the About page (designed, not built).** Brent chose
+from mocks (scratch only, nothing in the source yet):
+- **Where:** a row in the User Manual group, beside Guides. Public audience,
+  plain language. It needs a help `covers` or an exemption for p25.
+- **Layout: the TIMELINE (mock C).** Compact header (glyph, Time Tracker,
+  "Version x.y · build MM-DD"); versions on a vertical line, newest open
+  with an "ON THIS PHONE" badge and its date UNDER the name (on one line it
+  crowded at phone width), older versions folded ("n changes · tap to
+  read"); an About card at the foot.
+- **Credit line:** "Developed at Hiatt Studios" (H-I-A-T-T), a link that
+  opens the CREDITS as a sheet over About (not a browser window: on an
+  iPhone home-screen app that would leave for Safari). Back returns to About.
+- **Credits: MOVIE STYLE** - centred, rolling up on their own, tap to pause,
+  drag to scroll, the still version under prefers-reduced-motion. Groups
+  drafted from what the app really uses: Design and development (Brent,
+  Hiatt Studios), With thanks to (NAMES FROM BRENT - placeholder), Built with
+  (Claude, Anthropic), Runs on (React, Meta, MIT licence), Typefaces (the
+  eleven Google Fonts), Hosting and source (GitHub Pages, Working Copy),
+  Testing (Playwright and Chromium, Node.js and Python).
+- **Release notes:** Brent marks up the full change list (Doc "Time Tracker
+  1.1 - Change List (draft)", 39 rows) and guides the abridged public
+  wording. Notes live in the source as data; a test fails a build whose
+  newest note does not match `APP_VERSION`, so a push cannot go out
+  without its notes. Open: was any of the list already in a pushed build
+  (that belongs under 1.0)? 1.0's date is unknown.
+- Still to get from Brent: the people to thank, his own credit line, the
+  change-list markup.
+
+The backlog (none started, Brent to choose):
+- audit the rest of the app against the steady-box rule (only the manual
+  has been checked)
+- "Show me on the practice board" - after the guides have been used a while
+- the "Open decisions" below, all waiting on real use
+- the multi-user hurdles (live board out of localStorage, device-unique ids)
+  - with the cloud work, not before
+- the next module (Materials Tracker is the cheap one) - it now has to ship
+  its own `help`, and boot/e2e will hold it to the same rules
 
 ## Container resets lose the toolchain
 
@@ -41,7 +136,7 @@ node tt-tests.js time-tracker.jsx
 node boot.js /tmp/app_only.js
 node shift.js /tmp/app_only.js
 node lifecycle.js /tmp/app_only.js
-node e2e.js index.html          # ~3 minutes, run it in the background
+node e2e.js index.html          # ~8 minutes now, run it in the background
 ```
 
 All five must pass before anything is changed. If they don't, the attachments
@@ -53,7 +148,7 @@ even when only some files are attached. Git is still the master copy. At the
 end of any session that changes either file, write the new version back to the
 Project as well as committing it.
 
-`e2e.js` takes about three minutes. Start it early and read the result later
+`e2e.js` takes about eight minutes. Start it early and read the result later
 rather than waiting on it.
 
 ## Build
@@ -96,6 +191,17 @@ which is what makes Backup & Restore whole.
 
 ## Rules that keep biting
 
+- **VERSION NUMBERING (Brent, 10-20 - a standing rule).** `APP_VERSION`
+  is the public number on the splash. **Never change it while building or
+  handing over files** - a new set of files keeps the version it has. Bump it
+  ONLY when Brent says he is pushing to GitHub: then the minor goes up by
+  one (1.1 -> 1.2), rebuild, re-run the suites, hand over the changed files.
+  A **major** release goes to the next whole number (-> 2.0) when Brent
+  calls it major, or when Claude suggests it is and Brent agrees - e.g. the
+  finished shared board (network sync + database). The build stamp
+  (`--stamp "MM-DD ..."`) is separate and changes on every build; put the
+  version in it when bumping (`10-20 v1.1 module help`).
+
 - **MULTI-USER IS COMING (Brent, 10-10 - a standing rule).** Cloud/server
   storage will arrive with multi-user. Flag, in the work and in HANDOVER's
   "Multi-user hurdles" list, anything built that would be a major hurdle when
@@ -115,6 +221,28 @@ which is what makes Backup & Restore whole.
   `msg`). Any NEW box of this kind uses SteadyBox; tt-tests and e2e check it.
   The rest of the app has NOT been audited against this rule yet.
 
+- **A module ships its own help, or its menu row fails e2e (10-20).** Put
+  `help:{ topic, pictures, guides, stage }` in its `TT.define()`, keys
+  `<id>:<slug>`, `covers` on the entry that explains its menu row. Its stage
+  draws from SAMPLE data written into the `ctx.storage` it is handed (memory,
+  never the user's). Read the registries through `helpAll()`, never
+  `HELP_PICTURES`/`HELP_GUIDES`/`HELP_INDEX` - those are the core only, and a
+  module's topic would silently go missing. Note `boot` checks module help
+  only because it switches Tool Tracker on for the manual block; a new module
+  must be switched on there too (and in e2e's p23/p25) or nothing walks it.
+- **A module's stage is a SHEET at phone width (390) by default.**
+  `HelpStage` sizes a core stage from `HELP_SHEETS` / `HELP_STAGE_W`, keyed by
+  kind; a module stage bypasses both (its kinds are its own and may share a
+  name with a core kind). A stage may say `sheet:false` or `width:<n>`. The
+  first build looked the module kinds up in the core tables, staged Tool
+  Tracker's Modal as a CARD, measured its fixed-position sheet zero tall,
+  and the visible-area cut removed every mark - no error, no crash, all four
+  harnesses green. **Only e2e can see a missing mark** (boot proves the
+  anchor is in the markup, not that a mark was placed); it timed out on
+  `[data-helpmark="1"]`.
+- **A comment appended to a line of `var`s comments out the rest of the
+  line.** `useState(...); // note var view = ...` dropped `view` and only the
+  harness that called ToolsScreen caught it. Put notes on their own line.
 - **Every settings-menu row must have a help topic.** e2e (p25) clocks in,
   opens the REAL menu, reads every row (status block included: Logging to,
   Break / End Break) and every group's items, and fails naming any label no
@@ -219,7 +347,8 @@ which is what makes Backup & Restore whole.
 - **Declare before the early return.** `ProjectCard` returns early when collapsed;
   `var` hoists the name but not the value, so anything declared below it is
   `undefined` up there.
-- **Select values are strings; project ids are numbers.** Every child lookup is a
+- **Select values are strings; project ids are numbers OR strings (long ids
+  since 10-20).** Never assume either. Every child lookup is a
   strict `===`. Resolve a picked id back to the real one or the record is orphaned.
 - **Fit a glyph by measuring it, not by eye, and look at a render before
   shipping it.** A composition of rotated or arced pieces has a bounding box
@@ -412,6 +541,96 @@ which is what makes Backup & Restore whole.
   behaving exactly as they did. Nothing migrates.
 
 ## Recent work, newest first
+
+- **Version 1.2 (10-20 `v1.2 ids and tracking`).** Brent is pushing, so per
+  the version rule `APP_VERSION` 1.1 -> 1.2. Paint diff: the splash's
+  `v1.1` -> `v1.2` and nothing else; four fast suites re-run green (e2e
+  650/650 on the same code at `v1.1 ids and tracking`). 1.2 ships: module
+  help + Tool Tracker's manual pages, the storage doorway, Edit... lane and
+  project conversions that save, long ids, change tracking. (The About
+  page's release notes, once built, should list these under 1.2.)
+- **Long ids and change tracking (10-20 `v1.1 ids and tracking`) - shared
+  board, groundwork step 2.**
+  - `uid()` makes LONG ids: `crypto.randomUUID()` where the browser has it,
+    else 24 random base-36 characters. Old 7-character ids keep working.
+  - `newProjectId()` returns `uid()` - new PROJECTS get long text ids too,
+    not "highest + 1". Old numbered projects keep their numbers; the two
+    live side by side because ids are only ever stored and compared (the
+    survey found no Number()/parseInt/sort/arithmetic on any id). The
+    HANDOVER rule "project ids are numbers" is now "project ids are numbers
+    OR strings - never assume either; compare with ===, resolve select
+    values with String() and map back (resolveParentId)".
+  - **Change tracking at SAVE time** (`ttStamp`, `saveTracked`): the four
+    real collections (`TT_TRACKED`: projects, logs, disruptions, breaks)
+    save through `saveTracked`, which compares with what is stored: new or
+    changed records get `updatedAt = now`, unchanged ones are written back
+    exactly as stored, removed ones leave a tombstone `{id, at}` in
+    `tt_gone` (per collection, capped at `TT_GONE_MAX` 1000, oldest
+    dropped). No setter stamps anything. Practice Board stores are NOT
+    tracked. Record-level only - field-level merge comes with the sync
+    layer. Backup/Reset/Load write storage directly and are not tracked
+    (restore stays replace-all).
+  - NOT added yet, deliberately: the role/sharing fields (scope, top admin,
+    admins, lead, assignee) and requests. They arrive with the screens that
+    use them, so nothing carries fields no code reads.
+  - Tests: lifecycle (2000 uids unique and long, new project ids, ttStamp
+    rules, saveTracked end to end on a swapped backend, cap, corrupt gone
+    list); tt-tests (wiring: the four tracked saves, practice untracked, no
+    "highest + 1" left). Mutation-tested: restamp-everything, logs untracked,
+    short ids. First paint byte-identical.
+- **Edit... conversions now SAVE (10-20 `v1.1 lane conversion`).** Found
+  while surveying ids: the board's `saveOutline` applied moves only. A
+  project given its own lane stored laneOrder `["Shop","new-lane-2"]` (a lane
+  called NEW-LANE-2 on the board) and never moved; a lane turned into a
+  project left its projects under a parent id that was never created. In
+  shipped 1.1; no suite had ever saved a conversion.
+  - **Brent chose option A: KEEP the project.** "Give X a lane of its own"
+    now inserts a new lane and moves the project into it WHOLE (stages,
+    children, everything) as its first project. Nothing is retired, so logs,
+    milestones and tool checkouts keep a live target. Projects with stages
+    are no longer refused. The question reads "...It moves into the new lane
+    with everything under it, and stays a project."
+  - **`outlineApply(rows, projects, laneMeta, newLaneKey)`** - pure, what
+    Save writes: a converted lane gets a real `custom_<uid>` key, the
+    project's name as label and the first LANE_COLORS accent no other lane
+    uses; a lane turned project gets a real id from **`newProjectId()`** (now
+    the ONE place project ids are made - addProject uses it too; it skips
+    non-numeric ids, ready for long ids) and its children are re-pointed;
+    the retired lane's meta entry goes. `saveOutline` is three setters.
+  - Tests: lifecycle rewritten for A plus 18 checks on outlineApply
+    (real key, label, unused colour, project kept first, nothing lost, no
+    temporary id on the board, no orphan parent, old lane retired, a no-op
+    save writes the same board, newProjectId); mutation-tested three ways.
+    e2e: a new block converts both ways in Chromium and checks storage and
+    the board. (Two harness lines that dereferenced a missing result crashed
+    under mutation - guarded. Keep guarding: `!!x && x.id`.)
+- **The store's doorway (10-20 `v1.1 storage doorway`) - shared board,
+  groundwork step 1.** Every core read and write goes through `ttDb`
+  (`getRaw`/`setRaw`/`remove`, `backend()`), with `load()`/`save()` on top;
+  the backend is anything localStorage-shaped and `ttDbUse(backend)` swaps
+  it. Backup build/apply, Saves (`snapTake`), the reset/load writer and the
+  Practice Board seed flags all go through it; modules reach the same
+  backend via `ttStore`. Saves keep their own IndexedDB (separate store).
+  Tests: tt-tests fails any core line outside the store that names
+  localStorage; boot swaps in a second backend, renders the REAL board from
+  it, round-trips save/load, checks module storage follows, and spies that
+  the browser's localStorage is never touched. Mutation-tested (load()
+  bypassing the doorway, the seed check bypassing it). First paint
+  byte-identical to `v1.1 module help`; e2e 637/637 at that build. (Found on the way: a
+  boot check that dereferenced `load(...)` crashed the harness under a
+  mutation - now guarded.)
+- **Version 1.1 (10-20 `v1.1 module help`).** `APP_VERSION` 1.0 -> 1.1 at
+  Brent's request, ahead of the push. `paint.js` diff against `module help`:
+  the splash's `v1.0` -> `v1.1` and nothing else. Four fast suites re-run
+  green; e2e (637) was green on `module help` and not re-run for the string.
+- **Modules bring their own help (10-20 `module help`).** The `help`
+  field, `helpAll()`, Tool Tracker's topic, boot and e2e following
+  `helpAll()` with Tool Tracker on, p25 run twice. Details in START HERE.
+  New tt-tests cases: the help contract (four fields, every rejection,
+  define throws), `ttMemoryStorage` (copies, never touches localStorage),
+  Tool Tracker's topic (shape, no figures, How > resolves, every ring names
+  a hook the module draws, the stage is the real screen/sheet on sample
+  data and writes nothing).
 
 - **Guides walk like pictures (10-10 `one walk`).** Brent: the "How do I"
   pages should work exactly like "What's on screen". Both are now ONE
@@ -1126,7 +1345,11 @@ recommendation attached; none should be built without Brent saying so.
 - **Mirror `HANDOVER.md` and `MODULES.md` to the claude.ai Project** whenever
   either changes.
 
-## The next piece of work: HELP PAGES
+## The User Manual - BUILT; this is its design record
+
+(Everything in this section has shipped - see Recent work for the builds.
+Read it for the reasoning behind the design.)
+
 
 This is the original goal, and most of the recent baseline work exists to
 serve it:
@@ -1139,14 +1362,14 @@ serve it:
 - a **milestone tracker in the tutorial**, in every state at once, including
   one step that reads met because its target record is closed out
 
-Nothing has been written yet. Worth knowing when writing them: the milestone
+Worth knowing when writing new topics: the milestone
 system, the hold-to-confirm interactions, the closure flow and the drift arcs
 are all recent and none of them are documented anywhere but this file.
 
-### THE USER MANUAL — design settled with Brent, 10-09 (no code yet)
+### THE USER MANUAL — design settled with Brent, 10-09 (since built)
 
 Mocked in the real build (tutorial mode, Neon Dream dark, 390px) and agreed.
-Nothing below is built; the build at the top of this file is unchanged.
+Later changes (topics, search, one walk) are in Recent work.
 
 **Structure.**
 - Settings menu: the **Interactive Tutorial row is replaced by a book-glyph
@@ -1256,10 +1479,9 @@ did NOT need a new practice record after all: it stages the closure sheet for
 Install new workbench, whose Electrical hookup is open - no `TUTORIAL_SEED`
 bump.
 
-**Next, in rough order:** fix the Day Summary repetition (above) · the
-module `help` field in `TT.define()`, with Tool Tracker's own topic as the
-first user - and extend the coverage check to enabled modules' menu rows
-(today it runs with every module off) · "Show me on the practice board" last.
+**Next:** the Day Summary repetition is FIXED (`10-10 day summary tree`).
+The module `help` field is the next phase - see START HERE at the top.
+"Show me on the practice board" last.
 The zoom/pan Try it is live: if dragging the line fails on the iPhone it fails
 there too, and the agreed fallback (arrows on the zoom control) covers both.
 Every new topic adds its anchors as `data-anchor` and gets the boot and e2e
@@ -1271,6 +1493,89 @@ for the three or four topics people actually get stuck on.
 
 ## Multi-user hurdles (flag list - Brent, 10-10)
 
+**NEXT (Brent, 10-20): choose the database/server, and talk about a
+SANDBOX.** Groundwork steps 1-2 are done (doorway, long ids, change
+tracking). Brent: "now we're getting into development that needs to be live
+but not shared" - a separate test server (and probably a separate test copy
+of the app, e.g. a second GitHub Pages path) so live work never touches real
+users' data. Settle that WITH the server choice, before any sync code.
+SANDBOX REQUIREMENT (Brent, 10-20): reachable from ANYWHERE, like the real
+thing - Brent abroad, beta testers in the real world. So: a small always-on
+CLOUD server with a public HTTPS address and sign-in from day one, separate
+from the future live server, plus its own app copy. NOT a home Mac (testers
+would each need to join a Tailscale network; the Mac must stay on). Every
+option discussed can run this way. Claude's suggestion: PocketBase on a
+rented cloud server for the sandbox; keep the sync layer neutral so an
+enterprise Postgres server can follow. Prices not yet checked. Ask Boeing
+IT before Boeing colleagues put work data in the beta.
+HOSTING (10-20): GitHub's terms say Pages "is not intended for or allowed to
+be used as a free web-hosting service to run your online business" - fine
+while the app is free, but the app (and a product website) must move to a
+host that allows commercial use BEFORE paid tiers. Brent also wants a
+product website and hosts another organisation's site; options discussed:
+DigitalOcean App Platform (3 static sites free) for sites + app, with the
+database separate (hosted Supabase Pro, or PocketBase on a Droplet - App
+Platform containers are not for stored files). Keep sites and database apart
+so a database problem never takes the public site down. Open: what the
+other organisation's site is built with / hosted on now.
+
+**Deployment tiers (Brent, 10-20 - direction set, details open).** The
+same app runs three ways; what differs is where shared data lives:
+- PERSONAL: one phone, no server (today's app).
+- TEAM (hosted by Hiatt Studios): teams share through our server, each
+  company walled off in its own workspace. (Confirm this tier exists.)
+- ENTERPRISE (in-house): a company like Boeing runs the server INSIDE its
+  own network; its data never touches our system. The app may be served
+  from their intranet too (it is one static file).
+Consequences: the server must be SELF-HOSTABLE (rules out Firebase); ONE
+server package for our host and theirs; the app joins a workspace by
+server address + sign-in; a WORKSPACE ADMIN (the company's) sits above
+project top admins and can reassign them - which also answers the parked
+"top admin disappears" question; enterprise IT will expect SSO, audit,
+backups, encryption at rest (PocketBase has none at rest; Postgres options
+are more familiar). Open: is there a Team tier; do enterprises host the
+app too; can a phone be in more than one workspace.
+
+**Shared board - decided with Brent 10-20** (design doc "Time Tracker -
+Shared Board & Ownership"; build steps and server plan are there):
+- What is shared is a TOP-LEVEL PROJECT with its whole tree. Lanes stay
+  personal: a shared job sits in whatever lane each person likes.
+- Roles from the FIRST build: admin (one per shared project; shares it,
+  decides who is on it), LEAD (manages a nested project's branch: assigns
+  and edits inside it), assignee (owns one task or nested project), member.
+- ADMINS (revised 10-20): exactly ONE TOP ADMIN per shared project -
+  whoever first shared it. Any number of other admins, but ONLY the top
+  admin approves a new one. The top role can be transferred to another
+  admin; there is only ever one, and the top admin cannot leave until it is
+  handed on. (Superseded: "any admin can make another".)
+- REQUESTS: anyone on a shared project can ask to work on another part
+  (assign me / add me to this branch) or to move up a level (member ->
+  lead -> admin). A request is its own record (who, what, which node, note,
+  waiting/approved/declined, who answered, when), waits in an inbox for
+  those who can approve, and stays in the history. DECIDED: a lead
+  reassigns anyone and approves requests for anything under their own
+  branch; anything above it goes to an admin, who approves or promotes.
+  DECIDED: only
+  the top admin removes an admin; requests notify by BOTH an in-app badge
+  and a phone notification (permission asked; sent by the server, so it
+  arrives with the server step). PARKED (Brent: complicated, come back to
+  it): what happens if the top admin disappears - starting idea, the system
+  notes how long the top admin has been away and a hand-over rule acts on
+  it. So the server records each person's LAST ACTIVE time from the first
+  build.
+- Time stays private: logs, clock, breaks, pay are each person's own;
+  teammates see only a total per shared job.
+- Offline clashes: the later edit wins, field by field; the earlier
+  version is kept in the history.
+- Still open: multiple assignees, who adds/deletes, who closes out, module
+  switch-on per board, and where Boeing work data may live (ask IT before a
+  hosted server; local testing does not wait on it).
+
+- **Which modules are on is per device** (`tt_modules` in localStorage),
+  and so is whether the manual shows a module's topic. On a shared board,
+  switching a module on probably has to be a board (admin) setting, with
+  the help following it. Nothing in the help itself is per-user: it draws
+  from in-memory sample data.
 - **Backup & Saves copies are per device** (IndexedDB) and **a load or a
   reset replaces the whole board**. On a shared board both must become per
   person or admin-only, and copies move server-side.

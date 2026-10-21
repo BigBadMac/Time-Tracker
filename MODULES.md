@@ -32,6 +32,7 @@ A module is a plain object passed to `TT.define()`.
 | `storage` | no | `{ keys: [bare slugs], normalize(store, api) }`. |
 | `settingsPanel` | no | Component rendered inside Themes and Layout. |
 | `reports` | no | `{ section(ctx), text(ctx) }`. |
+| `help` | no | `{ topic, pictures, guides, stage(stage, ctx) }` - the module's pages in the User Manual. See **Help** below. |
 
 Any other field is rejected — an unknown key is a typo, not a feature.
 `TT.define()` throws on anything malformed: a broken module is a build-time
@@ -53,6 +54,51 @@ mistake, and failing at load beats shipping something that half-works.
 - **Normalizers are idempotent** and never throw. They run once at boot, before
   the first paint, for enabled *and* disabled modules — data left behind by a
   module the user switched off still has to be valid when they switch it back on.
+
+## Help
+
+A module brings its own pages for the User Manual, so the manual never goes
+stale as modules are added. The shapes are the core registries' own:
+
+```js
+help: {
+  topic: "Tool Tracker",                 // its heading in Guides
+  pictures: { "tools:screen": { title, blurb, covers, back, stage:{ kind, ... },
+                                parts:[{ anchor, side, label, text, guide? }] } },
+  guides:   { "tools:out":    { title, covers?, steps:[{ stage:{ kind, ... },
+                                ring, side, title, text }] } },
+  stage: function(stage, ctx){ /* return the element for this stage */ }
+}
+```
+
+- **Ids are namespaced `<id>:<slug>`** (`tools:screen`), so they can never
+  collide with a core id or another module's. A bare key, or another
+  module's prefix, is rejected at load. A part's `guide` names a full id.
+- Every picture needs a `stage` and at least one part; every guide step
+  needs `stage`, `ring`, `title` and `text`. There are no practice-only steps
+  in a module. `stage` is required once there is anything to draw.
+- **`stage(stage, ctx)` draws the module's own screens from SAMPLE data.**
+  `ctx` has the screen-context shape on the practice board's projects, but
+  `ctx.storage` is an **in-memory** store: write the sample into it and render
+  the real screen. Never reach for the real store - staging must write
+  nothing, and the boot suite fails a build in which it does. The `kind`s
+  and any other keys on a stage are the module's own business; the manual
+  adds `module:<id>` itself.
+- **A module stage is staged as a sheet at phone width** (it is a
+  `ui.Modal`). Add `sheet:false` to a stage that draws something else, or
+  `width:<n>` for a different natural width. The core's kinds and sizes are
+  never consulted for a module stage.
+- **Anchors are `data-anchor` attributes** on the module's controls. A
+  `Toggle` answers to `set-<name>`, and `ui.Modal` takes `saveAnchor` for its
+  Save button.
+- Put `covers:["<label>"]` on the entry that explains the module's menu row.
+  The e2e coverage check runs once with the module on and fails naming any
+  row nothing covers.
+- **No figures in the prose.** Sample data is dated relative to now, so any
+  number in the words would be wrong tomorrow.
+- **The topic is shown only while the module is on.** The manual reads
+  everything through `helpAll()` (core plus enabled modules); search, the
+  index, the walk and the stages all follow it.
 
 ## Context
 
@@ -99,6 +145,8 @@ ctx.storage.clear()            // only this module
 - **Format** — `fmt.dur time date hours money pad`
 - **Time and pay** — `time.periodRange periodLabel payCycleRange scheduledMinutes scheduledToDate schNetMinutes startOf* addDays dayKeyOf isoDate toMin DAY_KEYS DAY_LABELS`
 - **Data** — `data.uid findProj getChildren getDescendantIds getMeta`
+  (`data.uid()` makes LONG ids since 10-20 - a UUID where the browser has one.
+  Never assume an id's length, or that a project id is a number.)
 
 ## Skeleton
 
@@ -116,6 +164,16 @@ TT.define({
       return React.createElement(ctx.api.ui.Modal,
         { title:"Tools", onClose:ctx.onClose, cancelLabel:"Close" },
         /* ... */);
+    }
+  },
+  help: {
+    topic: "Tool Tracker",
+    pictures: { "tools:screen": { title:"The Tools screen", covers:["Tools"],
+      stage:{ kind:"screen" }, parts:[{ anchor:'[data-anchor="tools-out"]',
+      label:"What is out", text:"Tools on the floor, and who has them." }] } },
+    stage: function(stage, ctx){
+      ctx.storage.set("items", [{ id:"s1", name:"Torque wrench" }]); // sample, in memory
+      return React.createElement(ToolScreen, ctx);
     }
   },
   storage: {
@@ -195,6 +253,22 @@ later is a one-line change; the reverse would strand records.
 
 Removing a tool keeps its history and checks in anything still out.
 
+## Help
+
+Topic **Tool Tracker** (`TOOLS_HELP`), shown in Guides while the module is on:
+
+- picture `tools:screen` - the Out tab: what is out, the Out / All / History
+  toggle, an out record, Check in. Covers the **Tools** menu row.
+- picture `tools:checkout` - the Check Out sheet: who, which job, note, Check Out.
+- guide `tools:out` - Check a tool out (All tab, Add tool, Check out, who,
+  job, Check Out).
+- guide `tools:back` - Check a tool back in (Out tab, the record, Check in,
+  History).
+
+`toolsHelpStage` draws kinds `screen` (with `view` out / all / log, through
+`ctx.initialView`) and `checkout`, from `toolsHelpSample`: three tools, one
+out, two returned, times relative to now, jobs from the practice board.
+
 ## Reports
 
 Both hooks measure against the window the user is already viewing, clipping each
@@ -206,13 +280,14 @@ say, so Reports is untouched until the module is used.
 ## Tests
 
 ```
-node tt-tests.js time-tracker.jsx     # 821 assertions, 146 cases
+node tt-tests.js time-tracker.jsx     # 1809 assertions, 208 cases
 python3 build.py --src time-tracker.jsx --shell index.html --out index.html \
         --stamp "MM-DD descriptor"
 python3 extract.py index.html /tmp/app_only.js
-node boot.js /tmp/app_only.js         # 71 checks against the built file
+node boot.js /tmp/app_only.js         # 319 checks against the built file
 node shift.js /tmp/app_only.js        # 46 - work days, shifts, overtime
-node lifecycle.js /tmp/app_only.js    # 130 - project lifecycle and nesting
+node lifecycle.js /tmp/app_only.js    # 573 - project lifecycle and nesting
+node e2e.js index.html                # 650 - the real app in Chromium, ~8 minutes
 node paint.js /tmp/app_only.js        # first-paint markup, for diffing builds
 ```
 
@@ -234,6 +309,8 @@ a fault in a tab that is not currently visible still fails the boot check.
   small additions: `data.getMeta`, `activeId`/`activeName` on the screen
   context, and reports hooks now receiving a full module context (so they read
   through `ctx.storage` like everything else) instead of the bare report window.
+- **Help field** — modules bring their own User Manual pages; Tool Tracker
+  ships its topic. Done (10-20).
 - **Phase 4** — Project Builder, last, because it extends the core project
   entity rather than sitting beside it. Materials Tracker is the cheap one to do
   first if you want another: it is the same shape as Tool Tracker with
@@ -253,3 +330,5 @@ The core has moved on underneath the platform. Modules see these through `TT`:
   `ctx.api` alongside the report window — rather than the bare window.
 - **`data.getMeta`** is exposed for lane colours.
 - **Form fields must be 16px** or iOS Safari zooms on focus and stays zoomed.
+- **Modules bring their own help** (the `help` field, above). A module with a
+  menu row and no help fails the e2e coverage check once it is switched on.

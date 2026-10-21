@@ -161,7 +161,8 @@ function loadPlatform(opts) {
   const body = platformBlock() + "\nreturn { TT, ttModKey, ttModStorage, ttValidateModule, ttDefineModule," +
     " ttModules, ttModule, ttEnabledMap, ttModuleEnabled, ttSetModuleEnabled, ttEnabledModules," +
     " ttBootModules, ttModuleNav, ttModuleScreen, ttModuleContext, ttSettingsPanels," +
-    " ttReportSections, ttReportText, TT_REGISTRY, TT_BOOTED, TT_ENABLED_KEY, TT_MOD_PREFIX };";
+    " ttReportSections, ttReportText, TT_REGISTRY, TT_BOOTED, TT_ENABLED_KEY, TT_MOD_PREFIX," +
+    " ttMemoryStorage, ttValidateHelp, TT_HELP_FIELDS };";
   const fn = new Function(...names, body);
   const api = fn(...names.map((n) => stubs[n]));
   api.storage = storage;
@@ -538,6 +539,46 @@ test("everything the platform writes lives under the backup prefix", () => {
   ok(p.TT_ENABLED_KEY.indexOf("tt_") === 0, "the enablement map is tt_-prefixed");
 });
 
+// ---- the store: one doorway to the board's data (10-20) -------------------
+// The seam the shared board is built on. Everything the core keeps goes
+// through ttDb; its backend is swappable, so a sync layer can sit under it.
+test("the core reaches its stored data only through ttDb", () => {
+  const src = source();
+  const a = src.indexOf("// ==== TT PLATFORM BEGIN ===="), b = src.indexOf("// ==== TT PLATFORM END ====");
+  const d0 = src.indexOf("// ---------------- The store: one doorway"), d1 = src.indexOf("function save(key, val){");
+  ok(a > 0 && b > a && d0 > 0 && d1 > d0, "the platform block and the store block are where they should be");
+  const core = (src.slice(0, d0) + src.slice(d1, a) + src.slice(b)).replace(/\/\/.*$/gm, "");
+  const hits = core.split("\n").map((l, i) => [i, l]).filter(([i, l]) => /\blocalStorage\b/.test(l));
+  eq(hits.length, 0, "no core code outside the store names localStorage" + (hits.length ? "  [" + hits.map((h) => h[1].trim().slice(0, 60)).join(" | ") + "]" : ""));
+  const store = src.slice(d0, d1 + 200);
+  eq((store.replace(/\/\/.*$/gm, "").match(/\blocalStorage\b/g) || []).length, 1, "the store names it once: the default backend");
+  ok(/function load\(key, def\)\{ try\{ var v=ttDb\.getRaw\(key\);/.test(src), "load() reads through the store");
+  ok(/function save\(key, val\)\{ try\{ ttDb\.setRaw\(key, JSON\.stringify\(val\)\); \}/.test(src), "save() writes through it");
+  eq((src.match(/^function load\(/gm) || []).length, 1, "load is defined once");
+  eq((src.match(/^function save\(/gm) || []).length, 1, "save is defined once");
+  eq((src.match(/^function ttDbUse\(/gm) || []).length, 1, "the backend can be swapped, in one place");
+  ok(!/indexedDB/.test(src.slice(d0, d1)), "the store is the board's data; Saves keep their own IndexedDB");
+  const plat = src.slice(a, b);
+  ok(/if\(typeof ttDbBackend==="function"\) return ttDbBackend\(\);/.test(plat), "modules reach the same backend through ttStore");
+});
+
+// ---- ids and change tracking (10-20, shared board step 2) ------------------
+test("records get long ids, and the real board is change-tracked at save time", () => {
+  const src = source();
+  ok(/crypto\.randomUUID\(\)/.test(src.slice(src.indexOf("function uid(){"), src.indexOf("function uid(){") + 500)),
+    "uid() uses the browser's UUID where it has one");
+  ok(!/function uid\(\)\{ return Math\.random\(\)\.toString\(36\)\.slice\(2,9\); \}/.test(src), "the old 7-character uid is gone");
+  ok(/function newProjectId\(projects\)\{ return uid\(\); \}/.test(src), "a new project id is a long id too");
+  eq((src.match(/Math\.max\(mx,\s*p\.id\)/g) || []).length, 0, "no 'highest id + 1' left anywhere");
+  ok(/var id=newProjectId\(projects\);/.test(src), "Add takes its id from the one place");
+  [["tt_projects","realProjects"],["tt_logs","realLogs"],["tt_disruptions","realDist"],["tt_breaks","realBreaks"]].forEach(([k, v]) =>
+    ok(src.indexOf('useEffect(function(){ saveTracked("' + k + '",' + v + '); },[' + v + ']);') >= 0, k + " is saved through saveTracked"));
+  ["tt_test_projects","tt_test_logs","tt_test_disruptions","tt_test_breaks"].forEach((k) =>
+    ok(src.indexOf('useEffect(function(){ save("' + k + '",') >= 0 && src.indexOf('saveTracked("' + k + '"') < 0, k + " is NOT tracked: the Practice Board is never shared"));
+  eq((src.match(/saveTracked\("/g) || []).length, 4, "exactly the four real collections are tracked");
+  ok(/var TT_TRACKED = \["tt_projects","tt_logs","tt_disruptions","tt_breaks"\];/.test(src), "and the list says so");
+});
+
 test("the platform itself reaches localStorage in exactly one place", () => {
   const block = platformBlock().replace(/\/\/.*$/gm, "");   // prose does not count
   const hits = (block.match(/localStorage/g) || []).length;
@@ -613,6 +654,77 @@ test("boot migrates a v1 save forward, and only once", () => {
   const after = st.snapshot();
   p.TT.boot();
   same(st.snapshot(), after, "a second boot is inert");
+});
+
+// ---- the help field -----------------------------------------------------------
+// A module brings its own pages for the User Manual. Same shapes as the core
+// registries, ids namespaced <id>:<key>, and a stage renderer of its own.
+function helpSpec(extra) {
+  return Object.assign({
+    topic: "Tools",
+    stage: function (stage, ctx) { return { staged: stage.kind }; },
+    pictures: { "tools:screen": { title: "The screen", stage: { kind: "screen" },
+      parts: [{ anchor: '[data-anchor="a"]', label: "A", text: "Words." }] } },
+    guides: { "tools:out": { title: "Check out",
+      steps: [{ stage: { kind: "screen" }, ring: '[data-anchor="a"]', title: "Tap", text: "Words." }] } }
+  }, extra || {});
+}
+function withHelp(help) { return Object.assign(refModule(), { help: help }); }
+
+test("a module may bring its own help, held to the same contract", () => {
+  const p = loadPlatform();
+  ok(p.TT_HELP_FIELDS.join() === "topic,pictures,guides,stage", "help has exactly four fields");
+  same(p.TT.validate(withHelp(helpSpec())), [], "a well-formed help block is conformant");
+  const m = p.TT.define(withHelp(helpSpec()));
+  eq(m.help.topic, "Tools", "and registration keeps it");
+  eq(typeof m.help.stage, "function", "with its stage renderer");
+  const p2 = loadPlatform();
+  eq(p2.TT.define(refModule()).help, null, "a module without help registers with help:null");
+});
+
+test("help that breaks the contract is rejected at load", () => {
+  const p = loadPlatform();
+  const bad = (h, re, label) => {
+    const errs = p.TT.validate(withHelp(h));
+    ok(errs.some((e) => re.test(e)), label + "  [" + errs.join(" | ") + "]");
+    let threw = false; try { loadPlatform().TT.define(withHelp(h)); } catch (e) { threw = true; }
+    ok(threw, label + " - and define throws");
+  };
+  bad([], /help must be an object/, "an array is not a help block");
+  bad(helpSpec({ extra: 1 }), /unknown help field: extra/, "an unknown help field is a typo");
+  bad(helpSpec({ topic: " " }), /help\.topic is required/, "a topic is required");
+  bad(helpSpec({ stage: undefined }), /help\.stage is required/, "pictures need a stage renderer");
+  bad(helpSpec({ stage: "x" }), /help\.stage must be a function/, "the renderer is a function");
+  bad(helpSpec({ pictures: { screen: { title: "T", stage: {}, parts: [{}] } } }), /key must be tools:<slug>: screen/,
+    "a bare key could collide with the core, so ids are namespaced");
+  bad(helpSpec({ pictures: { "other:screen": { title: "T", stage: {}, parts: [{}] } } }), /key must be tools:<slug>/,
+    "and namespaced with the module's OWN id");
+  bad(helpSpec({ pictures: { "tools:Bad Key": { title: "T", stage: {}, parts: [{}] } } }), /key must be tools:<slug>/,
+    "the part after the colon is a slug");
+  bad(helpSpec({ pictures: { "tools:screen": { title: "T", parts: [{}] } } }), /tools:screen needs a stage/,
+    "a picture needs a stage");
+  bad(helpSpec({ pictures: { "tools:screen": { title: "T", stage: {}, parts: [] } } }), /tools:screen needs parts/,
+    "and something to point at");
+  bad(helpSpec({ guides: { "tools:out": { steps: [] } } }), /tools:out needs a title/, "a guide needs a title");
+  bad(helpSpec({ guides: { "tools:out": { title: "T", steps: [{ stage: {}, title: "x", text: "y" }] } } }),
+    /tools:out step 1 needs stage, ring, title and text/, "every step rings something");
+  bad(helpSpec({ guides: { "tools:out": { title: "T", steps: [{ ring: "[x]", title: "x", text: "y" }] } } }),
+    /step 1 needs stage/, "and is drawn on a stage - a module has no practice-only steps");
+});
+
+test("a staged module draws from memory, never from storage", () => {
+  const st = memStorage({ tt_logs: "[]" });
+  const p = loadPlatform({ storage: st });
+  const before = JSON.stringify(st.snapshot());
+  const mem = p.ttMemoryStorage();
+  eq(mem.get("tools", "dflt"), "dflt", "missing reads give the default");
+  ok(mem.set("tools", [{ id: "a" }]) === true, "a write reports success");
+  const got = mem.get("tools", []); got.push({ id: "b" });
+  eq(mem.get("tools", []).length, 1, "reads are copies, like JSON round-tripped storage");
+  same(mem.keys(), ["tools"], "keys lists what was set");
+  mem.remove("tools"); same(mem.keys(), [], "remove removes");
+  mem.set("a", 1); mem.set("b", 2); mem.clear(); same(mem.keys(), [], "clear clears");
+  eq(JSON.stringify(st.snapshot()), before, "and not one byte reached localStorage");
 });
 
 test("a module is invisible until it is switched on", () => {
@@ -1521,8 +1633,8 @@ test("leaving the tutorial keeps your work; resetting is its own, held act", () 
   has(/var TUTORIAL_SEED = "/, "the baseline carries a version");
   has(/if\(seen!==TUTORIAL_SEED && touched!=="1"\) resetTutorial\(\);/,
     "stale tutorial data is replaced on load ONLY while it is untouched");
-  has(/localStorage\.setItem\("tt_test_touched","1"\);/, "anything changed in there marks it as theirs");
-  has(/localStorage\.removeItem\("tt_test_touched"\);/, "and a reset makes it the shipped copy again");
+  has(/ttDb\.setRaw\("tt_test_touched","1"\);/, "anything changed in there marks it as theirs");
+  has(/ttDb\.remove\("tt_test_touched"\);/, "and a reset makes it the shipped copy again");
 });
 test("a render crash names itself instead of saying Script error", () => {
   // From the phone: "Uncaught Error: Script error." at line 0:0 - no message,
@@ -2964,7 +3076,8 @@ function loadTools(opts) {
   const body = platformBlock() + moduleBlock() +
     "\nreturn { TT, TOOLS_ID, toolsNormalize, toolsOpenMap, toolsOpenList, toolsSpan," +
     " toolsInWindow, toolsProjectList, toolsReportStats, toolsReportText, toolsReportSection," +
-    " ToolsScreen, ToolsCheckoutSheet, ToolsEditorSheet, ToolsConfirmSheet };";
+    " ToolsScreen, ToolsCheckoutSheet, ToolsEditorSheet, ToolsConfirmSheet," +
+    " TOOLS_HELP, toolsHelpStage, toolsHelpSample, ttMemoryStorage };";
   const api = new Function(...names, body)(...names.map((n) => stubs[n]));
   api.storage = storage;
   api.events = events;
@@ -2994,6 +3107,68 @@ test("Tool Tracker registers against the contract with no complaints", () => {
   same(p.TT.validate({ id: "tools2", title: m.title, version: m.version, summary: m.summary,
     nav: m.nav, screens: m.screens, storage: m.storage, reports: m.reports }), [],
     "the same shape re-validates clean");
+});
+
+// ---- Tool Tracker's pages in the User Manual ---------------------------------
+test("Tool Tracker brings its own topic: a picture of each screen, guides out and back in", () => {
+  const p = loadTools();
+  const h = p.TT.module("tools").help;
+  ok(h === p.TOOLS_HELP, "registered through the help field");
+  eq(h.topic, "Tool Tracker", "under its own topic");
+  same(Object.keys(h.pictures), ["tools:screen", "tools:checkout"], "pictures of the screen and the checkout sheet");
+  same(Object.keys(h.guides), ["tools:out", "tools:back"], "guides for checking out and checking back in");
+  ok(h.pictures["tools:screen"].covers.indexOf("Tools") >= 0, "the Tools menu row is covered");
+  const prose = [];
+  Object.keys(h.pictures).forEach((k) => { const pic = h.pictures[k]; prose.push(pic.title, pic.blurb);
+    pic.parts.forEach((pt) => prose.push(pt.label, pt.text)); });
+  Object.keys(h.guides).forEach((k) => { prose.push(h.guides[k].title);
+    h.guides[k].steps.forEach((st) => prose.push(st.title, st.text)); });
+  same(prose.filter((t) => /\d/.test(t)), [], "no figure in any of it - the sample's times move with the clock");
+  const how = [];
+  Object.keys(h.pictures).forEach((k) => h.pictures[k].parts.forEach((pt) => { if (pt.guide) how.push(pt.guide); }));
+  ok(how.length > 0 && how.every((g) => !!h.guides[g]), "every How > leads to one of its own guides");
+});
+
+test("every ring and anchor names a hook the module really draws", () => {
+  const src = moduleBlock();
+  const p = loadTools();
+  const h = p.TOOLS_HELP;
+  const sels = [];
+  Object.keys(h.pictures).forEach((k) => h.pictures[k].parts.forEach((pt) => sels.push(pt.anchor)));
+  Object.keys(h.guides).forEach((k) => h.guides[k].steps.forEach((st) => sels.push(st.ring)));
+  sels.forEach((q) => {
+    const m = /^\[data-anchor="([^"]+)"\]$/.exec(q);
+    ok(!!m, q + " is a data-anchor selector");
+    if (!m) return;
+    const v = m[1];
+    const drawn = v.indexOf("set-") === 0
+      ? src.indexOf('name:"' + v.slice(4) + '"') >= 0                       // a Toggle answers to set-<name>
+      : src.indexOf('"data-anchor":"' + v + '"') >= 0 || src.indexOf('saveAnchor:"' + v + '"') >= 0 ||
+        src.indexOf('"' + v + '")') >= 0;                                   // passed to actionBtn
+    ok(drawn, v + " is drawn by the module");
+  });
+});
+
+test("Tool Tracker's stage draws sample data in memory and writes nothing", () => {
+  const st = memStorage({ tt_mod_tools_tools: "[]" });
+  const p = loadTools({ storage: st });
+  const before = JSON.stringify(st.snapshot());
+  const ctx = () => ({ moduleId: "tools", storage: p.ttMemoryStorage(), api: p.TT, projects: [], laneMeta: null, onClose() {} });
+  const scr = p.toolsHelpStage({ module: "tools", kind: "screen", view: "all" }, ctx());
+  eq(scr.type, p.ToolsScreen, "the screen stage is the real ToolsScreen");
+  eq(scr.props.initialView, "all", "opened on the tab the stage asks for");
+  eq(p.toolsHelpStage({ module: "tools", kind: "screen" }, ctx()).props.initialView, "out", "Out when it does not say");
+  ok(scr.props.storage.get("tools", []).length > 0 && scr.props.storage.get("checkouts", []).length > 0,
+    "seeded with sample tools and checkouts");
+  ok(scr.props.storage.get("checkouts", []).some((c) => c["in"] === null), "one of them still out");
+  eq(scr.props.activeId, 103, "with a practice-board job running, so the checkout default shows");
+  const sheet = p.toolsHelpStage({ module: "tools", kind: "checkout" }, ctx());
+  eq(sheet.type, p.ToolsCheckoutSheet, "the checkout stage is the real sheet");
+  eq(p.toolsHelpStage({ module: "tools", kind: "nonsense" }, ctx()), null, "an unknown stage draws nothing");
+  // Whether the hooks are really drawn is boot's job: it renders every stage for real.
+  eq(JSON.stringify(st.snapshot()), before, "and the real store was never touched");
+  ok(!/localStorage|ctx\.api\.storage\(|TT\.storage\(/.test(moduleBlock().slice(moduleBlock().indexOf("function toolsHelpSample"),
+    moduleBlock().indexOf("var TOOLS_HELP"))), "the stage reaches no store but the one it is handed");
 });
 
 test("the module writes only inside its own namespace", () => {
@@ -3514,7 +3689,8 @@ test("Backup & Saves: copies live in IndexedDB, and every reset or load can be u
   ok(/new CompressionStream\("deflate-raw"\)/.test(eng) && /enc:"none", data:str/.test(eng), "compressed where the browser can, plain where it cannot");
   ok(/MULTI-USER HURDLE/.test(eng), "and it carries its multi-user flag");
   const then = slice("function snapThenReload(why, write, setMsg){", "function SnapTierSheet(props){");
-  ok(then.indexOf("snapTake(why)") < then.indexOf("write(localStorage)"), "a reset or load takes its backup BEFORE it writes");
+  ok(then.indexOf("write(ttDb.backend())") > 0 && then.indexOf("snapTake(why)") < then.indexOf("write(ttDb.backend())"),
+    "a reset or load takes its backup BEFORE it writes - through the store's doorway");
   ok(/could not take a backup first, so nothing was changed/i.test(then), "and writes nothing if that backup fails");
   ok(/snapThenReload\("before-reset"/.test(s) && /snapThenReload\("before-load"/.test(s), "both go through it");
   has(/if\(!testMode\) snapAfterClockOut\.current=true;/, "clock-out asks for the day's backup - never on the practice board");
@@ -3540,7 +3716,7 @@ test("the manual is by topic, with a pinned search on every page", () => {
   const idx = slice("var HELP_INDEX = [", "function helpEntry(");
   ok(/topic:"Time Settings"/.test(idx) && /\["picture","paywork"\]/.test(idx) && /\["guide","setpay"\]/.test(idx), "Time Settings is a topic holding its pictures and guides");
   const docs = slice("function helpSearchDocs(){", "function helpSearch(q){");
-  ok(/Object\.keys\(HELP_PICTURES\)/.test(docs) && /Object\.keys\(HELP_GUIDES\)/.test(docs), "search reads the registries, so new help is searchable at once");
+  ok(/A=helpAll\(\)/.test(docs) && /Object\.keys\(A\.pictures\)/.test(docs) && /Object\.keys\(A\.guides\)/.test(docs), "search reads the registries (core and enabled modules), so new help is searchable at once");
   ok(/pic\.parts\.forEach/.test(docs) && /g\.steps\.forEach/.test(docs), "every part and every step, not just titles");
   const bar = slice("function HelpSearchBar(props){", "function HelpSearchResults(props){");
   ok(/position:"sticky", top:top\+"px"/.test(bar), "the search is pinned");

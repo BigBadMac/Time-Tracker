@@ -18,7 +18,7 @@
 </head>
 <body>
 <pre id="err"></pre>
-<div id="root"><div id="boot">Time Tracker build 10-09 every row covered<br>
+<div id="root"><div id="boot">Time Tracker build 10-20 v1.2 ids and tracking<br>
 HTML loaded &#10003; &mdash; starting scripts&hellip;<br>
 <span style="font-size:11px;opacity:.7">If this message never goes away, the scripts below it failed to run.<br>
 If you cannot see this message at all, the file itself is not being displayed.</span></div></div>
@@ -17258,7 +17258,15 @@ var DEFAULT_DIST_PRESETS = ["Phone Call","Walk-in Visitor","Crew Question","Mach
 
 // ---- HELPERS -----------------------------------------------------------------
 function pad(n){ return String(n).padStart(2,"0"); }
-function uid(){ return Math.random().toString(36).slice(2,9); }
+// A record id. LONG and random, so ids made on different phones never meet -
+// the shared board needs that (HANDOVER: multi-user). A standard UUID where
+// the browser has one, otherwise 24 random base-36 characters. Ids made before
+// 10-20 are 7 characters and keep working: nothing reads an id's shape.
+function uid(){
+  try{ if(typeof crypto!=="undefined" && crypto && typeof crypto.randomUUID==="function") return crypto.randomUUID(); }catch(e){}
+  var s=""; while(s.length<24) s+=Math.random().toString(36).slice(2);
+  return s.slice(0,24);
+}
 function fmtDur(ms, short){
   if(TIME_INC==="tenths"){
     // decimal hours to the hundredth, never days: 1h 30m -> "1.50h"
@@ -17285,8 +17293,70 @@ function workDayOf(ts){ return new Date(ts).toDateString(); }
 function todayStr(){ return workDayOf(Date.now()); }
 function sameWorkDay(ts, dayKey){ return !!ts && workDayOf(ts)===dayKey; }
 function haptic(pattern){ try{ if(navigator&&navigator.vibrate) navigator.vibrate(pattern||10); }catch(e){} }
-function load(key, def){ try{ var v=localStorage.getItem(key); return v?JSON.parse(v):def; }catch(e){ return def; } }
-function save(key, val){ try{ localStorage.setItem(key,JSON.stringify(val)); }catch(e){} }
+// ---------------- The store: one doorway to the board's data ----------------
+// Every core read and write of the board goes through ttDb, never straight to
+// localStorage. The backend is anything shaped like localStorage (getItem,
+// setItem, removeItem, key, length) - the browser's own by default. A sync
+// layer, or a test, swaps it with ttDbUse(); nothing above this line knows.
+// This is the seam the shared board is built on (HANDOVER: multi-user).
+var TT_DB_BACKEND = null;          // null = the browser's localStorage
+function ttDbBackend(){
+  if(TT_DB_BACKEND) return TT_DB_BACKEND;
+  try{ return localStorage; }catch(e){ return null; }
+}
+function ttDbUse(backend){ TT_DB_BACKEND = backend || null; return ttDbBackend(); }
+var ttDb = {
+  backend: ttDbBackend,
+  // Raw strings: for the few keys stored as plain text rather than JSON.
+  getRaw: function(k){ try{ var b=ttDbBackend(); return b ? b.getItem(k) : null; }catch(e){ return null; } },
+  setRaw: function(k, v){ try{ var b=ttDbBackend(); if(!b) return false; b.setItem(k, v); return true; }catch(e){ return false; } },
+  remove: function(k){ try{ var b=ttDbBackend(); if(b) b.removeItem(k); }catch(e){} }
+};
+// JSON reads and writes. A missing, empty or corrupt value reads as the
+// default; a failed write (quota, private mode) is swallowed, as it always was.
+function load(key, def){ try{ var v=ttDb.getRaw(key); return v?JSON.parse(v):def; }catch(e){ return def; } }
+function save(key, val){ try{ ttDb.setRaw(key, JSON.stringify(val)); }catch(e){} }
+
+// ---------------- Change tracking (the shared board, step 2) ----------------
+// A sync layer has to know what changed and what went. Both are worked out
+// HERE, at save time, against what is already stored - so not one of the
+// app's setters has to remember to stamp anything:
+//   - a record that is new, or whose content changed, gets updatedAt = now;
+//   - an unchanged record is written back exactly as stored (its updatedAt,
+//     or none: absent means "not changed since tracking began");
+//   - a record that has gone leaves a tombstone { id, at } under tt_gone.
+// Only the real board is tracked. The Practice Board is never shared.
+// Record-level for now; a field-level merge (the agreed "later edit wins per
+// field") can diff two versions when the sync layer exists.
+var TT_TRACKED = ["tt_projects","tt_logs","tt_disruptions","tt_breaks"];
+var TT_GONE_KEY = "tt_gone", TT_GONE_MAX = 1000;   // per collection, oldest dropped
+function ttContent(r){ var c=Object.assign({}, r); delete c.updatedAt; return JSON.stringify(c); }
+function ttStamp(prev, next, now){
+  var before={};
+  (prev||[]).forEach(function(r){ if(r && r.id!=null) before[String(r.id)]=r; });
+  var kept={};
+  var list=(next||[]).map(function(r){
+    if(!r || typeof r!=="object" || r.id==null) return r;
+    var k=String(r.id), old=before[k]; kept[k]=true;
+    if(old && ttContent(old)===ttContent(r)) return old;
+    return Object.assign({}, r, { updatedAt:now });
+  });
+  var gone=Object.keys(before).filter(function(k){ return !kept[k]; })
+                 .map(function(k){ return { id:before[k].id, at:now }; });
+  return { list:list, gone:gone };
+}
+// save() for a tracked collection. Anything else goes through plain save().
+function saveTracked(key, list){
+  var prev=load(key, null);
+  var res=ttStamp(Array.isArray(prev) ? prev : [], list, Date.now());
+  save(key, res.list);
+  if(res.gone.length){
+    var all=load(TT_GONE_KEY, {});
+    if(!all || typeof all!=="object" || Array.isArray(all)) all={};
+    all[key]=(Array.isArray(all[key]) ? all[key] : []).concat(res.gone).slice(-TT_GONE_MAX);
+    save(TT_GONE_KEY, all);
+  }
+}
 
 // ---------------- Backup & restore ----------------
 // Every app key is tt_-prefixed, so a backup is simply every tt_* key with its
@@ -17469,7 +17539,7 @@ function snapUnpack(rec){
 // before-reset | before-load | manual. opts: { name, replaceId }.
 function snapTake(why, opts, storage){
   opts=opts||{};
-  var st=storage||localStorage, at=Date.now();
+  var st=storage||ttDb.backend(), at=Date.now();
   var data=snapCollect(st), json=JSON.stringify(data);
   var sched=snapParse(data,"tt_settings",{}); sched=sched&&sched.workSchedule;
   var ids=snapIdsFor(why, at, weekStartOf(sched));
@@ -18182,7 +18252,7 @@ function Modal(props){
         // The rule: no sheet draws an action row inline any more.
         props.actions && React.createElement(ModalActions, null, props.actions),
         !props.ownActions && React.createElement(ModalActions, null,
-          props.onSave && React.createElement("button", { onClick:props.onSave, style:MODAL_SAVE() }, props.saveLabel||"Save"),
+          props.onSave && React.createElement("button", { onClick:props.onSave, "data-anchor":props.saveAnchor, style:MODAL_SAVE() }, props.saveLabel||"Save"),
           React.createElement("button", { onClick:props.onClose, style:MODAL_CANCEL() }, props.cancelLabel||"Cancel")
         )
       )
@@ -19536,25 +19606,49 @@ var HELP_INDEX = [
   { id:"look", topic:"Look & add-ons", items:[["picture","themes"],["picture","layout"],["picture","extensions"]] },
   { id:"practice", topic:"Practise", flat:true, items:[["practice","gestures"]] }
 ];
-function helpEntry(kind, id){ return kind==="picture" ? HELP_PICTURES[id] : kind==="practice" ? HELP_PRACTICE[id] : HELP_GUIDES[id]; }
+// Every registry the manual reads: the core's, then each ENABLED module's. A
+// module's keys arrive already namespaced (`tools:screen`), so the merge cannot
+// collide with a core id, and a module that is switched off is simply not here.
+// Module topics go after the core topics and before the flat Practise topic.
+function helpAll(){
+  var pictures=Object.assign({}, HELP_PICTURES), guides=Object.assign({}, HELP_GUIDES);
+  var topics=HELP_INDEX.filter(function(t){ return !t.flat; });
+  var flat=HELP_INDEX.filter(function(t){ return t.flat; });
+  ttEnabledModules().forEach(function(m){
+    var h=m.help; if(!h) return;
+    var items=[];
+    Object.keys(h.pictures||{}).forEach(function(id){ pictures[id]=helpTagPicture(m.id, h.pictures[id]); items.push(["picture", id]); });
+    Object.keys(h.guides||{}).forEach(function(id){ guides[id]=helpTagGuide(m.id, h.guides[id]); items.push(["guide", id]); });
+    if(items.length) topics.push({ id:"module-"+m.id, topic:h.topic, items:items });
+  });
+  return { pictures:pictures, guides:guides, practice:HELP_PRACTICE, index:topics.concat(flat), panels:HELP_PANELS };
+}
+// A module's stages are tagged with its id so the manual can hand them to that
+// module's own stage renderer. The tag is added here; a module never writes it.
+function helpTagStage(id, st){ return st ? Object.assign({ module:id }, st) : st; }
+function helpTagPicture(id, p){ return Object.assign({}, p, { stage:helpTagStage(id, p.stage) }); }
+function helpTagGuide(id, g){
+  return Object.assign({}, g, { steps:g.steps.map(function(st){ return Object.assign({}, st, { stage:helpTagStage(id, st.stage) }); }) });
+}
+function helpEntry(kind, id){ var A=helpAll(); return kind==="picture" ? A.pictures[id] : kind==="practice" ? A.practice[id] : A.guides[id]; }
 function helpCount(kind, d){ return kind==="picture" ? d.parts.length+" parts" : kind==="practice" ? d.panels.length+" to try" : d.steps.length+" steps"; }
 // ---- search -----------------------------------------------------------------
 // Every title, picture part and step, read off the registries - so a new
 // picture or guide is searchable the moment it exists.
 function helpSearchDocs(){
-  var out=[];
-  Object.keys(HELP_PICTURES).forEach(function(id){
-    var pic=HELP_PICTURES[id];
+  var out=[], A=helpAll();
+  Object.keys(A.pictures).forEach(function(id){
+    var pic=A.pictures[id];
     out.push({ kind:"picture", id:id, at:0, title:pic.title, where:"What\u2019s on screen", text:pic.blurb||"" });
     pic.parts.forEach(function(pt, i){ out.push({ kind:"picture", id:id, at:i, title:pt.label, where:pic.title+" \u00B7 part "+(i+1), text:pt.text }); });
   });
-  Object.keys(HELP_GUIDES).forEach(function(id){
-    var g=HELP_GUIDES[id];
+  Object.keys(A.guides).forEach(function(id){
+    var g=A.guides[id];
     out.push({ kind:"guide", id:id, at:0, title:g.title, where:"How do I\u2026?", text:g.steps[0] ? g.steps[0].text : "" });
     g.steps.forEach(function(st, i){ out.push({ kind:"guide", id:id, at:i, title:st.title, where:g.title+" \u00B7 step "+(i+1), text:st.text }); });
   });
-  Object.keys(HELP_PRACTICE).forEach(function(id){
-    var pr=HELP_PRACTICE[id]; out.push({ kind:"practice", id:id, at:0, title:pr.title, where:"Practise", text:pr.blurb||"" });
+  Object.keys(A.practice).forEach(function(id){
+    var pr=A.practice[id]; out.push({ kind:"practice", id:id, at:0, title:pr.title, where:"Practise", text:pr.blurb||"" });
   });
   return out;
 }
@@ -19649,7 +19743,21 @@ function helpSeedProject(id){ return TEST_PROJECTS.filter(function(p){ return p.
 // harness can render every stage statically and look for its anchors.
 // `on` lets a LIVE practice copy (the outline Try it) hear its own Save and
 // Cancel; a staged picture passes nothing and everything is wired to nop.
+// The context a module's stage is drawn with. Its storage is MEMORY, seeded by
+// the module from sample data: a picture can show a module's screen without a
+// byte reaching localStorage, so staging writes nothing, as for the core.
+function helpStageCtx(moduleId){
+  var nop=function(){};
+  return { moduleId:moduleId, storage:ttMemoryStorage(), api:TT, projects:TEST_PROJECTS, logs:[],
+           laneMeta:TEST_META, laneOrder:TEST_ORDER, testMode:true, schedule:null,
+           activeId:null, activeName:"", onClose:nop };
+}
 function helpStageEl(stage, on){
+  // A module's own stage: its renderer draws it from its own sample data.
+  if(stage.module){
+    var owner=ttModule(stage.module);
+    return owner && owner.help && owner.help.stage ? owner.help.stage(stage, helpStageCtx(owner.id)) : null;
+  }
   var P=TEST_PROJECTS, nop=function(){}; on=on||{};
   // The outline, on the practice board's lanes and records, optionally with a
   // row already picked so the arrow pad shows.
@@ -19781,8 +19889,14 @@ var HELP_STAGE_W = { paywork:400, unpaid:400, card:366, close:390, header:366, p
 var HELP_SHEETS = { paywork:true, unpaid:true, close:true, schedule:true, shiftask:true, backup:true, outline:true, msedit:true, msstep:true, reports:true,
                     themes:true, layout:true, summary:true, archive:true, extensions:true, tracking:true, breaks:true };
 function HelpStage(props){
-  var stage=props.stage, sheet=!!HELP_SHEETS[stage.kind];
-  var natW=HELP_STAGE_W[stage.kind]||HELP_CARD_W, dispW=props.width||300, k=dispW/natW;
+  // A module's stage never reads the core's tables - its kinds are its own and
+  // could share a name with a core kind. Every module screen is a sheet
+  // (ui.Modal), so it stages as one at phone width unless it says otherwise.
+  // Treated as a card, its fixed-position sheet measured zero tall and the
+  // visible-area cut removed every mark.
+  var stage=props.stage, mod=!!stage.module;
+  var sheet=mod ? stage.sheet!==false : !!HELP_SHEETS[stage.kind];
+  var natW=mod ? (stage.width||HELP_SHEET_W) : (HELP_STAGE_W[stage.kind]||HELP_CARD_W), dispW=props.width||300, k=dispW/natW;
   var boxRef=useRef(null), innerRef=useRef(null);
   var measS=useState({ h:sheet?640:0, rects:[] }); var setMeas=measS[1]; var meas=measS[0];
   var padTop=props.padTop||0;
@@ -20098,7 +20212,7 @@ function HelpWalk(props){
         arrow(1, guide?"Next step":"Next part")),
       // Steady-box rule: as tall as the longest item, so nothing moves as you step through.
       React.createElement(SteadyBox, { count:n, at:on, render:function(i, ghost){
-        var p=items[i], how=p.guide && HELP_GUIDES[p.guide];
+        var p=items[i], how=p.guide && helpAll().guides[p.guide];
         return React.createElement("div", { style:{ display:"flex", gap:"0.7rem", alignItems:"flex-start" } },
           React.createElement("div", { style:{ flex:1 } },
             React.createElement("div", { "data-helpdetaillabel":ghost?undefined:true, style:{ color:S.text, fontWeight:700, fontSize:"1.02rem", marginBottom:"0.2rem" } }, p.label),
@@ -20112,19 +20226,20 @@ function HelpWalk(props){
     props.pageTry ? React.createElement(props.pageTry) : null));
 }
 function HelpPicture(props){
-  var pic=HELP_PICTURES[props.id];
+  var pic=helpAll().pictures[props.id];
   var items=pic.parts.map(function(p){ return { stage:pic.stage, anchor:p.anchor, side:p.side, first:p.first, label:p.label, text:p.text, guide:p.guide }; });
   return React.createElement(HelpWalk, Object.assign({}, props, { kind:"picture", title:pic.title, items:items,
     crumb:["Guides", "What’s on my screen?"], blurb:pic.blurb, padTop:pic.padTop||0,
     pageTry:pic.tryit && HELP_PANELS[pic.tryit] ? HELP_PANELS[pic.tryit] : null }));
 }
 function HelpSteps(props){
-  var g=HELP_GUIDES[props.id];
+  var A=helpAll();
+  var g=A.guides[props.id];
   var from=props.from;   // { picture, part } when reached through How >, else null
   var items=g.steps.map(function(st){ return { stage:st.stage||null, anchor:st.ring, side:st.side||"below", label:st.title, text:st.text, tryit:st.tryit||null }; });
   return React.createElement(HelpWalk, Object.assign({}, props, { kind:"guide", title:g.title, items:items, onHow:null,
-    crumb: from ? ["Guides", HELP_PICTURES[from.picture].title, from.part] : ["Guides", "How do I…?"],
-    backLabel: from ? (HELP_PICTURES[from.picture].back||"Back") : "Back" }));
+    crumb: from ? ["Guides", A.pictures[from.picture].title, from.part] : ["Guides", "How do I…?"],
+    backLabel: from ? (A.pictures[from.picture].back||"Back") : "Back" }));
 }
 
 // The real MilestoneStrip on the practice workbench's steps. Its zoom and pan
@@ -20192,7 +20307,7 @@ function GuidesModal(props){
     query ? React.createElement(HelpSearchResults, search) : React.createElement("div", null,
     React.createElement("p", { style:{ color:S.textDim, fontSize:"0.95rem", lineHeight:1.5, margin:"0 0 0.6rem" } },
       "Pick a topic. Pictures show what is on screen; guides walk you through it step by step."),
-    HELP_INDEX.map(function(t){
+    helpAll().index.map(function(t){
       if(t.flat) return React.createElement("div", { key:t.id, style:{ marginTop:"0.9rem" } }, t.items.map(function(it, i){ return row(it, t.id+i); }));
       var on=!!openT[t.id];
       var pics=t.items.filter(function(it){ return it[0]==="picture"; }), how=t.items.filter(function(it){ return it[0]!=="picture"; });
@@ -22132,8 +22247,10 @@ function stepIn(rows, i, asRole){
   return { rows:out, crossed:null };
 }
 // Un-nest. A task becomes a project beside its old parent. A top-level
-// project becomes a new lane after the one it was in - refused if it carries
-// stages, which a lane cannot hold.
+// project gets a NEW LANE of its own, after the one it was in, and moves into
+// it whole - itself, its stages and everything under it (Brent, 10-20: keep
+// the project). Nothing is retired, so its logs, milestones and tool
+// checkouts still point at a record that exists.
 function stepOut(rows, i){
   if(!rows || i<0 || i>=rows.length) return null;
   var r=rows[i];
@@ -22146,13 +22263,11 @@ function stepOut(rows, i){
     if(r.level-1===1) out[at]=Object.assign({},out[at],{ role:"project" });
     return { rows:out, crossed:null };
   }
-  // level 1 -> a lane of its own
-  for(var k=i+1;k<i+span;k++) if(rows[k].kind==="stage" && rows[k].level===2) return null;
-  var block=rows.slice(i,i+span).map(function(x,k){
-    if(k===0) return { key:"L:new-"+x.id, kind:"lane", id:"new-lane-"+x.id, name:x.name, level:0,
-                       accent:x.accent, fresh:true, fromProject:x.id };
-    return Object.assign({},x,{level:x.level-1});
-  });
+  // level 1 -> a lane of its own, with the project as its first record. The
+  // lane's id is temporary; Save gives it a real key and a colour.
+  var lane={ key:"L:new-"+r.id, kind:"lane", id:"new-lane-"+r.id, name:r.name, level:0,
+             accent:r.accent, fresh:true, fromProject:r.id };
+  var block=[lane].concat(rows.slice(i,i+span));
   return { rows:rest.slice(0,blockEnd(rest,P)).concat(block, rest.slice(blockEnd(rest,P))), converted:{ project:r, outOfLane:rows[P] } };
 }
 // What each button can do for a row, so the UI disables rather than guesses.
@@ -22167,6 +22282,55 @@ function outlineSpan(rows, at){
   while(at+n<rows.length && rows[at+n].level>lvl) n++;
   return n;
 }
+// A new project's id. ONE place makes them (Add, and a lane turned into a
+// project in Edit...). Since 10-20 it is a long random id like every other
+// record's, not "highest number + 1": two phones counting up would hand out
+// the same number. Projects made before keep their numbers - ids are only
+// ever compared, never counted or sorted, so the two live side by side.
+function newProjectId(projects){ return uid(); }
+// A saved outline, applied: the board's new lane order, lane meta and
+// projects. Pure, so lifecycle holds it to the rules - every row lands, a
+// conversion creates a REAL record, and nothing points at an id that does not
+// exist. (Until 10-20 the board applied moves only: a project turned into a
+// lane showed up as a lane called NEW-LANE-2 and never moved, and a lane
+// turned into a project left its projects under a parent that was never made.)
+//   newLaneKey() -> a fresh lane key, as Add Lane makes one.
+function outlineApply(rows, projects, laneMeta, newLaneKey){
+  var c=outlineCommit(rows), all=projects||[];
+  // Stage rows carry only what the outline needed; the real stage objects
+  // are looked up by id so notes and done-state survive a move.
+  var stageById={};
+  all.forEach(function(p){ (p.stages||[]).forEach(function(st){ stageById[st.id]=st; }); });
+  var stagesFor=function(id){ return (c.stagesOf[id]||[]).map(function(r){ return stageById[r.id]; }).filter(function(x){ return !!x; }); };
+  // A lane made by a conversion: a real key, the project's name as its label,
+  // and the first lane colour no other lane is using.
+  var meta=Object.assign({}, laneMeta||{}), realLane={};
+  var used=c.laneOrder.map(function(k){ var m=(laneMeta&&laneMeta[k])||DEFAULT_META[k]; return m ? String(m.accent).toUpperCase() : ""; });
+  c.newLanes.forEach(function(nl){
+    var col=LANE_COLORS.filter(function(x){ return used.indexOf(x.accent.toUpperCase())<0; })[0] || LANE_COLORS[0];
+    used.push(col.accent.toUpperCase());
+    realLane[nl.id]=newLaneKey();
+    meta[realLane[nl.id]]={ label:nl.label, accent:col.accent, bg:col.bg, dim:col.dim };
+  });
+  var laneKey=function(k){ return Object.prototype.hasOwnProperty.call(realLane, k) ? realLane[k] : k; };
+  // A project made by a conversion (a lane stepped in): a real id, as Add
+  // makes one, and its children are re-pointed at it.
+  var realProj={};
+  c.newProjects.forEach(function(np){ realProj[np.id]=newProjectId(all); });
+  var pid=function(id){ return (id!=null && Object.prototype.hasOwnProperty.call(realProj, id)) ? realProj[id] : id; };
+  var out=all.map(function(p){
+    if(c.laneOf[p.id]===undefined) return p;   // untouched by this outline
+    return Object.assign({}, p, { lane:laneKey(c.laneOf[p.id]), parentId:pid(c.parentOf[p.id]),
+                                  order:c.orderOf[p.id], stages:stagesFor(p.id) });
+  });
+  c.newProjects.forEach(function(np){
+    out.push({ id:realProj[np.id], name:np.name, lane:laneKey(c.laneOf[np.id]), notes:"", parentId:pid(c.parentOf[np.id]),
+               order:c.orderOf[np.id], role:np.role||"project", stages:stagesFor(np.id) });
+  });
+  // A lane that became a project is retired, and its colour entry with it.
+  c.dropLanes.forEach(function(k){ if(c.laneOrder.indexOf(k)<0) delete meta[k]; });
+  return { laneOrder:c.laneOrder.map(laneKey), laneMeta:meta, projects:out };
+}
 // Read the tree back out of the flat list. Lane order, each record's lane,
 // parent and order, and each node's stages - all derived from position and
 // indent, never from a field that could have drifted.
@@ -22175,14 +22339,14 @@ function outlineCommit(rows){
   // One map for both would collide the moment a record id matched a key.
   var laneOrder=[], byLane={}, parents={}, orders={}, counts={}, stages={};
   // Records created or retired by a conversion. A lane stepped in becomes a
-  // fresh project and its old lane goes; a project stepped out becomes a
-  // fresh lane and its old project record goes.
+  // fresh project and its old lane goes; a project stepped out gets a fresh
+  // lane and stays a project inside it, so nothing is dropped for it.
   var newLanes=[], newProjects=[], dropLanes=[], dropProjects=[];
   var laneOf=null, stack=[];
   (rows||[]).forEach(function(r){
     if(r.kind==="lane"){
       laneOrder.push(r.id); laneOf=r.id; stack=[];
-      if(r.fresh){ newLanes.push({ id:r.id, label:r.name, accent:r.accent }); if(r.fromProject!==undefined) dropProjects.push(r.fromProject); }
+      if(r.fresh) newLanes.push({ id:r.id, label:r.name, accent:r.accent, fromProject:r.fromProject });
       return;
     }
     if(r.kind==="node" && r.fresh){
@@ -23397,7 +23561,7 @@ function BackupModal(props){
 
   function doExport(){
     haptic(10);
-    var obj=backupBuild(localStorage);
+    var obj=backupBuild(ttDb.backend());
     var json=JSON.stringify(obj);
     var fname="time-tracker-backup-"+isoDate(new Date())+".json";
     try{
@@ -23447,7 +23611,7 @@ function BackupModal(props){
   function doRestore(){
     if(!pending || !pending.obj) return;
     haptic([20,50,20]);
-    var res=backupApply(pending.obj, localStorage);
+    var res=backupApply(pending.obj, ttDb.backend());
     if(!res.ok){ setStatus({ok:false,msg:res.error}); setPending(null); return; }
     setStatus({ok:true,msg:"Restored. Reloading..."});
     try{ setTimeout(function(){ location.reload(); }, 400); }catch(e){}
@@ -23563,7 +23727,7 @@ function BackupModal(props){
 // in React and only a reload re-reads storage, exactly as Restore does.
 function snapThenReload(why, write, setMsg){
   return snapTake(why).then(function(){
-    write(localStorage);
+    write(ttDb.backend());
     setMsg({ ok:true, msg:"Done. Reloading…" });
     setTimeout(function(){ try{ location.reload(); }catch(e){} }, 400);
   }, function(){ setMsg({ ok:false, msg:"Could not take a backup first, so nothing was changed." }); });
@@ -24441,7 +24605,7 @@ function OutlineModal(props){
       return;
     }
     if(res.converted && res.converted.project){
-      setAsk({ apply:commit, label:"Turn \u201c"+cur.name+"\u201d into a lane of its own, after \u201c"+res.converted.outOfLane.name+"\u201d? Anything nested under it becomes a project in the new lane." });
+      setAsk({ apply:commit, label:"Give \u201c"+cur.name+"\u201d a lane of its own, after \u201c"+res.converted.outOfLane.name+"\u201d? It moves into the new lane with everything under it, and stays a project." });
       return;
     }
     commit();
@@ -26038,7 +26202,8 @@ var TT_ENABLED_KEY  = "tt_modules";     // { "<id>": true|false }
 var TT_ID_RE        = /^[a-z][a-z0-9-]{1,23}$/;
 var TT_KEY_RE       = /^[a-z][a-z0-9-]{0,31}$/;
 var TT_FIELDS = ["id","title","version","summary","defaultEnabled","nav",
-                 "screens","storage","settingsPanel","reports"];
+                 "screens","storage","settingsPanel","reports","help"];
+var TT_HELP_FIELDS = ["topic","pictures","guides","stage"];
 
 var TT_REGISTRY = [];   // registration order
 var TT_BY_ID    = {};
@@ -26046,6 +26211,9 @@ var TT_BOOTED   = {};
 
 function ttStore(storage){
   if(storage) return storage;
+  // The core's doorway when it is there; the platform also runs lifted out on
+  // its own (the static suite), where only localStorage exists.
+  if(typeof ttDbBackend==="function") return ttDbBackend();
   try{ return localStorage; }catch(e){ return null; }
 }
 
@@ -26091,7 +26259,56 @@ function ttModStorage(id, storage){
   return api;
 }
 
+// A staged module draws from memory, so its storage here is the only one it can
+// reach while a picture is drawn. Same five calls as ctx.storage, nothing else.
+function ttMemoryStorage(){
+  var data={};
+  var copy=function(v){ return JSON.parse(JSON.stringify(v)); };
+  return {
+    get: function(k, def){ return Object.prototype.hasOwnProperty.call(data,k) ? copy(data[k]) : def; },
+    set: function(k, val){ data[k]=copy(val); return true; },
+    remove: function(k){ delete data[k]; },
+    keys: function(){ return Object.keys(data); },
+    clear: function(){ data={}; }
+  };
+}
+
 // ---- registration -----------------------------------------------------------
+// The manual's entries for a module. Keys are namespaced `<id>:<key>` so they
+// cannot collide with the core's ids; every entry carries what the manual needs.
+function ttValidateHelp(spec){
+  var errs=[], h=spec.help, id=String(spec.id);
+  if(typeof h!=="object" || h===null || Array.isArray(h)) return ["help must be an object"];
+  Object.keys(h).forEach(function(k){
+    if(TT_HELP_FIELDS.indexOf(k)<0) errs.push("unknown help field: "+k);
+  });
+  if(typeof h.topic!=="string" || !h.topic.trim()) errs.push("help.topic is required");
+  if(h.stage!==undefined && typeof h.stage!=="function") errs.push("help.stage must be a function");
+  var entries=0;
+  [["pictures","parts"],["guides","steps"]].forEach(function(pair){
+    var kind=pair[0], listKey=pair[1], reg=h[kind];
+    if(reg===undefined) return;
+    if(typeof reg!=="object" || reg===null || Array.isArray(reg)){ errs.push("help."+kind+" must be an object"); return; }
+    Object.keys(reg).forEach(function(k){
+      entries++;
+      var bare=k.slice(id.length+1);
+      if(k.indexOf(id+":")!==0 || !TT_KEY_RE.test(bare)) errs.push("help."+kind+" key must be "+id+":<slug>: "+k);
+      var e=reg[k];
+      if(!e || typeof e!=="object" || typeof e.title!=="string" || !e.title.trim())
+        errs.push(k+" needs a title");
+      else if(!Array.isArray(e[listKey]) || !e[listKey].length) errs.push(k+" needs "+listKey);
+      else if(kind==="pictures" && (!e.stage || typeof e.stage!=="object")) errs.push(k+" needs a stage");
+      else if(kind==="guides") e.steps.forEach(function(st, i){
+        if(!st || typeof st!=="object" || !st.stage || typeof st.stage!=="object" ||
+           typeof st.ring!=="string" || typeof st.title!=="string" || typeof st.text!=="string")
+          errs.push(k+" step "+(i+1)+" needs stage, ring, title and text");
+      });
+    });
+  });
+  if(entries && typeof h.stage!=="function") errs.push("help.stage is required when there are pictures or guides");
+  return errs;
+}
+
 function ttValidateModule(spec){
   var errs=[];
   if(!spec || typeof spec!=="object" || Array.isArray(spec)) return ["module must be an object"];
@@ -26140,6 +26357,7 @@ function ttValidateModule(spec){
       if(spec.reports.text!==undefined && typeof spec.reports.text!=="function") errs.push("reports.text must be a function");
     }
   }
+  if(spec.help!==undefined) errs=errs.concat(ttValidateHelp(spec));
   return errs;
 }
 
@@ -26152,7 +26370,8 @@ function ttDefineModule(spec){
     id:spec.id, title:spec.title, version:spec.version,
     summary:spec.summary||"", defaultEnabled:!!spec.defaultEnabled,
     nav:spec.nav||null, screens:spec.screens||{}, storage:spec.storage||null,
-    settingsPanel:spec.settingsPanel||null, reports:spec.reports||null
+    settingsPanel:spec.settingsPanel||null, reports:spec.reports||null,
+    help:spec.help||null
   };
   TT_REGISTRY.push(m); TT_BY_ID[m.id]=m;
   return m;
@@ -26477,7 +26696,8 @@ function ToolsScreen(ctx){
   var prefsS = useState(function(){ return store.get("prefs", {}); });
   var prefs = prefsS[0], setPrefsState = prefsS[1];
 
-  var viewS = useState("out"); var view = viewS[0], setView = viewS[1];
+  // A staged picture may open on another tab; the live screen always opens on Out.
+  var viewS = useState(ctx.initialView || "out"); var view = viewS[0], setView = viewS[1];
   var editorS = useState(null); var editor = editorS[0], setEditor = editorS[1];
   var sheetS = useState(null); var sheet = sheetS[0], setSheet = sheetS[1];
   var askS = useState(null); var ask = askS[0], setAsk = askS[1];
@@ -26558,10 +26778,10 @@ function ToolsScreen(ctx){
       padding:"0.12rem 0.42rem", fontSize:"0.68rem", fontWeight:700, whiteSpace:"nowrap",
       fontFamily:S.fontBody, flexShrink:0 } }, text);
   }
-  function actionBtn(label, onClick, tone){
+  function actionBtn(label, onClick, tone, anchor){
     var fg = tone === "warn" ? S.warnText : S.actionText;
     var bdr = tone === "warn" ? S.warnText : S.actionBdr;
-    return React.createElement("button", { onClick:onClick, "data-flat":true,
+    return React.createElement("button", { onClick:onClick, "data-flat":true, "data-anchor":anchor,
       style:{ background:"none", border:"1.5px solid " + bdr, borderRadius:S.radius3,
               padding:"0.42rem 0.7rem", color:fg, cursor:"pointer", fontWeight:700,
               fontFamily:S.fontBody, fontSize:"0.78rem", whiteSpace:"nowrap", flexShrink:0 } },
@@ -26583,7 +26803,7 @@ function ToolsScreen(ctx){
         React.createElement("div", { style:{ color:S.textDim, fontSize:"0.8rem", lineHeight:1.4 } },
           tools.length ? "Check a tool out from the All tab." : "Add a tool on the All tab to get started."))
     : React.createElement("div", null, outNow.map(function(c){
-        return React.createElement("div", { key:c.id, style:card },
+        return React.createElement("div", { key:c.id, style:card, "data-anchor":"tools-record" },
           React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.5rem" } },
             React.createElement("span", { style:nameStyle }, c.toolName),
             React.createElement(UIkit.Mono, { style:{ fontSize:"0.82rem", color:S.warnText, flexShrink:0 } },
@@ -26598,7 +26818,7 @@ function ToolsScreen(ctx){
               alignItems:"center", gap:"0.5rem", marginTop:"0.55rem" } },
             React.createElement("span", { style:{ fontSize:"0.7rem", color:S.textMuted } },
               "Out " + api.fmt.date(c.out) + " " + api.fmt.time(c.out)),
-            actionBtn("Check in", function(){ checkIn(c); })
+            actionBtn("Check in", function(){ checkIn(c); }, null, "tools-checkin")
           )
         );
       }));
@@ -26606,7 +26826,7 @@ function ToolsScreen(ctx){
   // ---- all view ----
   var allBody = React.createElement("div", null,
     React.createElement("button", { onClick:function(){ api.closeMenus(); api.haptic(8);
-        setEditor({ id:null, name:"", tag:"", category:"", notes:"" }); }, "data-flat":true,
+        setEditor({ id:null, name:"", tag:"", category:"", notes:"" }); }, "data-flat":true, "data-anchor":"tools-add",
       style:{ width:"100%", background:S.bg1, border:"2px dashed " + S.actionBdr, borderRadius:S.radius,
               padding:"0.7rem", color:S.actionText, cursor:"pointer", fontWeight:700,
               fontFamily:S.fontBody, fontSize:"0.85rem", marginBottom:"0.7rem" } },
@@ -26618,7 +26838,7 @@ function ToolsScreen(ctx){
       : React.createElement("div", null, tools.slice().sort(function(a, b){
           return a.name.localeCompare(b.name); }).map(function(t){
           var openRec = openBy[t.id];
-          return React.createElement("div", { key:t.id, style:card },
+          return React.createElement("div", { key:t.id, style:card, "data-anchor":"tools-row" },
             React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.5rem" } },
               React.createElement("span", { style:nameStyle }, t.name),
               openRec ? chip("Out", S.warnBg, S.warnText) : chip("In", S.successBg, S.successText)
@@ -26633,19 +26853,19 @@ function ToolsScreen(ctx){
             ),
             React.createElement("div", { style:{ display:"flex", justifyContent:"space-between",
                 alignItems:"center", gap:"0.5rem", marginTop:"0.55rem" } },
-              React.createElement("button", { "data-flat":true,
+              React.createElement("button", { "data-flat":true, "data-anchor":"tools-edit",
                 onClick:function(){ api.haptic(8); setEditor(Object.assign({}, t)); },
                 style:{ background:"none", border:"none", padding:"0.2rem 0.1rem", color:S.textDim,
                         cursor:"pointer", fontFamily:S.fontBody, fontWeight:600, fontSize:"0.75rem" } },
                 "Edit"),
               openRec
-                ? actionBtn("Check in", function(){ checkIn(openRec); })
+                ? actionBtn("Check in", function(){ checkIn(openRec); }, null, "tools-checkin")
                 : actionBtn("Check out", function(){
                     api.closeMenus(); api.haptic(8);
                     setSheet({ tool:t, holder:prefs.holder || "",
                                projectId: ctx.activeId == null ? null : ctx.activeId,
                                note:"" });
-                  }, "warn")
+                  }, "warn", "tools-checkout")
             )
           );
         }))
@@ -26656,7 +26876,7 @@ function ToolsScreen(ctx){
     ? React.createElement("div", { style:{ color:S.textDim, fontSize:"0.82rem", textAlign:"center",
         padding:"0.8rem 0", lineHeight:1.4 } }, "No completed checkouts yet.")
     : React.createElement("div", null, history.map(function(c){
-        return React.createElement("div", { key:c.id, style:card },
+        return React.createElement("div", { key:c.id, style:card, "data-anchor":"tools-log" },
           React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.5rem" } },
             React.createElement("span", { style:nameStyle }, c.toolName),
             React.createElement(UIkit.Mono, { style:{ fontSize:"0.8rem", color:S.textDim, flexShrink:0 } },
@@ -26672,7 +26892,7 @@ function ToolsScreen(ctx){
         );
       }));
 
-  var summary = React.createElement("div", { style:{ display:"flex", gap:"0.4rem",
+  var summary = React.createElement("div", { "data-anchor":"tools-summary", style:{ display:"flex", gap:"0.4rem",
       marginBottom:"0.7rem", flexWrap:"wrap" } },
     chip(outNow.length + (outNow.length === 1 ? " tool out" : " tools out"),
          outNow.length ? S.warnBg : S.successBg, outNow.length ? S.warnText : S.successText),
@@ -26741,13 +26961,13 @@ function ToolsCheckoutSheet(props){
 
   return React.createElement(UIkit.Modal, {
       title:"Check Out \u00B7 " + d.tool.name, onClose:props.onCancel,
-      onSave:function(){ props.onSave(d); }, saveLabel:"Check Out" },
-    React.createElement("div", { style:{ marginBottom:"0.8rem" } },
+      onSave:function(){ props.onSave(d); }, saveLabel:"Check Out", saveAnchor:"tools-save" },
+    React.createElement("div", { style:{ marginBottom:"0.8rem" }, "data-anchor":"tools-holder" },
       React.createElement("label", { style:label }, "Who has it"),
       React.createElement("input", { type:"text", value:d.holder, placeholder:"Name",
         onChange:function(e){ edit("holder", e.target.value); }, style:input })
     ),
-    React.createElement("div", { style:{ marginBottom:"0.8rem" } },
+    React.createElement("div", { style:{ marginBottom:"0.8rem" }, "data-anchor":"tools-job" },
       React.createElement("label", { style:label }, "Against which job"),
       React.createElement("div", { style:{ border:"2px solid " + S.border, borderRadius:S.radius3,
           maxHeight:"190px", overflowY:"auto", background:S.bg2 } },
@@ -26763,7 +26983,7 @@ function ToolsCheckoutSheet(props){
         list.map(projRow)
       )
     ),
-    React.createElement("div", { style:{ marginBottom:"0.4rem" } },
+    React.createElement("div", { style:{ marginBottom:"0.4rem" }, "data-anchor":"tools-note" },
       React.createElement("label", { style:label }, "Note"),
       React.createElement("input", { type:"text", value:d.note, placeholder:"Optional",
         onChange:function(e){ edit("note", e.target.value); }, style:input })
@@ -26892,6 +27112,106 @@ function toolsReportSection(ctx){
   );
 }
 
+// ---- help -------------------------------------------------------------------
+// Tool Tracker's pages in the User Manual. They are drawn from SAMPLE data put
+// into the memory store the manual hands over - never the user's own tools -
+// so every picture reads the same for everyone and staging writes nothing.
+// Times are relative to now, so the picture always looks current; that is also
+// why no prose below quotes a figure.
+function toolsHelpSample(store){
+  var now = Date.now(), H = 3600000, D = 24 * H;
+  store.set("tools", [
+    { id:"h-torque",  name:"Torque wrench",   tag:"TW-04", category:"Hand tools",  notes:"", createdAt:now - 30 * D },
+    { id:"h-caliper", name:"Digital caliper", tag:"DC-01", category:"Measuring",   notes:"", createdAt:now - 30 * D },
+    { id:"h-drill",   name:"Cordless drill",  tag:"",      category:"Power tools", notes:"", createdAt:now - 30 * D }
+  ]);
+  store.set("checkouts", [
+    { id:"h-c1", toolId:"h-torque", toolName:"Torque wrench", holder:"Sam", projectId:103,
+      projectName:"Install new workbench", note:"Bench bolts", out:now - 2 * H, "in":null },
+    { id:"h-c2", toolId:"h-drill", toolName:"Cordless drill", holder:"Alex", projectId:107,
+      projectName:"Sort the tool wall", note:"", out:now - D - 3 * H, "in":now - D - H },
+    { id:"h-c3", toolId:"h-caliper", toolName:"Digital caliper", holder:"Sam", projectId:null,
+      projectName:"", note:"", out:now - 2 * D - 4 * H, "in":now - 2 * D - 3 * H }
+  ]);
+  store.set("prefs", { holder:"Sam" });
+  store.set("schema", 1);
+}
+function toolsHelpStage(stage, ctx){
+  toolsHelpSample(ctx.storage);
+  var c = Object.assign({}, ctx, { activeId:103, activeName:"Install new workbench",
+                                   initialView:stage.view || "out" });
+  var nop = function(){};
+  if(stage.kind === "screen") return React.createElement(ToolsScreen, c);
+  if(stage.kind === "checkout")
+    return React.createElement(ToolsCheckoutSheet, { ctx:c, projects:c.projects || [],
+      draft:{ tool:{ id:"h-caliper", name:"Digital caliper" }, holder:"Sam", projectId:103, note:"" },
+      onChange:nop, onCancel:nop, onSave:nop });
+  return null;
+}
+var TOOLS_HELP = {
+  topic: "Tool Tracker",
+  stage: toolsHelpStage,
+  pictures: {
+    "tools:screen": { title:"The Tools screen", covers:["Tools"], back:"Back to the Tools screen",
+      stage:{ kind:"screen", view:"out" }, padTop:16,
+      blurb:"Tools in the menu opens it, once Tool Tracker is switched on in Extensions. It shows which tools are on the floor, against which job, and who has them.",
+      parts:[
+        { anchor:'[data-anchor="tools-summary"]', side:"right", label:"What is out",
+          text:"How many tools are out right now, and how many are tracked altogether." },
+        { anchor:'[data-anchor="set-Tool view"]', side:"right", label:"Out, All and History",
+          text:"Out is what is on the floor. All is the whole catalogue, where tools are added and checked out. History is every checkout that has come back, newest first.",
+          guide:"tools:out" },
+        { anchor:'[data-anchor="tools-record"]', side:"right", label:"A tool that is out", first:true,
+          text:"The tool, how long it has been gone, the job it is against, who has it and any note." },
+        { anchor:'[data-anchor="tools-checkin"]', side:"left", label:"Check in", first:true,
+          text:"Tap it when the tool comes back. The record moves into History with its times.",
+          guide:"tools:back" }
+      ] },
+    "tools:checkout": { title:"Check Out", back:"Back to Check Out",
+      stage:{ kind:"checkout" }, padTop:16,
+      blurb:"The sheet Check out opens from the All tab. It names the tool being taken.",
+      parts:[
+        { anchor:'[data-anchor="tools-holder"]', side:"right", label:"Who has it",
+          text:"Remembered from the last checkout, so it is usually filled in already." },
+        { anchor:'[data-anchor="tools-job"]', side:"right", label:"Against which job",
+          text:"The job that is running is picked for you. No job is a fair answer for a tool taken for general use.",
+          guide:"tools:out" },
+        { anchor:'[data-anchor="tools-note"]', side:"right", label:"Note",
+          text:"Optional. Where it went or what it is for, shown on its card while it is out." },
+        { anchor:'[data-anchor="tools-save"]', side:"above", label:"Check Out",
+          text:"Records the checkout and opens the Out tab." }
+      ] }
+  },
+  guides: {
+    "tools:out": { title:"Check a tool out",
+      steps:[
+        { stage:{ kind:"screen", view:"all" }, ring:'[data-anchor="set-Tool view"]', side:"right", title:"Open the All tab",
+          text:"Tap Tools in the menu, then All. Every tool in the catalogue is listed, marked In or Out." },
+        { stage:{ kind:"screen", view:"all" }, ring:'[data-anchor="tools-add"]', side:"right", title:"Add it if it is new",
+          text:"A tool that is not listed yet goes in with Add tool. Give it a name, and a tag or category if you use them." },
+        { stage:{ kind:"screen", view:"all" }, ring:'[data-anchor="tools-checkout"]', side:"left", title:"Tap Check out",
+          text:"On the tool’s card. A tool can only be out once, so one that is already out offers Check in instead." },
+        { stage:{ kind:"checkout" }, ring:'[data-anchor="tools-holder"]', side:"right", title:"Say who has it",
+          text:"Type the name. It is remembered, so next time it is filled in for you." },
+        { stage:{ kind:"checkout" }, ring:'[data-anchor="tools-job"]', side:"right", title:"Pick the job",
+          text:"The running job is already picked. Choose another, or No job for general use." },
+        { stage:{ kind:"checkout" }, ring:'[data-anchor="tools-save"]', side:"above", title:"Tap Check Out",
+          text:"The tool goes onto the Out tab with the time it left, and its clock starts." }
+      ] },
+    "tools:back": { title:"Check a tool back in",
+      steps:[
+        { stage:{ kind:"screen", view:"out" }, ring:'[data-anchor="set-Tool view"]', side:"right", title:"Open the Out tab",
+          text:"Tools opens on Out: everything that is on the floor right now." },
+        { stage:{ kind:"screen", view:"out" }, ring:'[data-anchor="tools-record"]', side:"right", title:"Find the tool",
+          text:"Each card shows how long the tool has been gone, the job and who has it." },
+        { stage:{ kind:"screen", view:"out" }, ring:'[data-anchor="tools-checkin"]', side:"left", title:"Tap Check in",
+          text:"The tool is back in the shop. Check in on the All tab does the same." },
+        { stage:{ kind:"screen", view:"log" }, ring:'[data-anchor="tools-log"]', side:"right", title:"It is in History",
+          text:"Every checkout that has come back, newest first, with how long it was out. Removing a tool keeps its history." }
+      ] }
+  }
+};
+
 TT.define({
   id: TOOLS_ID,
   title: "Tool Tracker",
@@ -26900,7 +27220,8 @@ TT.define({
   nav: { label: "Tools", screen: "main" },
   screens: { main: ToolsScreen },
   storage: { keys: ["tools", "checkouts", "prefs", "schema"], normalize: toolsNormalize },
-  reports: { section: toolsReportSection, text: toolsReportText }
+  reports: { section: toolsReportSection, text: toolsReportText },
+  help: TOOLS_HELP
 });
 // ==== TT MODULE tools END ====
 
@@ -26920,7 +27241,7 @@ function TTErrorBoundary(props){ return props.children; }
 // APP_VERSION is the public number. The build stamp stays where it has always
 // been, in the boot div, because that is the thing that proves which deploy
 // landed; this is the thing a person reads.
-var APP_VERSION = "1.0";
+var APP_VERSION = "1.2";
 var SPLASH_SHOW_MS = 2500;   // fully opaque
 var SPLASH_FADE_MS = 320;    // then fades out over this
 function SplashScreen(props){
@@ -27036,8 +27357,8 @@ function TTBoard(){
     setTestBreaks(TEST_BREAKS);
     setTestLaneOrder(TEST_ORDER);
     setTestLaneMeta(TEST_META);
-    try{ localStorage.setItem("tt_test_seed", TUTORIAL_SEED);
-         localStorage.removeItem("tt_test_touched"); }catch(e){}
+    ttDb.setRaw("tt_test_seed", TUTORIAL_SEED);
+    ttDb.remove("tt_test_touched");
   }
   // Leaving KEEPS whatever was built in the tutorial: it is a place to come
   // back to and carry on, not a demo that wipes itself. Resetting is its own
@@ -27059,13 +27380,13 @@ function TTBoard(){
   // instead, which says what it will do.
   useEffect(function(){
     var seen=null, touched=null;
-    try{ seen=localStorage.getItem("tt_test_seed"); touched=localStorage.getItem("tt_test_touched"); }catch(e){}
+    seen=ttDb.getRaw("tt_test_seed"); touched=ttDb.getRaw("tt_test_touched");
     if(seen!==TUTORIAL_SEED && touched!=="1") resetTutorial();
   },[]);
   // Anything changed inside the tutorial marks it as theirs.
   useEffect(function(){
     if(!testMode) return;
-    try{ localStorage.setItem("tt_test_touched","1"); }catch(e){}
+    ttDb.setRaw("tt_test_touched","1");
   },[testMode, testProjects, testLogs, testDist, testBreaks, testLaneOrder, testLaneMeta]);
   // Declared AFTER the four states above: `var` hoists the name but not the
   // value, so switching before them read undefined and the board rendered
@@ -27212,13 +27533,13 @@ function TTBoard(){
 
   // Persist
   useEffect(function(){ save("tt_testmode",testMode); },[testMode]);
-  useEffect(function(){ save("tt_projects",realProjects); },[realProjects]);
+  useEffect(function(){ saveTracked("tt_projects",realProjects); },[realProjects]);
   useEffect(function(){ save("tt_test_projects",testProjects); },[testProjects]);
-  useEffect(function(){ save("tt_logs",realLogs); },[realLogs]);
+  useEffect(function(){ saveTracked("tt_logs",realLogs); },[realLogs]);
   useEffect(function(){ save("tt_test_logs",testLogs); },[testLogs]);
-  useEffect(function(){ save("tt_disruptions",realDist); },[realDist]);
+  useEffect(function(){ saveTracked("tt_disruptions",realDist); },[realDist]);
   useEffect(function(){ save("tt_test_disruptions",testDist); },[testDist]);
-  useEffect(function(){ save("tt_breaks",realBreaks); },[realBreaks]);
+  useEffect(function(){ saveTracked("tt_breaks",realBreaks); },[realBreaks]);
   useEffect(function(){ save("tt_test_breaks",testBreaks); },[testBreaks]);
   useEffect(function(){ save("tt_laneorder",laneOrder); },[laneOrder]);
   useEffect(function(){ save("tt_lanemeta",laneMeta); },[laneMeta]);
@@ -27519,20 +27840,10 @@ function TTBoard(){
   // come from where each row ended up, so a record cannot keep a lane its
   // position no longer agrees with.
   function saveOutline(rows){
-    var c=outlineCommit(rows);
-    // Stage rows carry only what the outline needed; the real stage objects
-    // are looked up by id so notes and done-state survive a move.
-    var stageById={};
-    projects.forEach(function(p){ (p.stages||[]).forEach(function(st){ stageById[st.id]=st; }); });
-    setLaneOrder(c.laneOrder.slice());
-    setProjects(function(prev){ return prev.map(function(p){
-      if(c.laneOf[p.id]===undefined) return p;   // untouched by this outline
-      return Object.assign({}, p, {
-        lane:c.laneOf[p.id], parentId:c.parentOf[p.id], order:c.orderOf[p.id],
-        stages:(c.stagesOf[p.id]||[]).map(function(r){ return stageById[r.id]; })
-                 .filter(function(x){ return !!x; })
-      });
-    }); });
+    var res=outlineApply(rows, projects, laneMeta, function(){ return "custom_"+uid(); });
+    setLaneOrder(res.laneOrder);
+    setLaneMeta(res.laneMeta);
+    setProjects(res.projects);
     setShowOutline(false);
     haptic(18);
   }
@@ -27585,7 +27896,7 @@ function TTBoard(){
     setOnBreak(false); setBreakStart(null); setBreakElapsed(0); setBreakLabel("");
   }
   function addProject(data){
-    var id=Math.max(0,projects.reduce(function(mx,p){ return Math.max(mx,p.id); },0))+1;
+    var id=newProjectId(projects);
     var siblings=projects.filter(function(p){ return p.lane===data.lane&&p.parentId===(data.parentId||null); });
     setProjects(function(prev){ return prev.concat([Object.assign({},data,{id:id,order:siblings.length,stages:[]})]);  });
     setShowAdd(null);

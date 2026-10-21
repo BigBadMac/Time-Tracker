@@ -17,12 +17,13 @@ const document = { addEventListener(){}, removeEventListener(){}, getElementById
 const src = fs.readFileSync(process.argv[2] || "/tmp/app_only.js", "utf8");
 const fn = new Function("React", "window", "localStorage", "navigator", "document", "Event",
   src + "\nreturn { App, TT: typeof TT !== 'undefined' ? TT : null," +
+        " DB: typeof ttDbUse !== 'undefined' ? { use: ttDbUse, db: ttDb, load: load, save: save } : null," +
         " ExtensionsModal: typeof ExtensionsModal !== 'undefined' ? ExtensionsModal : null," +
         " ToolsScreen: typeof ToolsScreen !== 'undefined' ? ToolsScreen : null," +
         " ToolsCheckoutSheet: typeof ToolsCheckoutSheet !== 'undefined' ? ToolsCheckoutSheet : null," +
         " ToolsEditorSheet: typeof ToolsEditorSheet !== 'undefined' ? ToolsEditorSheet : null," +
         " HELP: typeof HELP_PICTURES !== 'undefined' ? { pictures: HELP_PICTURES, guides: HELP_GUIDES, index: HELP_INDEX, practice: HELP_PRACTICE, panels: HELP_PANELS," +
-        "   stageEl: helpStageEl, Guides: GuidesModal, TryHold: HelpTryHold, seed: TEST_PROJECTS } : null };");
+        "   search: typeof helpSearch !== 'undefined' ? helpSearch : null, all: typeof helpAll !== 'undefined' ? helpAll : null, stageEl: helpStageEl, Guides: GuidesModal, TryHold: HelpTryHold, seed: TEST_PROJECTS } : null };");
 const out = fn(React, win, localStorage, navigator, document, function Event(t){ return { type: t }; });
 
 const ok = [];
@@ -224,6 +225,21 @@ const P = (id, n, pid, o, role) => ({ id: id, name: n, lane: "Projects", notes: 
 const H = out.HELP;
 ok.push(["the manual's registries are in the build", !!H]);
 if (H) {
+  // Modules bring their own help, so the manual is checked with Tool Tracker
+  // ON: its topic is read through helpAll() and held to every rule below.
+  ok.push(["the manual reads core and modules through one accessor", typeof H.all === "function"]);
+  const offIdx = H.all().index;
+  ok.push(["with Tool Tracker off, its topic is not in the manual", !offIdx.some((t) => t.id === "module-tools")]);
+  out.TT.setEnabled("tools", true);
+  const A = H.all();
+  const modTopic = A.index.filter((t) => t.id === "module-tools")[0];
+  ok.push(["switched on, Tool Tracker's topic appears", !!modTopic && modTopic.topic === "Tool Tracker"]);
+  ok.push(["after the core topics and before Practise", !!modTopic && A.index.indexOf(modTopic) === A.index.length - 2 && A.index[A.index.length - 1].flat === true]);
+  ok.push(["holding its pictures and guides", !!modTopic && ["picture:tools:screen", "picture:tools:checkout", "guide:tools:out", "guide:tools:back"]
+    .every((k) => modTopic.items.some((it) => it[0] + ":" + it[1] === k))]);
+  ok.push(["its stages are tagged with the module", !!A.pictures["tools:screen"] && A.pictures["tools:screen"].stage.module === "tools" &&
+    A.guides["tools:out"].steps.every((st) => st.stage.module === "tools")]);
+  ok.push(["and the core's are not", Object.keys(A.pictures).filter((k) => k.indexOf(":") < 0).every((k) => !A.pictures[k].stage || A.pictures[k].stage.module === undefined)]);
   const sel = (q) => { const m = /^\[([a-z-]+)(?:="([^"]+)")?\]$/.exec(q); return m; };
   const stageHtml = {};
   const render = (st) => { const k = JSON.stringify(st);
@@ -232,11 +248,11 @@ if (H) {
   const hasAnchor = (html, q) => { const m = sel(q); if (!m) return false;
     return m[2] ? html.indexOf(m[1] + '="' + m[2] + '"') >= 0 : new RegExp(" " + m[1] + "=").test(html); };
   const stages = [];
-  Object.keys(H.pictures).forEach((id) => { const p = H.pictures[id];
+  Object.keys(A.pictures).forEach((id) => { const p = A.pictures[id];
     stages.push([ "picture " + id, p.stage, p.parts.map((pt) => pt.anchor) ]); });
-  Object.keys(H.guides).forEach((id) => H.guides[id].steps.forEach((st, i) => {
+  Object.keys(A.guides).forEach((id) => A.guides[id].steps.forEach((st, i) => {
     // A practice-only step has no picture; it must then carry a Try it.
-    if (!st.stage) { ok.push(["guide " + id + " step " + (i + 1) + ": a step with no picture is a Try it", !!H.panels[st.tryit]]); return; }
+    if (!st.stage) { ok.push(["guide " + id + " step " + (i + 1) + ": a step with no picture is a Try it", !!A.panels[st.tryit]]); return; }
     stages.push([ "guide " + id + " step " + (i + 1), st.stage, [st.ring] ]); }));
   const before = JSON.stringify(Array.from(store.entries()));
   stages.forEach(([where, st, anchors]) => {
@@ -247,20 +263,20 @@ if (H) {
     anchors.forEach((q) => ok.push([where + ": " + q + " is really there to point at", hasAnchor(html, q)]));
   });
   ok.push(["every part's How > leads to a guide that exists",
-    Object.keys(H.pictures).every((id) => H.pictures[id].parts.every((pt) => !pt.guide || !!H.guides[pt.guide]))]);
-  const items = H.index.reduce((a, t) => a.concat(t.items), []);
-  const reg = (k) => k === "picture" ? H.pictures : k === "practice" ? H.practice : H.guides;
+    Object.keys(A.pictures).every((id) => A.pictures[id].parts.every((pt) => !pt.guide || !!A.guides[pt.guide]))]);
+  const items = A.index.reduce((a, t) => a.concat(t.items), []);
+  const reg = (k) => k === "picture" ? A.pictures : k === "practice" ? A.practice : A.guides;
   ok.push(["every index row leads somewhere real", items.every((it) => !!reg(it[0])[it[1]])]);
-  ok.push(["every topic has a name and something in it", H.index.every((t) => t.id && t.topic && t.items.length > 0)]);
+  ok.push(["every topic has a name and something in it", A.index.every((t) => t.id && t.topic && t.items.length > 0)]);
   ok.push(["every practice page names panels that exist",
-    Object.keys(H.practice).every((id) => H.practice[id].panels.every((k) => typeof H.panels[k] === "function"))]);
+    Object.keys(A.practice).every((id) => A.practice[id].panels.every((k) => typeof A.panels[k] === "function"))]);
   ok.push(["and every guide and picture is reachable from the index",
     ["picture", "guide", "practice"].every((k) => Object.keys(reg(k)).every((id) => items.some((it) => it[0] === k && it[1] === id)))]);
   const prose = [];
-  Object.keys(H.pictures).forEach((id) => { const p = H.pictures[id]; prose.push(p.title, p.blurb);
+  Object.keys(A.pictures).forEach((id) => { const p = A.pictures[id]; prose.push(p.title, p.blurb);
     p.parts.forEach((pt) => prose.push(pt.label, pt.text)); });
-  Object.keys(H.practice).forEach((id) => prose.push(H.practice[id].title, H.practice[id].blurb));
-  Object.keys(H.guides).forEach((id) => { const g = H.guides[id]; prose.push(g.title);
+  Object.keys(A.practice).forEach((id) => prose.push(A.practice[id].title, A.practice[id].blurb));
+  Object.keys(A.guides).forEach((id) => { const g = A.guides[id]; prose.push(g.title);
     g.steps.forEach((st) => prose.push(st.title, st.text)); });
   const figures = prose.filter((t) => /\d/.test(String(t)));
   ok.push(["no guide quotes a figure - the practice board's numbers move daily", figures.length === 0]);
@@ -268,19 +284,63 @@ if (H) {
   let idx = "";
   try { idx = renderToStaticMarkup(React.createElement(H.Guides, { onClose(){} })); } catch (e) { idx = "ERR:" + e.message; }
   ok.push(["the Guides index renders", idx.indexOf("ERR:") !== 0]);
-  ok.push(["one heading per topic, closed until tapped", (idx.match(/data-helptopic=/g) || []).length === H.index.filter((t) => !t.flat).length &&
-    (idx.match(/aria-expanded="false"/g) || []).length === H.index.filter((t) => !t.flat).length]);
+  ok.push(["one heading per topic, closed until tapped", (idx.match(/data-helptopic=/g) || []).length === A.index.filter((t) => !t.flat).length &&
+    (idx.match(/aria-expanded="false"/g) || []).length === A.index.filter((t) => !t.flat).length]);
   ok.push(["the search field sits at the top", idx.indexOf("data-helpsearch") >= 0 && idx.indexOf("data-helpsearch") < idx.indexOf("data-helptopic")]);
-  ok.push(["a flat topic's rows show straight away", H.index.filter((t) => t.flat).every((t) => t.items.every((it) => idx.indexOf('data-helprow="' + it[0] + ":" + it[1] + '"') >= 0))]);
+  ok.push(["a flat topic's rows show straight away", A.index.filter((t) => t.flat).every((t) => t.items.every((it) => idx.indexOf('data-helprow="' + it[0] + ":" + it[1] + '"') >= 0))]);
   let tryit = "";
   try { tryit = renderToStaticMarkup(React.createElement(H.TryHold)); } catch (e) { tryit = "ERR:" + e.message; }
   has(tryit, "data-tryhold", "Try it here draws the real hold control");
   has(tryit, "data-holdfill", "with its charging fill");
-  Object.keys(H.panels).forEach((k) => { let h = "";
-    try { h = renderToStaticMarkup(React.createElement(H.panels[k])); } catch (e) { h = "ERR:" + e.message; }
+  Object.keys(A.panels).forEach((k) => { let h = "";
+    try { h = renderToStaticMarkup(React.createElement(A.panels[k])); } catch (e) { h = "ERR:" + e.message; }
     ok.push(["the " + k + " practice panel renders", h.indexOf("ERR:") !== 0 && h.indexOf('data-tryit="' + k + '"') >= 0]); });
   ok.push(["staging every picture and the practice panel wrote nothing to storage",
     JSON.stringify(Array.from(store.entries())) === before]);
+  ok.push(["including Tool Tracker's: no tt_mod_tools_ key was written", Array.from(store.keys()).every((k) => k.indexOf("tt_mod_tools_") !== 0)]);
+  ok.push(["search finds Tool Tracker's pages while it is on", H.search("check in").some((d) => d.id === "tools:back")]);
+  has(idx, 'data-helptopic="module-tools"', "the Guides index lists Tool Tracker while it is on");
+  out.TT.setEnabled("tools", false);
+  let idxOff = "";
+  try { idxOff = renderToStaticMarkup(React.createElement(H.Guides, { onClose(){} })); } catch (e) { idxOff = "ERR:" + e.message; }
+  hasnt(idxOff, 'data-helptopic="module-tools"', "and drops it the moment it is switched off");
+  ok.push(["and search stops finding its pages", !H.search("check in").some((d) => String(d.id).indexOf("tools:") === 0)]);
+}
+
+// ---- the store's doorway: swap the backend, and the REAL board follows ----
+// The seam the shared board will sit on. Seed a second store, point the
+// doorway at it, and the board must paint from it - while the browser's own
+// localStorage is never read or written.
+ok.push(["the store's doorway is in the build", !!out.DB]);
+if (out.DB) {
+  const other = new Map(), touched = [];
+  const backend = { get length(){ return other.size; }, key: (i) => Array.from(other.keys())[i],
+    getItem: (k) => (other.has(String(k)) ? other.get(String(k)) : null),
+    setItem: (k, v) => { other.set(String(k), String(v)); }, removeItem: (k) => { other.delete(String(k)); } };
+  store.clear();
+  const spy = { getItem: localStorage.getItem, setItem: localStorage.setItem, removeItem: localStorage.removeItem };
+  localStorage.getItem = (k) => { touched.push("get " + k); return spy.getItem(k); };
+  localStorage.setItem = (k, v) => { touched.push("set " + k); return spy.setItem(k, v); };
+  localStorage.removeItem = (k) => { touched.push("remove " + k); return spy.removeItem(k); };
+  ok.push(["ttDbUse hands back the backend it was given", out.DB.use(backend) === backend]);
+  backend.setItem("tt_projects", JSON.stringify([
+    { id: 1, name: "Seam Check Job", lane: "Doorway Lane", notes: "", order: 0, parentId: null, stages: [] }]));
+  backend.setItem("tt_laneorder", JSON.stringify(["Doorway Lane"]));
+  let seam = "";
+  try { seam = renderToStaticMarkup(React.createElement(out.App)); } catch (e) { seam = "ERR:" + e.message; }
+  ok.push(["the board renders from the swapped store", seam.indexOf("ERR:") !== 0]);
+  if (seam.indexOf("ERR:") === 0) console.log("   " + seam);
+  has(seam, "Seam Check Job", "its project comes from the new backend");
+  has(seam, "Doorway Lane", "and so does its lane");
+  out.DB.save("tt_seamcheck", { a: 1 });
+  ok.push(["save() writes into the swapped store", backend.getItem("tt_seamcheck") === '{"a":1}']);
+  ok.push(["load() reads back from it", (out.DB.load("tt_seamcheck", null) || {}).a === 1]);
+  ok.push(["a corrupt value reads as the default, as before", (backend.setItem("tt_bad", "{nope"), out.DB.load("tt_bad", "dflt")) === "dflt"]);
+  ok.push(["module storage follows the doorway too", (out.TT.storage("tools").set("probe", 7), backend.getItem("tt_mod_tools_probe") === "7")]);
+  ok.push(["the browser's localStorage was never read or written", touched.length === 0]);
+  if (touched.length) console.log("   reached localStorage: " + touched.slice(0, 6).join(", "));
+  Object.assign(localStorage, spy);
+  ok.push(["ttDbUse(null) goes back to the browser's own", out.DB.use(null) === localStorage]);
 }
 
 let bad = 0;

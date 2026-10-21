@@ -25,7 +25,7 @@ const out = new Function("React", "window", "localStorage", "navigator", "docume
         " isPending, isOverdue, schedText, SchedChip, StartAheadModal, ProjectCard," +
         " startAction, " +
         " ModalGlyph, MenuIcon, MENU_GLYPHS, readableInk, contrastOf, hexRGB," +
-        " outlineRows, outlineSpan, outlineCommit, " +
+        " outlineRows, outlineSpan, outlineCommit, outlineApply, newProjectId, uid, ttStamp, saveTracked, ttDbUse, load, TT_TRACKED, TT_GONE_MAX, " +
         " stepUp, stepDown, stepIn, stepOut, stepOptions, prevSibling, nextSibling, parentIndex, nestRoles, mergeOutline," +
         " worstStatus, stepActual, stepStatus, stepPoint, aggregatePoint, hasMilestonesBeneath, projectLine, projectCurrent," +
         " laneLine, laneCurrent, boardLine, lineSpan, tickUnit, groupMarks, MS_DAY, subtreePoints, tickScale, lineTicks, arcHeight, driftArcs, driftHeadroom, MS_ZOOMS, zoomAt, nextZoom, zoomSpan, panSpan, milestoneReport," +
@@ -986,20 +986,29 @@ t("the first lane cannot step in", out.stepIn(R, 0) === null);
 const projToLane = out.stepOut(R, 5);
 t("a top-level project stepped out becomes its own lane",
   !!projToLane && projToLane.converted && projToLane.rows[5].kind === "lane" && projToLane.rows[5].level === 0);
-t("placed after the lane it was in",
-  !!projToLane && N(projToLane.rows) === "Daily Activities|Label Printing|Set up|Run|Trim pass|Laminating|Projects|Crew Training"
-  && projToLane.rows[6].kind === "lane");
+// Brent, 10-20 (option A): the project is KEPT - it moves into its new lane
+// as that lane's first project, with everything under it.
+t("placed after the lane it was in, with the project inside it",
+  !!projToLane && N(projToLane.rows) === "Daily Activities|Label Printing|Set up|Run|Trim pass|Laminating|Laminating|Projects|Crew Training"
+  && projToLane.rows[6].kind === "node" && projToLane.rows[6].id === 3 && projToLane.rows[6].level === 1
+  && projToLane.rows[7].kind === "lane");
 const c3 = out.outlineCommit(projToLane.rows);
-t("the commit creates the lane and retires the project",
-  c3.newLanes.length === 1 && c3.newLanes[0].label === "Laminating" && c3.dropProjects.join() === "3");
-t("a project carrying stages is refused, since a lane cannot hold them", out.stepOut(R, 1) === null);
+t("the commit creates the lane and keeps the project",
+  c3.newLanes.length === 1 && c3.newLanes[0].label === "Laminating" && c3.dropProjects.length === 0
+  && c3.laneOf[3] === "new-lane-3" && c3.parentOf[3] === null);
+const withStages = out.stepOut(R, 1);
+t("a project carrying stages moves whole, stages and children too",
+  !!withStages && out.outlineCommit(withStages.rows).stagesOf[1].length === 2
+  && out.outlineCommit(withStages.rows).laneOf[2] === "new-lane-1" && out.outlineCommit(withStages.rows).parentOf[2] === 1);
 
 // every row survives every step
 [[0,"down"],[1,"down"],[4,"down"],[5,"in"],[4,"out"],[6,"in"],[5,"out"],[7,"up"]].forEach(([i, k]) => {
   const fn = { up: out.stepUp, down: out.stepDown, in: out.stepIn, out: out.stepOut }[k];
   const res = fn(R, i);
-  t("step " + k + " on row " + i + " keeps every row", !res || res.rows.length === R.length);
-  t("and duplicates none", !res || new Set(res.rows.map((r) => r.key)).size === R.length);
+  // A project given its own lane adds exactly one row: the new lane.
+  const extra = (k === "out" && res && res.converted) ? 1 : 0;
+  t("step " + k + " on row " + i + " keeps every row", !res || res.rows.length === R.length + extra);
+  t("and duplicates none", !res || new Set(res.rows.map((r) => r.key)).size === res.rows.length);
 });
 // options mirror the functions, so a button is disabled rather than dead
 const o = out.stepOptions(R, 2);
@@ -1085,8 +1094,94 @@ const converted = out.stepOut(R, 5).rows;         // Laminating -> its own lane
 const M4 = out.mergeOutline(converted, out.outlineRows(OL_LANES, OL_META, OL_PROJ));
 t("a row made by a conversion is kept on its own account",
   M4.some((r) => r.fresh && r.kind === "lane"));
-t("and is not duplicated by the record it came from",
-  M4.filter((r) => r.name === "Laminating").length === 1);
+t("and the project it came from appears once, as a project inside it",
+  M4.filter((r) => r.name === "Laminating" && r.kind === "node").length === 1 &&
+  M4.filter((r) => r.name === "Laminating" && r.kind === "lane").length === 1);
+
+// ---- a saved outline, applied (outlineApply) ----
+// What Save actually writes. Until 10-20 the board applied moves only, so
+// conversions were lost or left orphans. Every rule here is about the RESULT.
+let laneSeq = 0;
+const newKey = () => "custom_t" + (++laneSeq);
+const ids = (ps) => new Set(ps.map((p) => p.id));
+const orphans = (ps) => ps.filter((p) => p.parentId != null && !ids(ps).has(p.parentId));
+// project -> lane
+const A1 = out.outlineApply(out.stepOut(R, 5).rows, OL_PROJ, OL_META, newKey);
+const lam = A1.projects.find((p) => p.id === 3);
+t("a project given its own lane: the lane gets a real key", A1.laneOrder.join() === "Daily Activity,custom_t1,Projects");
+t("labelled with the project's name", A1.laneMeta.custom_t1 && A1.laneMeta.custom_t1.label === "Laminating");
+t("in a colour no other lane is using", A1.laneMeta.custom_t1 &&
+  ["#4A9C6B", "#4B8EC8"].indexOf(A1.laneMeta.custom_t1.accent.toUpperCase()) < 0 && /^#[0-9A-F]{6}$/i.test(A1.laneMeta.custom_t1.accent));
+t("the project is kept, as the first project in the new lane", !!lam && lam.lane === "custom_t1" && lam.parentId === null && lam.order === 0);
+t("no record is lost", A1.projects.length === OL_PROJ.length);
+t("no temporary id reaches the board", A1.laneOrder.concat(A1.projects.map((p) => p.lane)).every((k) => String(k).indexOf("new-") !== 0));
+t("and every lane a project names exists", A1.projects.every((p) => A1.laneOrder.indexOf(p.lane) >= 0));
+// project with stages and a child -> lane
+const A2 = out.outlineApply(out.stepOut(R, 1).rows, OL_PROJ, OL_META, newKey);
+const lp = A2.projects.find((p) => p.id === 1), tp = A2.projects.find((p) => p.id === 2);
+t("moving whole: the project keeps its stages", !!lp && lp.stages.length === 2 && lp.stages[0].label === "Set up");
+t("and its child comes with it, still under it", !!tp && tp.parentId === 1 && tp.lane === lp.lane);
+// lane -> project
+const A3 = out.outlineApply(out.stepIn(R, 6).rows, OL_PROJ, OL_META, newKey);
+const made = A3.projects.find((p) => p.name === "Projects");
+const crew = A3.projects.find((p) => p.id === 4);
+t("a lane turned into a project: a real project is made", !!made && made.role === "project" && !ids(OL_PROJ).has(made.id));
+t("with a long id from the same place Add takes them", !!made && typeof made.id === "string" && made.id.length >= 24);
+t("in the lane above", !!made && made.lane === "Daily Activity" && made.parentId === null);
+t("its projects nest under the new project", !!made && !!crew && crew.parentId === made.id && crew.lane === "Daily Activity");
+t("nothing points at a parent that does not exist", orphans(A3.projects).length === 0);
+t("the old lane is retired, and its colour entry with it", A3.laneOrder.join() === "Daily Activity" && !A3.laneMeta.Projects);
+// plain moves are unchanged
+const A4 = out.outlineApply(R, OL_PROJ, OL_META, newKey);
+t("a save with no change writes the same board back",
+  A4.laneOrder.join() === OL_LANES.join() && A4.projects.every((p, i) => p.lane === OL_PROJ[i].lane && p.parentId === OL_PROJ[i].parentId && p.order === OL_PROJ[i].order));
+// one place makes project ids
+// ---- long ids (10-20): ids made on different phones must never meet ----
+const many = Array.from({ length: 2000 }, () => out.uid());
+t("uid() makes long ids", many.every((x) => typeof x === "string" && x.length >= 24));
+t("and two thousand of them never repeat", new Set(many).size === many.length);
+const np = [out.newProjectId(OL_PROJ), out.newProjectId(OL_PROJ)];
+t("a new project id is long and random, not highest + 1", np.every((x) => typeof x === "string" && x.length >= 24) && np[0] !== np[1]);
+t("and lives beside the old numbered ones without clashing", np.every((x) => !ids(OL_PROJ).has(x)));
+
+// ---- change tracking: what changed, and what went (10-20) ----
+const T0c = 1700000000000;
+const recs = [{ id: 1, name: "A" }, { id: 2, name: "B", updatedAt: 111 }, { id: 3, name: "C" }];
+const st1 = out.ttStamp(recs, [{ id: 1, name: "A" }, { id: 2, name: "B2", updatedAt: 111 }, { id: 4, name: "D" }], T0c);
+t("an unchanged record is written back exactly as stored", st1.list[0] === recs[0] && st1.list[0].updatedAt === undefined);
+t("a changed record is stamped now", st1.list[1].updatedAt === T0c && st1.list[1].name === "B2");
+t("a new record is stamped now", st1.list[2].updatedAt === T0c);
+t("a record that went leaves a tombstone", st1.gone.length === 1 && st1.gone[0].id === 3 && st1.gone[0].at === T0c);
+t("the stamp alone is not a change", out.ttStamp([{ id: 5, n: 1, updatedAt: 1 }], [{ id: 5, n: 1, updatedAt: 9 }], T0c).list[0].updatedAt === 1);
+t("ids match whether stored as a number or as text", out.ttStamp([{ id: 7, n: 1 }], [{ id: "7", n: 1 }], T0c).gone.length === 0);
+t("nothing in, nothing out", out.ttStamp([], [], T0c).list.length === 0 && out.ttStamp(null, null, T0c).gone.length === 0);
+t("only the real board is tracked", out.TT_TRACKED.join() === "tt_projects,tt_logs,tt_disruptions,tt_breaks" &&
+  out.TT_TRACKED.every((k) => k.indexOf("tt_test") < 0));
+// saveTracked, end to end, on a store of its own (the doorway)
+{
+  const m = new Map();
+  const be = { get length(){ return m.size; }, key: (i) => Array.from(m.keys())[i], getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
+  out.ttDbUse(be);
+  out.saveTracked("tt_projects", [{ id: 1, name: "A" }]);
+  const a = out.load("tt_projects", []);
+  t("the first save of a board stamps what is new", a.length === 1 && typeof a[0].updatedAt === "number");
+  const stampA = a[0].updatedAt;
+  out.saveTracked("tt_projects", [{ id: 1, name: "A" }]);
+  t("saving the same board again stamps nothing", out.load("tt_projects", [])[0].updatedAt === stampA);
+  out.saveTracked("tt_projects", [{ id: 2, name: "B" }]);
+  const g = out.load("tt_gone", {});
+  t("a removed project is remembered as gone", Array.isArray(g.tt_projects) && g.tt_projects.length === 1 && g.tt_projects[0].id === 1);
+  t("and other collections are untouched", g.tt_logs === undefined);
+  out.saveTracked("tt_logs", Array.from({ length: out.TT_GONE_MAX + 5 }, (_, i) => ({ id: "l" + i })));
+  out.saveTracked("tt_logs", []);
+  const gl = out.load("tt_gone", {}).tt_logs || [];
+  t("the gone list is capped, oldest dropped", gl.length === out.TT_GONE_MAX && gl[0].id === "l5" && gl[gl.length - 1].id === "l" + (out.TT_GONE_MAX + 4));
+  be.setItem("tt_gone", "[not json");
+  out.saveTracked("tt_breaks", [{ id: "b1" }]); out.saveTracked("tt_breaks", []);
+  t("a corrupt gone list is replaced, not fatal", Array.isArray(out.load("tt_gone", {}).tt_breaks));
+  out.ttDbUse(null);
+}
 t("merging with nothing yields nothing", out.mergeOutline([], []).length === 0);
 t("merging an empty screen adopts the fresh read",
   out.mergeOutline([], R).length === R.length);

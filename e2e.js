@@ -1098,35 +1098,98 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   await p24.close(); await ctx24.close();
 
 
+  // ---- Edit...: a conversion SAVES (10-20) ----
+  // Until 10-20 the board applied moves only: a project given its own lane
+  // showed up as a lane called NEW-LANE-2 and never moved, and a lane turned
+  // into a project left its projects under a parent that was never made. No
+  // suite had ever saved a conversion. Brent chose to KEEP the project.
+  const ctxCv=await b.newContext({viewport:{width:390,height:844}});
+  const pCv=await ctxCv.newPage();
+  let errsCv=0; pCv.on('pageerror',()=>{ errsCv++; });
+  await pCv.addInitScript(()=>{ if(sessionStorage.getItem('cvSeeded')) return; sessionStorage.setItem('cvSeeded','1');
+    const P=(id,n,o,pid,role)=>({ id, name:n, lane:'Shop', notes:'', order:o, parentId:pid||null, role:role||'project', kind:'finite', stages:[] });
+    localStorage.setItem('tt_projects', JSON.stringify([P(1,'Alpha Job',0), P(2,'Beta Job',1), P(3,'Beta Prep',0,2,'task')]));
+    localStorage.setItem('tt_laneorder', JSON.stringify(['Shop'])); });
+  await pCv.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(pCv); await pCv.waitForTimeout(600);
+  const editCv=async()=>{ await pCv.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await pCv.waitForTimeout(300);
+    await pCv.locator('button').filter({hasText:/^Edit…$/}).first().click(); await pCv.waitForTimeout(500); };
+  const saveCv=async()=>{ if(await pCv.locator('[data-ctrldone]').count()){ await pCv.locator('[data-ctrldone]').click(); await pCv.waitForTimeout(300); }
+    await pCv.locator('[data-modal-panel]').last().locator('button').filter({hasText:/^Save$/}).first().click(); await pCv.waitForTimeout(600); };
+  const storedCv=()=>pCv.evaluate(()=>({ order:JSON.parse(localStorage.getItem('tt_laneorder')), meta:JSON.parse(localStorage.getItem('tt_lanemeta')||'{}'),
+    projects:JSON.parse(localStorage.getItem('tt_projects')) }));
+  const pickCv=async(re)=>{ const rows=await pCv.locator('[data-outlineopen]').allInnerTexts();
+    await pCv.locator('[data-outlinepick]').nth(rows.findIndex(r=>re.test(r))).click(); await pCv.waitForTimeout(300); };
+  // project -> its own lane
+  await editCv(); await pickCv(/^Beta Job$/);
+  await pCv.locator('[data-pad="left"]').click(); await pCv.waitForTimeout(400);
+  t("giving a project its own lane asks, and says the project is kept",
+    /stays a project/.test(await pCv.locator('[data-modal-panel]').last().innerText()));
+  await pCv.locator('[data-outlineconfirm]').click(); await pCv.waitForTimeout(400);
+  await saveCv();
+  let sCv=await storedCv();
+  const laneCv=sCv.order[1], betaCv=sCv.projects.find(p=>p.id===2), prepCv=sCv.projects.find(p=>p.id===3);
+  t("Save stores a real lane, after the one it came from", sCv.order.length===2 && sCv.order[0]==='Shop' && /^custom_/.test(laneCv||''));
+  t("labelled with the project's name", !!sCv.meta[laneCv] && sCv.meta[laneCv].label==='Beta Job');
+  t("the project moved into it, first in the lane", !!betaCv && betaCv.lane===laneCv && betaCv.parentId===null && betaCv.order===0);
+  t("with what was under it still under it", !!prepCv && prepCv.parentId===2 && prepCv.lane===laneCv);
+  t("nothing was lost", sCv.projects.length===3);
+  const lanesCv=await pCv.evaluate(()=>[...document.querySelectorAll('[data-lanecount]')].map(e=>e.parentElement.innerText.split("\n")[0]));
+  t("the board shows the lane by name, never a temporary id", lanesCv.join('|')==='SHOP|BETA JOB');
+  // lane -> project, back into Shop
+  await editCv(); await pickCv(/^BETA JOB$/);
+  await pCv.locator('[data-pad="right"]').click(); await pCv.waitForTimeout(400);
+  await pCv.locator('[data-outlineconfirm]').click(); await pCv.waitForTimeout(400);
+  await saveCv();
+  sCv=await storedCv();
+  const madeCv=sCv.projects.find(p=>p.name==='Beta Job' && p.id!==2);
+  t("and gives it a long id, not a counted number", !!madeCv && typeof madeCv.id==='string' && madeCv.id.length>=24);
+  const idsCv=new Set(sCv.projects.map(p=>p.id));
+  t("turning a lane into a project makes a real project", !!madeCv && madeCv.name==='Beta Job' && madeCv.lane==='Shop' && madeCv.parentId===null);
+  t("its projects nest under it", !!madeCv && sCv.projects.find(p=>p.id===2).parentId===madeCv.id);
+  t("no project points at a parent that does not exist", sCv.projects.every(p=>p.parentId==null || idsCv.has(p.parentId)));
+  t("and the old lane is gone, colour entry too", sCv.order.join()==='Shop' && !sCv.meta[laneCv]);
+  t("with no page errors", errsCv===0);
+  await pCv.close(); await ctxCv.close();
+
   // ---- every settings-menu row has a help topic ----
   // Read off the REAL menu - clocked in, so the status block's rows (Logging
   // to, Break) are there too - and every group's items, then checked against
   // the `covers` lists in the manual. A new menu row with no topic fails here.
-  const ctx25=await b.newContext({viewport:{width:390,height:844}});
-  const p25=await ctx25.newPage();
-  let errs25=0; p25.on('pageerror',()=>{ errs25++; });
-  await p25.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(p25); await p25.waitForTimeout(600);
-  await p25.locator('[data-anchor="hdr-clock"]').click(); await p25.waitForTimeout(400);
-  for(let i=0;i<2;i++){ if(await p25.locator('[data-shiftchoice]').count()){ await p25.locator('[data-shiftchoice]').first().click(); await p25.waitForTimeout(400); } }
-  const menu25=async()=>{ await p25.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await p25.waitForTimeout(400); };
-  await menu25();
-  const rows25=await p25.evaluate(()=>[...new Set([...document.querySelectorAll('[data-menu-open="1"] button')].map(b=>b.innerText.trim().split("\n")[0]).filter(Boolean))]);
-  const items25=[];
-  for(const g of await p25.evaluate(()=>[...document.querySelectorAll('[data-menugroup]')].map(e=>e.getAttribute('data-menugroup')))){
-    if(!(await p25.locator('[data-menu-open="1"]').count())) await menu25();
-    await p25.locator('[data-menugroup="'+g+'"]').click(); await p25.waitForTimeout(350);
-    items25.push(...(await p25.locator('[data-groupitem]').allInnerTexts()));
-    await p25.locator('[data-modal-panel]').last().locator('button').filter({hasText:/^Close$/}).click(); await p25.waitForTimeout(300);
+  // Run twice: every module off (the shipped state), then with Tool Tracker
+  // on - a module's menu row must be covered by the help the module brings.
+  for(const on25 of [false, true]){
+  const tag25 = on25 ? " (Tool Tracker on)" : "";
+    const ctx25=await b.newContext({viewport:{width:390,height:844}});
+    const p25=await ctx25.newPage();
+    if(on25) await p25.addInitScript(()=>{ localStorage.setItem('tt_modules', JSON.stringify({ tools:true })); });
+    let errs25=0; p25.on('pageerror',()=>{ errs25++; });
+    await p25.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(p25); await p25.waitForTimeout(600);
+    await p25.locator('[data-anchor="hdr-clock"]').click(); await p25.waitForTimeout(400);
+    for(let i=0;i<2;i++){ if(await p25.locator('[data-shiftchoice]').count()){ await p25.locator('[data-shiftchoice]').first().click(); await p25.waitForTimeout(400); } }
+    const menu25=async()=>{ await p25.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await p25.waitForTimeout(400); };
+    await menu25();
+    const rows25=await p25.evaluate(()=>[...new Set([...document.querySelectorAll('[data-menu-open="1"] button')].map(b=>b.innerText.trim().split("\n")[0]).filter(Boolean))]);
+    const items25=[];
+    for(const g of await p25.evaluate(()=>[...document.querySelectorAll('[data-menugroup]')].map(e=>e.getAttribute('data-menugroup')))){
+      if(!(await p25.locator('[data-menu-open="1"]').count())) await menu25();
+      await p25.locator('[data-menugroup="'+g+'"]').click(); await p25.waitForTimeout(350);
+      items25.push(...(await p25.locator('[data-groupitem]').allInnerTexts()));
+      await p25.locator('[data-modal-panel]').last().locator('button').filter({hasText:/^Close$/}).click(); await p25.waitForTimeout(300);
+    }
+    const covers25=await p25.evaluate(()=>[helpAll().pictures,helpAll().guides,helpAll().practice].map(r=>Object.keys(r).map(k=>r[k].covers||[])).flat(2).map(x=>String(x).toLowerCase()));
+    // The manual itself, and the way into the practice board, need no topic.
+    const exempt25=["user manual","guides","practice board","leave practice board"];
+    const missing25=rows25.concat(items25).filter(l=>exempt25.indexOf(l.toLowerCase())<0 && covers25.indexOf(l.toLowerCase())<0);
+    t("the menu was read clocked in, status block included"+tag25, rows25.some(r=>/^logging to$/i.test(r)) && rows25.some(r=>/^break$/i.test(r)));
+    if(on25){
+      t("with Tool Tracker on, its Tools row is in the menu", rows25.concat(items25).some(l=>/^tools$/i.test(l)));
+      t("and the manual has its topic", await p25.evaluate(()=>helpAll().index.some(t=>t.id==="module-tools")));
+    }
+    t("every settings-menu row and group item has a help topic"+tag25, missing25.length===0);
+    if(missing25.length) console.log("   no topic for"+tag25+": "+missing25.join(", "));
+    t("with no page errors"+tag25, errs25===0);
+    await p25.close(); await ctx25.close();
   }
-  const covers25=await p25.evaluate(()=>[HELP_PICTURES,HELP_GUIDES,HELP_PRACTICE].map(r=>Object.keys(r).map(k=>r[k].covers||[])).flat(2).map(x=>String(x).toLowerCase()));
-  // The manual itself, and the way into the practice board, need no topic.
-  const exempt25=["user manual","guides","practice board","leave practice board"];
-  const missing25=rows25.concat(items25).filter(l=>exempt25.indexOf(l.toLowerCase())<0 && covers25.indexOf(l.toLowerCase())<0);
-  t("the menu was read clocked in, status block included", rows25.some(r=>/^logging to$/i.test(r)) && rows25.some(r=>/^break$/i.test(r)));
-  t("every settings-menu row and group item has a help topic", missing25.length===0);
-  if(missing25.length) console.log("   no topic for: "+missing25.join(", "));
-  t("with no page errors", errs25===0);
-  await p25.close(); await ctx25.close();
 
   // ---- the User Manual: Guides, pictures, steps, Try it here ----
   // The stages are LIVE renders of the real card and sheet, so this is the
@@ -1134,7 +1197,9 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   const ctx23=await b.newContext({viewport:{width:390,height:844}});
   const p23=await ctx23.newPage();
   let errs23=0; p23.on('pageerror',()=>{ errs23++; });
-  await p23.addInitScript(()=>{ localStorage.setItem('tt_testmode','true'); });
+  // Tool Tracker on: its topic is walked with the core's, picture by picture
+  // and step by step, by the same registry-driven loops below.
+  await p23.addInitScript(()=>{ localStorage.setItem('tt_testmode','true'); localStorage.setItem('tt_modules', JSON.stringify({ tools:true })); });
   await p23.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(p23); await p23.waitForTimeout(800);
   const store23=()=>p23.evaluate(()=>JSON.stringify(Object.keys(localStorage).sort().map(k=>[k,localStorage.getItem(k)])));
   t("the practice bar names the practice board", /PRACTICE BOARD/.test(await p23.locator('[data-tutorialbar]').innerText()));
@@ -1152,22 +1217,23 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   const before23=await store23();
   // The index is by topic (layout B): every topic closed until tapped. A row
   // in a closed topic is not drawn, so openRow opens its topic first.
-  const rows23=await p23.evaluate(()=>HELP_INDEX.filter(t=>!t.flat).length);
-  const items23n=await p23.evaluate(()=>HELP_INDEX.reduce((a,t)=>a+t.items.length,0));
+  const rows23=await p23.evaluate(()=>helpAll().index.filter(t=>!t.flat).length);
+  const items23n=await p23.evaluate(()=>helpAll().index.reduce((a,t)=>a+t.items.length,0));
   const openRow=async(pg, key)=>{
     if(!(await pg.locator('[data-helprow="'+key+'"]').count())){
-      const tid=await pg.evaluate((key)=>{ const t=HELP_INDEX.find(t=>t.items.some(it=>it[0]+":"+it[1]===key)); return t&&t.id; }, key);
+      const tid=await pg.evaluate((key)=>{ const t=helpAll().index.find(t=>t.items.some(it=>it[0]+":"+it[1]===key)); return t&&t.id; }, key);
       await pg.locator('[data-helptopic="'+tid+'"]').click(); await pg.waitForTimeout(250);
     }
     await pg.locator('[data-helprow="'+key+'"]').first().click();
   };
+  t("Tool Tracker's topic is in the index while it is on", await p23.evaluate(()=>helpAll().index.some(t=>t.id==="module-tools")));
   t("the index starts as one closed heading per topic", (await p23.locator('[data-helptopic]').count())===rows23 &&
     (await p23.locator('[data-helptopic][aria-expanded="true"]').count())===0);
-  for(const tid of await p23.evaluate(()=>HELP_INDEX.filter(t=>!t.flat).map(t=>t.id))){ await p23.locator('[data-helptopic="'+tid+'"]').click(); await p23.waitForTimeout(350); }
+  for(const tid of await p23.evaluate(()=>helpAll().index.filter(t=>!t.flat).map(t=>t.id))){ await p23.locator('[data-helptopic="'+tid+'"]').click(); await p23.waitForTimeout(350); }
   t("opened, the topics offer every picture, guide and practice page", (await p23.locator('[data-helprow]').count())===items23n);
-  t("and every one of them is somewhere in the index", await p23.evaluate(()=>{ const keys=new Set(HELP_INDEX.reduce((a,t)=>a.concat(t.items.map(it=>it[0]+":"+it[1])),[]));
-    return Object.keys(HELP_PICTURES).every(id=>keys.has("picture:"+id)) && Object.keys(HELP_GUIDES).every(id=>keys.has("guide:"+id)); }));
-  for(const tid of await p23.evaluate(()=>HELP_INDEX.filter(t=>!t.flat).map(t=>t.id))){ await p23.locator('[data-helptopic="'+tid+'"]').click(); await p23.waitForTimeout(350); }
+  t("and every one of them is somewhere in the index", await p23.evaluate(()=>{ const keys=new Set(helpAll().index.reduce((a,t)=>a.concat(t.items.map(it=>it[0]+":"+it[1])),[]));
+    return Object.keys(helpAll().pictures).every(id=>keys.has("picture:"+id)) && Object.keys(helpAll().guides).every(id=>keys.has("guide:"+id)); }));
+  for(const tid of await p23.evaluate(()=>helpAll().index.filter(t=>!t.flat).map(t=>t.id))){ await p23.locator('[data-helptopic="'+tid+'"]').click(); await p23.waitForTimeout(350); }
   // Search, pinned at the top, finds parts and steps and jumps straight there.
   await p23.locator('[data-helpquery]').fill('overtime'); await p23.waitForTimeout(300);
   t("search finds picture parts and guide steps", (await p23.locator('[data-helphit^="picture:paywork:"]').count())>0 && (await p23.locator('[data-helphit^="guide:setpay:"]').count())>0);
@@ -1244,10 +1310,10 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   // Every picture: each numbered mark inside the sheet, no two overlapping -
   // on a milestone line the signs move with the clock, so this is the check
   // that the nudging holds at whatever hour the suite runs.
-  const pics23=await p23.evaluate(()=>Object.keys(HELP_PICTURES));
+  const pics23=await p23.evaluate(()=>Object.keys(helpAll().pictures));
   for(const id of pics23){
     await openRow(p23, "picture:"+id); await p23.waitForTimeout(900);
-    const n=await p23.evaluate((id)=>HELP_PICTURES[id].parts.length, id);
+    const n=await p23.evaluate((id)=>helpAll().pictures[id].parts.length, id);
     const mb=await p23.evaluate(()=>[...document.querySelectorAll('[data-helpmark]')].map(e=>{ const r=e.getBoundingClientRect(); return [r.left,r.top,r.right,r.bottom]; }));
     const pb=await panel23().boundingBox();
     t(id+": every part is numbered on the picture", mb.length===n);
@@ -1264,7 +1330,7 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     // Tap every number: the box follows it and stays on screen, and the ring
     // stays on the picture. The Reports milestones ring once ran off it.
     let ringsOk=true, boxOk=true; const boxH=new Set();
-    const parts=await p23.evaluate((id)=>HELP_PICTURES[id].parts.map(p=>({label:p.label, how:!!(p.guide&&HELP_GUIDES[p.guide])})), id);
+    const parts=await p23.evaluate((id)=>helpAll().pictures[id].parts.map(p=>({label:p.label, how:!!(p.guide&&helpAll().guides[p.guide])})), id);
     for(let k=1;k<=n;k++){
       await p23.locator('[data-helpmark="'+k+'"]').click(); await p23.waitForTimeout(200);
       const shown=await p23.evaluate(()=>{ const b=document.querySelector('[data-helpdetail]'); return { n:b.getAttribute('data-helpdetail'),
@@ -1308,7 +1374,7 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   // Every guide, every step: the ring must CONTAIN the control it names, on
   // the live render. Read off the registry in the page, so a new guide is
   // covered the moment it is added.
-  const guides23=await p23.evaluate(()=>Object.keys(HELP_GUIDES).map(id=>({id, rings:HELP_GUIDES[id].steps.map(s=>s.ring)})));
+  const guides23=await p23.evaluate(()=>Object.keys(helpAll().guides).map(id=>({id, rings:helpAll().guides[id].steps.map(s=>s.ring)})));
   // Next, then wait for the step to change (or the guide to close). A tap that
   // lands while the page is still gliding to the last step is tried again.
   const nextStep23=async()=>{
@@ -1343,7 +1409,7 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   // The practice page: tap, hold and swipe, all live, all writing nothing.
   await openRow(p23, "practice:gestures"); await p23.waitForTimeout(700);
   t("the practice page has a panel per gesture", (await p23.locator('[data-tryit]').count())===
-    (await p23.evaluate(()=>HELP_PRACTICE.gestures.panels.length)));
+    (await p23.evaluate(()=>helpAll().practice.gestures.panels.length)));
   const res23=(k)=>p23.locator('[data-tryit="'+k+'"] [data-tryresult]').getAttribute('data-tryresult');
   await p23.locator('[data-trytaps]').scrollIntoViewIfNeeded(); await p23.waitForTimeout(600);
   const below23=()=>p23.evaluate(()=>{ const a=document.querySelector('[data-tryit="taps"]'), b=document.querySelector('[data-tryit="swipe"]');
