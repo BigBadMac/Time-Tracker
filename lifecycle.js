@@ -26,6 +26,7 @@ const out = new Function("React", "window", "localStorage", "navigator", "docume
         " startAction, " +
         " ModalGlyph, MenuIcon, MENU_GLYPHS, readableInk, contrastOf, hexRGB," +
         " outlineRows, outlineSpan, outlineCommit, outlineApply, newProjectId, uid, ttStamp, saveTracked, ttDbUse, load, TT_TRACKED, TT_GONE_MAX, " +
+        " normalizeSchedule, schNetMinutes, breakAllowanceMins, breakDayState, breakOverFor, breakPaidMs, paidBreakLogs, missedBreakDue, breakDueAt, BREAK_DEFAULTS, PRESET_BREAKS, BREAK_RULES_NOTE, logIsOt, " +
         " stepUp, stepDown, stepIn, stepOut, stepOptions, prevSibling, nextSibling, parentIndex, nestRoles, mergeOutline," +
         " worstStatus, stepActual, stepStatus, stepPoint, aggregatePoint, hasMilestonesBeneath, projectLine, projectCurrent," +
         " laneLine, laneCurrent, boardLine, lineSpan, tickUnit, groupMarks, MS_DAY, subtreePoints, tickScale, lineTicks, arcHeight, driftArcs, driftHeadroom, MS_ZOOMS, zoomAt, nextZoom, zoomSpan, panSpan, milestoneReport," +
@@ -1611,6 +1612,121 @@ const seedBoard=()=>mkSnapStore({
   t("without the project list, the log's own parent name is used", /^Paint booth/.test(flat[0]) && /^  > Mask panels/.test(flat[1]));
 }
 
+// ---- breaks: paid and unpaid, the allowance, the pay maths (10-22) ----
+{
+  const MIN = 60000, H = 3600000;
+  const day = new Date(2026, 9, 21);                       // a Wednesday
+  const D = day.toDateString(), PREV = new Date(2026, 9, 20).toDateString();
+  const at = (h, m) => new Date(2026, 9, 21, h, m).getTime();
+  const sch = (ub, pr) => out.normalizeSchedule(Object.assign({
+    mon:{on:true,start:"06:00",end:"14:30"}, tue:{on:true,start:"06:00",end:"14:30"}, wed:{on:true,start:"06:00",end:"14:30"},
+    thu:{on:true,start:"06:00",end:"14:30"}, fri:{on:true,start:"06:00",end:"14:30"}, sat:{on:false}, sun:{on:false},
+    unpaidBreaks: Object.assign({ enabled:true, weekly:[
+      { id:"m", name:"Morning Break", start:"09:00", mins:15, paid:true },
+      { id:"l", name:"Lunch", start:"11:00", mins:30 },
+      { id:"a", name:"Afternoon Break", start:"13:00", mins:15, paid:true } ], custom:{} }, ub||{}) }, pr ? { payroll:pr } : {}));
+  const S0 = sch();
+  t("the usual breaks: morning and afternoon paid, lunch unpaid",
+    out.BREAK_DEFAULTS.map((b) => b.label + ":" + b.paid).join() === "Morning Break:true,Lunch:false,Afternoon Break:true");
+  t("and End of Day is no longer a break", out.PRESET_BREAKS.indexOf("End of Day") < 0);
+  t("a saved schedule keeps each break's paid flag", S0.unpaidBreaks.weekly[0].paid === true && !S0.unpaidBreaks.weekly[1].paid);
+  t("and gains the allowance settings with safe defaults", S0.unpaidBreaks.allowMode === "scheduled" && S0.unpaidBreaks.allowMins === 0 &&
+    S0.unpaidBreaks.carryOver === false && S0.unpaidBreaks.overStyle === "float" && S0.payroll.paidBreaksOt === true);
+  t("only UNPAID scheduled breaks come off scheduled time", out.schNetMinutes(S0, "wed") === 510 - 30);
+  t("an old schedule (no paid flags) still nets everything out, as before",
+    out.schNetMinutes(out.normalizeSchedule({ wed:{on:true,start:"06:00",end:"14:30"}, unpaidBreaks:{ enabled:true,
+      weekly:[{ id:"x", name:"Lunch", start:"11:00", mins:30 }, { id:"y", name:"Coffee", start:"09:00", mins:15 }] } }), "wed") === 510 - 45);
+  t("the allowance is the paid scheduled breaks added up", out.breakAllowanceMins(S0, "wed") === 30);
+  t("or the person's own amount", out.breakAllowanceMins(sch({ allowMode:"own", allowMins:20 }), "wed") === 20);
+  t("an own amount works with scheduled breaks switched off",
+    out.breakAllowanceMins(sch({ enabled:false, allowMode:"own", allowMins:25 }), "wed") === 25);
+  t("and no paid breaks means no allowance", out.breakAllowanceMins(sch({ weekly:[] }), "wed") === 0);
+
+  const rec = (id, h, m, mins, extra) => Object.assign({ id, day:D, label:"x", startTime:at(h, m), endTime:at(h, m) + mins*MIN, duration:mins*MIN, paid:true }, extra||{});
+  let st = out.breakDayState(S0, [], D);
+  t("a fresh day has all of it left", st.totalMs === 30*MIN && st.leftMs === 30*MIN);
+  st = out.breakDayState(S0, [rec("b1", 9, 0, 15), rec("b2", 11, 0, 30, { paid:false })], D);
+  t("paid breaks use it; unpaid ones do not", st.usedMs === 15*MIN && st.leftMs === 15*MIN);
+  t("the break being measured is left out", out.breakDayState(S0, [rec("b1", 9, 0, 15)], D, "b1").leftMs === 30*MIN);
+  let ov = out.breakOverFor(st, 24*MIN);
+  t("a break past what is left runs over by the difference", ov.overMs === 9*MIN && !ov.usedCarry);
+  t("within it, not over", out.breakOverFor(st, 10*MIN).overMs === 0);
+  st = out.breakDayState(S0, [rec("b1", 9, 0, 15), rec("b3", 13, 0, 24, { overMs:9*MIN, overCovered:true })], D);
+  t("'Just today' adds the overage to the day's allowance", st.extraMs === 9*MIN && st.leftMs === 0 && st.totalMs === 39*MIN);
+  // No paid breaks scheduled and no own amount: nothing to count against.
+  const SN = sch({ weekly:[{ id:"l", name:"Lunch", start:"11:00", mins:30 }] });
+  st = out.breakDayState(SN, [], D);
+  t("with no paid break time set, nothing is measured", st.limited === false && out.breakOverFor(st, 90*MIN).overMs === 0);
+  st = out.breakDayState(sch({ enabled:false }), [], D);
+  t("nor with scheduled breaks switched off (an untouched schedule)", st.limited === false);
+  st = out.breakDayState(sch({ weekly:[], allowMode:"own", allowMins:0 }), [], D);
+  t("an own amount of none IS a limit: every paid minute counts", st.limited === true && out.breakOverFor(st, 5*MIN).overMs === 5*MIN);
+  t("and a set allowance is a limit", out.breakDayState(S0, [], D).limited === true);
+  t("a missed break uses none of it", out.breakDayState(S0, [rec("mz", 9, 0, 0, { missed:true, duration:0 })], D).usedMs === 0);
+  // carry-over: one day back, only when switched on
+  const SC = sch({ carryOver:true });
+  const yday = Object.assign(rec("y1", 9, 0, 10), { day:PREV, startTime:at(9,0) - 24*H, endTime:at(9,10) - 24*H });
+  t("carry-over off: yesterday's unused time does not roll on", out.breakDayState(S0, [yday], D).carryMs === 0);
+  st = out.breakDayState(SC, [yday], D);
+  t("carry-over on: yesterday's unused paid time rolls into today", st.carryMs === 20*MIN && st.totalMs === 50*MIN);
+  t("and a break that leans on it is flagged (a personal record)", out.breakOverFor(st, 40*MIN).usedCarry === true &&
+    out.breakOverFor(st, 25*MIN).usedCarry === false);
+
+  // what a break record is worth
+  t("a paid break is worth its whole length", out.breakPaidMs(rec("p", 9, 0, 15)) === 15*MIN);
+  t("an unpaid one, nothing", out.breakPaidMs(rec("u", 9, 0, 15, { paid:false })) === 0);
+  t("an old record with no paid flag, nothing - as before", out.breakPaidMs({ duration:15*MIN, endTime:1 }) === 0);
+  t("an overage made unpaid comes off", out.breakPaidMs(rec("o", 13, 0, 24, { overMs:9*MIN, overUnpaid:true })) === 15*MIN);
+  t("an overage covered stays paid", out.breakPaidMs(rec("c", 13, 0, 24, { overMs:9*MIN, overCovered:true })) === 24*MIN);
+  t("a missed break is worth nothing", out.breakPaidMs(rec("m", 9, 0, 15, { missed:true })) === 0);
+  const pbl = out.paidBreakLogs([rec("p", 9, 0, 15), rec("u", 11, 0, 30, { paid:false }), rec("o", 13, 0, 24, { overMs:9*MIN, overUnpaid:true })], true);
+  t("paid breaks become pay entries: the paid ones only, at their paid length",
+    pbl.length === 2 && pbl[0].duration === 15*MIN && pbl[1].duration === 15*MIN && pbl.every((l) => l.type === "paidbreak"));
+  t("an open break is not paid yet", out.paidBreakLogs([{ id:"open", paid:true, startTime:at(9,0), endTime:null, duration:0 }], true).length === 0);
+  t("with paid breaks set not to count toward overtime, they are declared regular",
+    out.paidBreakLogs([rec("p", 9, 0, 15)], false)[0].ot === false);
+
+  // the pay rollup
+  const range = { start: new Date(2026, 9, 19).getTime(), end: new Date(2026, 9, 26).getTime() };
+  const satD = new Date(2026, 9, 24).toDateString();
+  const job = { id:"j", type:"project", projectId:1, projectName:"P", lane:"L", startTime:at(7,0), endTime:at(15,0), duration:8*H, day:D };
+  const satBreak = { id:"s", day:satD, label:"x", paid:true, startTime:new Date(2026,9,24,9,0).getTime(), endTime:new Date(2026,9,24,9,15).getTime(), duration:15*MIN };
+  const roll = (brs, extra) => out.buildRollup(Object.assign({ logs:[job], projects:[{ id:1, name:"P", lane:"L", parentId:null }], range, otDays:["sat"], lanes:["L"], breaks:brs }, extra||{}));
+  let r = roll([rec("p", 9, 0, 15), rec("u", 11, 0, 30, { paid:false })]);
+  t("tracked time is still the jobs", r.trackedMs === 8*H);
+  t("a paid weekday break adds to regular pay time", r.regMs === 8*H + 15*MIN && r.otMs === 0);
+  t("an unpaid one does not", r.paidBreakMs === 15*MIN && r.unpaidBreakMs === 30*MIN && r.breakMs === 45*MIN);
+  r = roll([satBreak]);
+  t("a paid break on an overtime day is overtime", r.otMs === 15*MIN && r.regMs === 8*H);
+  r = roll([satBreak], { paidBreaksOt:false });
+  t("unless paid breaks are set not to count toward overtime - then regular", r.otMs === 0 && r.regMs === 8*H + 15*MIN);
+  t("and the rollup flags that as a personal setting", r.paidBreaksOtOff === true);
+  r = roll([rec("o", 13, 0, 24, { overMs:9*MIN, overUnpaid:true, personal:true }), rec("mz", 9, 0, 0, { missed:true, duration:0 })]);
+  t("an overage made unpaid leaves only the allowance paid", r.paidBreakMs === 15*MIN && r.overMs === 9*MIN && r.overUnpaidMs === 9*MIN);
+  t("personal records are counted", r.personalCount === 1);
+  t("a missed break is counted, but not as a break taken", r.missedCount === 1 && r.breakCount === 1);
+  t("an old record with no paid flag pays nothing, so old reports are unchanged",
+    roll([{ id:"old", day:D, startTime:at(11,0), endTime:at(11,30), duration:30*MIN }]).regMs === 8*H);
+
+  // the missed-break check
+  const dayStr = D;
+  t("a scheduled break's due time is that clock time on the work day", out.breakDueAt(S0, dayStr, { start:"11:00" }) === at(11, 0));
+  const nights = out.normalizeSchedule({ wed:{on:true,start:"21:00",end:"05:30"}, unpaidBreaks:{ enabled:true, weekly:[{ id:"n", name:"Lunch", start:"01:00", mins:30 }] } });
+  t("on a night shift, a break after midnight is due the next morning",
+    out.breakDueAt(nights, dayStr, { start:"01:00" }) === new Date(2026, 9, 22, 1, 0).getTime());
+  t("nothing is due before its time", out.missedBreakDue(S0, dayStr, at(8, 59), [], {}) === null);
+  const due = out.missedBreakDue(S0, dayStr, at(9, 10), [], {});
+  t("once its time has passed and it was not taken, it is due", !!due && due.name === "Morning Break" && due.paid === true && due.key === dayStr + "|m");
+  t("a break started around then counts as taken", out.missedBreakDue(S0, dayStr, at(9, 20), [rec("t", 8, 50, 15)], {}) === null);
+  t("snoozed, it waits", out.missedBreakDue(S0, dayStr, at(9, 20), [], { [dayStr + "|m"]: at(9, 40) }) === null);
+  t("and comes back when the snooze runs out", !!out.missedBreakDue(S0, dayStr, at(9, 45), [], { [dayStr + "|m"]: at(9, 40) }));
+  t("skipped, it is quiet for the day", out.missedBreakDue(S0, dayStr, at(9, 45), [], { [dayStr + "|m"]: "skip" }) === null);
+  t("recorded as missed, it is quiet too",
+    out.missedBreakDue(S0, dayStr, at(9, 45), [{ id:"mm", day:D, missed:true, missedKey:dayStr + "|m", startTime:at(9,0), endTime:at(9,0), duration:0 }], {}) === null);
+  t("more than two hours on, it stops asking", out.missedBreakDue(S0, dayStr, at(11, 30), [{ id:"l", day:D, startTime:at(11,0), endTime:at(11,30), duration:30*MIN }], {}) === null);
+  t("a day off asks nothing", out.missedBreakDue(S0, new Date(2026, 9, 24).toDateString(), new Date(2026, 9, 24, 9, 30).getTime(), [], {}) === null);
+  t("the rules note says to check, and decides nothing", /HR department/.test(out.BREAK_RULES_NOTE) && /doesn.t decide what you.re owed/.test(out.BREAK_RULES_NOTE));
+}
 let bad = 0;
 ok.forEach(([label, pass]) => { if (!pass) { bad++; console.log("   x " + label); } });
 console.log("lifecycle  : " + (ok.length - bad) + "/" + ok.length + " passed" + (bad ? "  FAILED" : ""));

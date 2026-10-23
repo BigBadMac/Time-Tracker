@@ -880,8 +880,8 @@ test("Reports collects module sections and report lines", () => {
   // names made the milestone window undefined and the section invisible.
   has(/milestoneReport\(props\.projects\|\|\[\], props\.laneOrder\|\|\[\], range\.start, range\.end-1, now\)/,
     "the milestone window comes from the range's real fields");
-  has(/seg, nav, summary, payCard, stats, milestones, body, modSections,/,
-    "milestones sit between the stats and the project breakdown; module sections after the core rollup");
+  has(/seg, nav, summary, payCard, stats, breakNote, milestones, body, modSections,/,
+    "the break note under the stats, then milestones, between the stats and the project breakdown; module sections after the core rollup");
   order("out.push(\"Days with time: \"", "var modLines=ttReportText", "module lines come after the core lines");
 });
 
@@ -984,8 +984,12 @@ test("both groups list their screens, and nothing else reaches them", () => {
   ok(/label:"Themes"/.test(u) && /label:"Layout"/.test(u), "Interface offers both of its");
   // The group modal is the only route in; a row left at the top level of the
   // menu would still work and would quietly undo the grouping.
+  // One deliberate exception (10-22): "Change my allowance" after a paid
+  // break runs over opens Work Schedule straight into its breaks editor.
+  const ro = s.slice(s.indexOf("function resolveOver("), s.indexOf("function quietBreak("));
+  ok(ro.indexOf("setShowSchedule(true)") >= 0 && ro.indexOf("setOpenBreaksEd(true)") >= 0, "the overage's Change my allowance opens the breaks editor");
   ["setShowSchedule(true)","setShowTracking(true)"].forEach((c) => {
-    eq(count(new RegExp(c.replace(/[()]/g, "\\$&"), "g")), 1, c + " has one caller");
+    eq(count(new RegExp(c.replace(/[()]/g, "\\$&"), "g")) - (c==="setShowSchedule(true)" ? 1 : 0), 1, c + " has one caller");
     ok(t.indexOf(c) >= 0, "and it is inside Time Settings");
   });
   ["setShowThemes(true)","setShowLayout(true)"].forEach((c) => {
@@ -2040,7 +2044,8 @@ test("nothing starts until the shift question is answered", () => {
   ok(ci.indexOf("commitClockIn(now, auto, null);") < ci.lastIndexOf("if(then) then(now)"),
     "and the immediate path clocks in before resuming");
   // Every record that carries time must carry the day it was filed under.
-  eq(count(/day:curDay\(\)/g), 3, "project logs, disruptions and breaks are all stamped");
+  // Four since 10-22: a skipped scheduled break is recorded as missed.
+  eq(count(/day:curDay\(\)/g), 4, "project logs, disruptions, breaks and missed breaks are all stamped");
   has(/\{id:uid\(\),day:day,projectId:null,projectName:"At Work"/, "and so is the clock-in itself");
 });
 
@@ -2051,7 +2056,7 @@ test("clocking out lands on Reports for the day just finished", () => {
   ok(co.indexOf("setShowDay(true)") < 0, "and no longer on the copy-out sheet");
   // Everything that ends the shift must still be closed off first, or the
   // report is built from a day that is not finished yet.
-  ["finalizeProject(now)", "closeDisruption(now)", "endBreak()"].forEach((c) => {
+  ["finalizeProject(now)", "closeDisruption(now)", "endBreak({ clockingOut:true })"].forEach((c) => {
     ok(co.indexOf(c) >= 0 && co.indexOf(c) < co.indexOf('openReports("day")'),
       c + " runs before Reports opens");
   });
@@ -3749,6 +3754,51 @@ test("every manual view keeps its hooks at the top", () => {
     const lastHook = Math.max(body.lastIndexOf("useState("), body.lastIndexOf("useEffect("), body.lastIndexOf("useRef("));
     ok(lastHook < firstReturn, f.slice(9, f.indexOf("(")) + " declares every hook before its first return");
   });
+});
+})();
+
+// ============================================================
+// breaks, 10-22 (v1.3): paid and unpaid, allowance, overage, missed, personal
+// ============================================================
+(function(){
+const s = source();
+const has = (re, label) => ok(re.test(s), label);
+const count = (re) => (s.match(re) || []).length;
+const slice = (a, b) => { const i = s.indexOf(a); return s.slice(i, s.indexOf(b, i + a.length)); };
+
+test("a break is paid or unpaid, and ending it is handled in one place", () => {
+  const sb = slice("function startBreak(label, paid){", "\n  }");
+  ok(/paid:!!paid/.test(sb) && /fromId:from/.test(sb), "a break records paid and the job it stopped");
+  const eb = slice("function endBreak(opts){", "function offerResume(");
+  ok(/breakDayState\(/.test(eb) && /breakOverFor\(/.test(eb), "ending a paid break measures it against the day's paid time");
+  ok(/BREAK_OVER_MIN_MS/.test(eb), "and only asks about an overage worth asking about");
+  ok(/o\.usedCarry\) extra\.personal=true/.test(eb), "a break leaning on carried time is a personal record");
+  ok(/!opts\.clockingOut\) offerResume/.test(eb), "clocking out never offers to resume");
+  const ro = slice("function resolveOver(kind){", "function quietBreak(");
+  ok(/overUnpaid:true, overCovered:false, personal:true/.test(ro), "making the overage unpaid is a personal record");
+  ok(/overCovered:true, overUnpaid:false/.test(ro), "keeping it paid covers it for the day");
+  const ma = slice("function missedAct(kind){", "\n  }\n");
+  ok(/missed:true, missedKey:due\.key/.test(ma), "a skipped scheduled break is recorded as missed");
+  ok(!/personal/.test(ma), "and missed is a fact, never a personal record");
+});
+
+test("the header status line opens and ends breaks", () => {
+  has(/statusTag:statusTag,\s*onStatusTap:onBreak \? function\(\)\{ endBreak\(\); \}/, "on a break the tag ends it");
+  has(/var statusTag=onBreak \? "End" : \(\(clocked && !interrupting\) \? "Break" : null\);/, "clocked in it reads Break; otherwise no tag");
+  has(/missedDue=\(clocked && !onBreak && !interrupting\)/, "a missed break only nags while clocked in and free");
+});
+
+test("the rules note and the personal note are where they were promised", () => {
+  ok(count(/BREAK_RULES_NOTE/g) >= 5, "the rules note is used at setup, carry-over/overage, overtime and the overage question");
+  const ub = slice("function UnpaidBreaksModal(props){", "\nfunction ");
+  ok(/title:"Scheduled Breaks"/.test(ub), "Unpaid Breaks is Scheduled Breaks");
+  ok(/PERSONAL_NOTE/.test(ub), "carry-over says it makes a personal record");
+  ok(/data-breakpaidtoggle/.test(ub), "each scheduled break is paid or unpaid");
+  const pw = slice("function PayWorkWeekModal(props){", "\nfunction ");
+  ok(/data-pbotwarn/.test(pw) && /PERSONAL_NOTE/.test(pw) && /BREAK_RULES_NOTE/.test(pw), "overtime off warns, with both notes");
+  ok(/PERSONAL_NOTE/.test(slice("function breakTextLines(", "\nfunction ")), "the copy-out footnotes personal records");
+  has(/data-personalnote/, "and Reports tags them PERSONAL");
+  ok(!/"End of Day"/.test(s), "End of Day is no longer a break");
 });
 })();
 

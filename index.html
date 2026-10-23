@@ -18,7 +18,7 @@
 </head>
 <body>
 <pre id="err"></pre>
-<div id="root"><div id="boot">Time Tracker build 10-20 v1.2 ids and tracking<br>
+<div id="root"><div id="boot">Time Tracker build 10-22 v1.3 breaks<br>
 HTML loaded &#10003; &mdash; starting scripts&hellip;<br>
 <span style="font-size:11px;opacity:.7">If this message never goes away, the scripts below it failed to run.<br>
 If you cannot see this message at all, the file itself is not being displayed.</span></div></div>
@@ -17253,7 +17253,10 @@ var LANE_COLORS = [
 var DEFAULT_ORDER = ["Daily Activity","Projects"];
 // The tutorial has its own lanes, so learning in it cannot touch a real board.
 var TEST_ORDER = ["Daily Activity","Projects","Side Projects"];
-var PRESET_BREAKS = ["Morning Break","Lunch","Afternoon Break","End of Day"];
+// The usual breaks, each paid or unpaid by default (Brent, 10-22). "End of
+// Day" was dropped: ending the day is Clock Out, not a break.
+var BREAK_DEFAULTS = [{ label:"Morning Break", paid:true }, { label:"Lunch", paid:false }, { label:"Afternoon Break", paid:true }];
+var PRESET_BREAKS = BREAK_DEFAULTS.map(function(b){ return b.label; });
 var DEFAULT_DIST_PRESETS = ["Phone Call","Walk-in Visitor","Crew Question","Machine Issue"];
 
 // ---- HELPERS -----------------------------------------------------------------
@@ -19215,6 +19218,7 @@ function HeaderTicker(props){
   var wsActive=props.wsActive, elapsed=props.elapsed, onBreak=props.onBreak, breakLabel=props.breakLabel;
   var breakElapsed=props.breakElapsed, clocked=props.clocked, atWorkElapsed=props.atWorkElapsed;
   var nowTick=props.nowTick, hdrBottom=!!props.bottom;
+  var tag=props.statusTag||null, extra=!!(tag||props.overNote);
   var tickerStatus = null;
   if(interrupting && activeProj){
     // No flashing labels. The disrupted project's own name breathes red on the
@@ -19261,7 +19265,17 @@ function HeaderTicker(props){
   // takes the rest of the bar and truncates rather than moving.
   return React.createElement("div", { dir:"ltr", style:{display:"flex",alignItems:"center",gap:"0.75rem",padding:"0.25rem 0.85rem",minHeight:"28px",background:S.bg2,borderBottom:hdrBottom?"none":"1px solid "+S.border,boxShadow:hdrBottom?"inset 0 1px 0 "+S.border:"none",overflow:"hidden",whiteSpace:"nowrap"} },
     tickerDate, tickerTime,
-    tickerStatus && React.createElement("span", { "data-anchor":"hdr-status", style:{display:"flex",alignItems:"center",flex:1,minWidth:0,overflow:"hidden"} }, tickerStatus)
+    tickerStatus && React.createElement("span", { "data-anchor":"hdr-status",
+        // While clocked in the status line is the break shortcut (Brent,
+        // 10-22): a small tag says what a tap does - Break, or End while on
+        // one. Not clocked in: no tag, no tap, the line exactly as before.
+        onClick:tag ? props.onStatusTap : undefined, role:tag ? "button" : undefined, "data-statustap":tag ? "1" : undefined,
+        style:extra ? {display:"flex",alignItems:"center",flex:1,minWidth:0,overflow:"hidden",gap:"0.4rem",cursor:tag?"pointer":undefined}
+                    : {display:"flex",alignItems:"center",flex:1,minWidth:0,overflow:"hidden"} },
+      tickerStatus,
+      props.overNote && React.createElement(Mono, { "data-breakovernote":true, style:{color:S.warnText,fontWeight:800,fontSize:"0.78rem",whiteSpace:"nowrap",flexShrink:0} }, props.overNote),
+      tag && React.createElement("span", { "data-breaktag":tag, style:{marginLeft:"auto",flexShrink:0,whiteSpace:"nowrap",borderRadius:"999px",padding:"0.08rem 0.5rem",
+          fontSize:"0.7rem",fontWeight:800,fontFamily:S.fontBody,border:"1.5px solid "+(tag==="End"?S.warnText:S.actionBdr),color:tag==="End"?S.warnText:S.actionText} }, tag+" \u203A"))
   );
 
 }
@@ -19341,12 +19355,12 @@ var HELP_PICTURES = {
         text:"Tap a day\u2019s name to switch it on or off, then set its start and end. Its hours, after unpaid breaks, show on the right.", guide:"setschedule" },
       { anchor:'[data-anchor="sch-overnight"]', side:"right", label:"Overnight shifts", guide:"night",
         text:"An end earlier than the start runs into the next morning. The row is marked and the whole shift counts as one work day." },
-      { anchor:'[data-anchor="sch-unpaid"]', side:"right", label:"Unpaid Breaks", guide:"setunpaid",
-        text:"Switch it on to take lunches and other unpaid time off the scheduled hours. Edit Breaks says which and when." },
+      { anchor:'[data-anchor="sch-unpaid"]', side:"right", label:"Scheduled Breaks", guide:"setunpaid",
+        text:"Switch it on to plan your breaks. Unpaid ones, like lunch, come off the scheduled hours; paid ones set your paid break time. Edit Breaks says which and when." },
       { anchor:'[data-anchor="sch-total"]', side:"right", label:"Scheduled per week",
         text:"Every day added up, less the unpaid breaks. This is the figure Reports measure your week against. Save keeps your changes." }
     ] },
-  paywork: { title:"Pay & Work Week", covers:["Pay & Work Week"], back:"Back to Pay & Work Week", stage:{ kind:"paywork", full:true }, padTop:16,
+  paywork: { title:"Pay & Work Week", covers:["Pay & Work Week","Paid Breaks"], back:"Back to Pay & Work Week", stage:{ kind:"paywork", full:true }, padTop:16,
     blurb:"Work Schedule, then Edit beside Pay & Work Week. What Reports need to turn hours into pay. Every amount is gross, before deductions.",
     parts:[
       { anchor:'[data-anchor="pay-base"]', side:"corner", label:"Base Pay", guide:"setpay",
@@ -19356,21 +19370,23 @@ var HELP_PICTURES = {
       { anchor:'[data-anchor="pay-otdays"]', side:"corner", label:"Overtime Days", guide:"setpay",
         text:"Tick the days where any time worked counts as overtime, such as weekends." },
       { anchor:'[data-anchor="pay-otrate"]', side:"corner", label:"Overtime Rate", guide:"setpay",
-        text:"Time and a half, double time, or the regular rate plus a set amount per hour." },
+        text:"Time and a half, double time, or the regular rate plus a set amount per hour. Paid Breaks, further down, says if paid break time counts toward it." },
       { anchor:'[data-anchor="pay-exclude"]', side:"corner", label:"Hours excluded",
         text:"The first overtime hours each week or each pay cycle that pay the base rate instead. On salary they are covered by the salary." },
       { anchor:'[data-anchor="pay-cycle"]', side:"corner", label:"Pay Cycle",
         text:"Daily, weekly, biweekly or monthly, counted from the start date. The Pay period in Reports follows it. Done keeps your changes." }
     ] },
-  unpaid: { title:"Unpaid Breaks", covers:["Unpaid Breaks","Edit Breaks"], back:"Back to Unpaid Breaks", stage:{ kind:"unpaid", full:true }, padTop:16,
-    blurb:"Work Schedule, then Edit Breaks. Time that comes off your scheduled hours.",
+  unpaid: { title:"Scheduled Breaks", covers:["Scheduled Breaks","Unpaid Breaks","Edit Breaks","Paid Break Time"], back:"Back to Scheduled Breaks", stage:{ kind:"unpaid", full:true }, padTop:16,
+    blurb:"Work Schedule, then Edit Breaks. Your breaks, each one paid or unpaid.",
     parts:[
       { anchor:'[data-anchor="ub-every"]', side:"corner", label:"Every Work Day", guide:"setunpaid",
-        text:"Breaks taken on every scheduled day, like lunch: a name, when it starts and how many minutes. Add Break adds another." },
+        text:"Breaks on every scheduled day: a name, a start and its minutes. PAID or UNPAID switches with a tap. Add Break adds another." },
       { anchor:'[data-anchor="ub-custom"]', side:"corner", label:"Custom Daily Breaks", guide:"setunpaid",
         text:"Extra breaks on one day of the week, on top of the ones above. Tap a day to open it; the badge counts its breaks." },
       { anchor:'[data-anchor="ub-total"]', side:"corner", label:"Unpaid per week",
-        text:"Everything that comes off the week. Done keeps it, and Save on the schedule makes it stick." }
+        text:"Everything unpaid that comes off the week. Done keeps it, and Save on the schedule makes it stick." },
+      { anchor:'[data-anchor="ub-allow"]', side:"corner", label:"Paid Break Time", guide:"setunpaid",
+        text:"A work day's paid break time: your paid breaks added up, or your own amount. Carry-over and the overage display live here too." }
     ] },
   tracking: { title:"Tracking", back:"Back to Tracking", stage:{ kind:"tracking" }, padTop:16, covers:["Tracking"],
     blurb:"Under Time Settings in the menu. How time is captured and shown.",
@@ -19561,23 +19577,31 @@ var HELP_GUIDES = {
       { stage:{ kind:"paywork", full:true }, ring:'[data-anchor="pay-cycle"]', side:"corner", title:"When you are paid",
         text:"Daily, weekly, biweekly or monthly, from the start date. Reports\u2019 Pay period follows it. Done, then Save on the schedule." }
     ] },
-  setunpaid: { title:"Add unpaid breaks", covers:["Unpaid Breaks","Edit Breaks"],
+  setunpaid: { title:"Set up scheduled breaks", covers:["Scheduled Breaks","Unpaid Breaks","Edit Breaks","Paid Break Time"],
     steps:[
       { stage:{ kind:"schedule", day:true, full:true }, ring:'[data-anchor="sch-unpaid"]', side:"corner", title:"Switch them on",
-        text:"In Work Schedule, tap Unpaid Breaks to switch it on, then Edit Breaks." },
+        text:"In Work Schedule, tap Scheduled Breaks to switch it on, then Edit Breaks." },
       { stage:{ kind:"unpaid", full:true }, ring:'[data-anchor="ub-every"]', side:"below", title:"Breaks every day",
-        text:"Every Work Day holds breaks taken on each scheduled day. Give each a name, a start and its minutes; Add Break adds another." },
+        text:"Every Work Day holds breaks taken on each scheduled day. Give each a name, a start and its minutes, and tap PAID or UNPAID to say which it is. Add Break adds another." },
       { stage:{ kind:"unpaid", full:true }, ring:'[data-anchor="ub-custom"]', side:"corner", title:"Breaks on one day",
         text:"Custom Daily Breaks adds extras on a single day of the week, on top of the ones above. Tap the day to open it." },
       { stage:{ kind:"unpaid", full:true }, ring:'[data-anchor="ub-total"]', side:"corner", title:"Check the total",
-        text:"Unpaid per week shows what comes off. Done, then Save on the schedule." }
+        text:"Unpaid per week shows what comes off your scheduled hours." },
+      { stage:{ kind:"unpaid", full:true }, ring:'[data-anchor="ub-allow"]', side:"corner", title:"Your paid break time",
+        text:"Paid Break Time is what your paid breaks may add up to each work day. Carry-over is only for employers that allow it. Break and pay rules vary by employer, state and country. Time Tracker records your time; it doesn\u2019t decide what you\u2019re owed. Check with your HR department and your local, state or federal labor rules. Done, then Save on the schedule." }
     ] },
-  breaks: { title:"Take a break", covers:["Break","End Break"],
+  breaks: { title:"Take a break", covers:["Break","End Break","Paid break","Unpaid break","I need a break!"],
     steps:[
-      { stage:{ kind:"breaks" }, ring:"[data-breakpreset]", side:"right", title:"Start a break",
-        text:"While you are clocked in, the menu opens with Break near the top. It offers the usual ones, or type your own. Whatever job is running stops, and the break is kept out of your worked time." },
-      { stage:{ kind:"ticker" }, ring:'[data-anchor="hdr-status"]', title:"While you are on it",
-        text:"The header says On Break, with how long it has run. When you are back, End Break in the same menu stops it; then start your job again from its card." }
+      { stage:{ kind:"ticker", idle:true }, ring:'[data-breaktag]', title:"Open the break sheet",
+        text:"While you are clocked in, tap Break at the right of the header status line. Break in the menu does the same." },
+      { stage:{ kind:"breaks" }, ring:"[data-breakgo]", side:"below", title:"I need a break!",
+        text:"Paid break or Unpaid break starts one straight away. Whatever job is running stops." },
+      { stage:{ kind:"breaks" }, ring:"[data-breakpreset]", side:"right", title:"Or one of the usual",
+        text:"The usual breaks carry a PAID or UNPAID tag from your schedule. A name of your own asks which it is. A paid break counts against your paid break time, and if little is left you are told first." },
+      { stage:{ kind:"ticker" }, ring:'[data-breaktag]', title:"While you are on it",
+        text:"The header says On Break, with how long it has run. Tap End to stop it, and the app offers to resume the job you left." },
+      { stage:{ kind:"ticker" }, ring:'[data-anchor="hdr-status"]', title:"If it runs over",
+        text:"Past your paid break time, the overage shows live. When the break ends you choose: make the extra unpaid, keep it paid just today, or change your allowance. Making it unpaid is a personal record of your time, not official time. Break and pay rules vary by employer, state and country. Time Tracker records your time; it doesn\u2019t decide what you\u2019re owed. Check with your HR department and your local, state or federal labor rules." }
     ] },
   collapse: { title:"Collapse and expand",
     steps:[
@@ -19731,7 +19755,8 @@ function HELP_NIGHTS(every){
 function HELP_DAYSCHED(){
   var sch=normalizeSchedule({});
   sch.unpaidBreaks=Object.assign({}, sch.unpaidBreaks, { enabled:true,
-    weekly:[{ id:"hl1", name:"Lunch", start:"12:00", mins:30, note:"" }],
+    weekly:[{ id:"hl0", name:"Morning Break", start:"09:30", mins:15, note:"", paid:true },
+            { id:"hl1", name:"Lunch", start:"12:00", mins:30, note:"" }],
     custom:Object.assign({}, sch.unpaidBreaks.custom, { fri:[{ id:"hl2", name:"Safety meeting", start:"14:00", mins:15, note:"" }] }) });
   sch.payroll=Object.assign({}, sch.payroll, { otDays:["sat","sun"],
     pay:Object.assign({}, sch.payroll.pay, { basis:"hourly", rate:30 }),
@@ -19790,11 +19815,12 @@ function helpStageEl(stage, on){
     return React.createElement(TrackingModal, { onChange:nop, onClose:nop,
       settings:{ layout:"comfortable", tracking:"timer", colorScheme:"bright-pastels", theme:"neon-dream", schemes:{}, fonts:{}, mode:"dark", handedness:"right", headerPos:"top" } });
   if(stage.kind==="breaks")
-    return React.createElement(BreakModal, { onStart:nop, onCancel:nop });
-  // The ticker alone, on a break.
+    return React.createElement(BreakModal, { options:BREAK_DEFAULTS, leftMs:null, onStart:nop, onCancel:nop });
+  // The ticker alone: on a break, or (idle) clocked in with the Break tag.
   if(stage.kind==="ticker")
     return React.createElement(HeaderTicker, { interrupting:false, activeProj:null, intElapsed:0, wsActive:null, elapsed:0,
-      onBreak:true, breakLabel:PRESET_BREAKS[1], breakElapsed:12*60000, clocked:true, atWorkElapsed:3*3600000, nowTick:Date.now(), bottom:false });
+      onBreak:!stage.idle, breakLabel:PRESET_BREAKS[1], breakElapsed:12*60000, clocked:true, atWorkElapsed:3*3600000, nowTick:Date.now(), bottom:false,
+      statusTag:stage.idle ? "Break" : "End", onStatusTap:nop });
   if(stage.kind==="archive")
     return React.createElement(ArchiveModal, { projects:P, logs:TEST_LOGS, laneMeta:TEST_META, onReopen:nop, onClose:nop });
   // The real module registry; a staged sheet only reads it.
@@ -21136,26 +21162,147 @@ function DisruptionPopup(props){
 }
 
 // ---- BREAK MODAL ------------------------------------------------------------
+// Brent, 10-22 (layout B): "I need a break!" is two one-tap buttons, Paid and
+// Unpaid; below it the usual breaks (today's scheduled ones when there are
+// any, else BREAK_DEFAULTS), each tagged PAID or UNPAID; a typed label ASKS
+// which it is. A paid break when the day's paid time is low (under
+// BREAK_LOW_MS) says so first. onStart(label, paid).
+function BreakTag(props){
+  var on=!!props.paid;
+  return React.createElement("span", { "data-breakpaid":on?"paid":"unpaid", style:{marginLeft:"auto",flexShrink:0,fontSize:"0.7rem",fontWeight:800,
+      letterSpacing:"0.04em",borderRadius:"999px",padding:"0.12rem 0.5rem",fontFamily:S.fontBody,
+      color:on?S.successText:S.textMuted,border:"1.5px solid "+(on?S.successText:S.border)} }, on?"PAID":"UNPAID");
+}
+// The usual breaks for a work day: its scheduled ones, else the defaults.
+function breakOptionsFor(sch, dayStr){
+  var list=(sch && dayStr) ? dayBreaks(sch, breakKeyOfDay(dayStr)) : [];
+  var seen={}, out=[];
+  (list.length ? list.map(function(b){ return { label:b.name||"Break", paid:!!b.paid }; }) : BREAK_DEFAULTS)
+    .forEach(function(o){ if(!seen[o.label]){ seen[o.label]=1; out.push({ label:o.label, paid:!!o.paid }); } });
+  return out;
+}
+function breakBigBtn(kind, label, onClick, extra){
+  var paid=kind==="paid";
+  return React.createElement("button", Object.assign({ onClick:onClick,
+    style:{flex:1,padding:"0.95rem 0.4rem",borderRadius:S.radius,cursor:"pointer",fontWeight:800,fontSize:"1rem",fontFamily:S.fontBody,
+           background:paid?S.successBg:S.warnBg,border:"2.5px solid "+(paid?S.successText:S.warnText),color:paid?S.successText:S.warnText} }, extra||{}), label);
+}
 function BreakModal(props){
   var onStart=props.onStart, onCancel=props.onCancel;
-  var custom = useState(""); var setCustom=custom[1]; custom=custom[0];
+  var options=props.options||BREAK_DEFAULTS;
+  var leftMs=(typeof props.leftMs==="number") ? props.leftMs : null;
+  var customS=useState(""); var setCustom=customS[1]; var custom=customS[0];
+  var askS=useState(false); var setAsk=askS[1]; var ask=askS[0];
+  var lowS=useState(null); var setLow=lowS[1]; var low=lowS[0];
+  function go(label, paid){
+    if(paid && leftMs!=null && leftMs<BREAK_LOW_MS){ setLow({ label:label }); return; }
+    onStart(label, paid);
+  }
+  var head=function(t){ return React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { margin:"0.9rem 0 0.4rem" }) }, t); };
+  if(low){
+    return React.createElement(Modal, { title:"Start Break", onClose:onCancel, ownActions:true,
+        actions:[React.createElement("button", { key:"back", "data-lowact":"back", onClick:function(){ setLow(null); }, style:MODAL_CANCEL() }, "Back")] },
+      React.createElement("div", { "data-breaklow":true },
+        React.createElement("div", { style:{color:S.text,fontWeight:800,fontSize:"1.05rem",marginBottom:"0.3rem"} }, "Paid break time is running low"),
+        React.createElement("div", { style:{color:S.textDim,fontSize:"0.9rem",lineHeight:1.45,marginBottom:"0.8rem"} },
+          (leftMs>0 ? fmtDur(leftMs,true)+" left today. " : "None left today. ")+
+          "Anything past it runs over, and you’ll choose what to do with that when the break ends."),
+        React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
+          breakBigBtn("paid", "Start paid break", function(){ onStart(low.label, true); }, { "data-lowact":"paid" }),
+          breakBigBtn("unpaid", "Make it unpaid", function(){ onStart(low.label, false); }, { "data-lowact":"unpaid" }))));
+  }
   return (
     React.createElement(Modal, { title:"Start Break", onClose:onCancel },
+      React.createElement("div", { style:{color:S.text,fontWeight:800,fontSize:"0.98rem",marginBottom:"0.5rem",fontFamily:S.fontBody} }, "I need a break!"),
+      React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
+        breakBigBtn("paid", "Paid break", function(){ go("Paid break", true); }, { "data-breakgo":"paid" }),
+        breakBigBtn("unpaid", "Unpaid break", function(){ go("Unpaid break", false); }, { "data-breakgo":"unpaid" })),
+      head("Or a usual one"),
       React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.5rem"} },
-        PRESET_BREAKS.map(function(label){
-          return React.createElement("button", { key:label, "data-breakpreset":label, onClick:function(){ onStart(label); },
-            style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.85rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.95rem",textAlign:"left"} },
-            label
-          );
+        options.map(function(o){
+          return React.createElement("button", { key:o.label, "data-breakpreset":o.label, onClick:function(){ go(o.label, o.paid); },
+            style:{display:"flex",alignItems:"center",gap:"0.5rem",background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.85rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.95rem",textAlign:"left"} },
+            React.createElement("span", null, o.label), React.createElement(BreakTag, { paid:o.paid }));
         }),
         React.createElement("div", { style:{display:"flex",gap:"0.5rem",marginTop:"0.25rem"} },
-          React.createElement("input", { value:custom, onChange:function(e){ setCustom(e.target.value); }, placeholder:"Custom label...", style:Object.assign({},INPUT_STYLE,{flex:1}) }),
-          React.createElement("button", { onClick:function(){ if(custom.trim()) onStart(custom.trim()); }, disabled:!custom.trim(),
-            style:{background:custom.trim()?S.breakGo:S.addDisabled,border:"none",borderRadius:S.radius3,padding:"0 1rem",color:S.onAccent,cursor:custom.trim()?"pointer":"default",fontWeight:700,fontFamily:S.fontBody} }, "Go")
-        )
+          React.createElement("input", { value:custom, onChange:function(e){ setCustom(e.target.value); setAsk(false); }, placeholder:"Custom label...", style:Object.assign({},INPUT_STYLE,{flex:1}) }),
+          React.createElement("button", { "data-customgo":true, onClick:function(){ if(custom.trim()) setAsk(true); }, disabled:!custom.trim(),
+            style:{background:custom.trim()?S.breakGo:S.addDisabled,border:"none",borderRadius:S.radius3,padding:"0 1rem",color:S.onAccent,cursor:custom.trim()?"pointer":"default",fontWeight:700,fontFamily:S.fontBody} }, "Go")),
+        // A typed break asks whether it is paid (Brent, 10-22).
+        ask && custom.trim() && React.createElement("div", { "data-customask":true, style:{marginTop:"0.2rem"} },
+          React.createElement("div", { style:{color:S.textDim,fontSize:"0.88rem",margin:"0.2rem 0 0.45rem",fontFamily:S.fontBody} },
+            "Is “"+custom.trim()+"” paid?"),
+          React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
+            breakBigBtn("paid", "Paid", function(){ go(custom.trim(), true); }, { "data-customask":"paid" }),
+            breakBigBtn("unpaid", "Unpaid", function(){ go(custom.trim(), false); }, { "data-customask":"unpaid" })))
       )
     )
   );
+}
+// A paid break that ran past the day's paid break time. No Cancel: it needs
+// an answer, and an unanswered one is asked again next time the app opens.
+// onPick("unpaid" | "today" | "change").
+function BreakOverModal(props){
+  var nop=function(){};
+  var over=props.overMs||0;
+  return React.createElement(Modal, { title:"Break ran over", onClose:nop, ownActions:true },
+    React.createElement("div", { "data-breakover-ask":true },
+      React.createElement("div", { style:{color:S.text,fontWeight:800,fontSize:"1.08rem",marginBottom:"0.3rem"} },
+        (props.label||"Your break")+" ran "+fmtDur(over,true)+" over"),
+      React.createElement("div", { style:{color:S.textDim,fontSize:"0.9rem",lineHeight:1.45,marginBottom:"0.7rem"} },
+        "Your paid break time today was "+fmtDur(props.totalMs||0,true)+". This break went "+fmtDur(over,true)+" past it."),
+      React.createElement("button", { "data-overact":"unpaid", onClick:function(){ props.onPick("unpaid"); },
+          style:{display:"block",width:"100%",padding:"0.8rem 0.6rem",borderRadius:S.radius,background:S.warnBg,border:"2.5px solid "+S.warnText,
+                 color:S.warnText,fontWeight:800,fontSize:"1rem",fontFamily:S.fontBody,cursor:"pointer"} },
+        "Make the "+fmtDur(over,true)+" unpaid",
+        React.createElement("div", { style:{fontSize:"0.74rem",fontWeight:600,opacity:0.9,marginTop:"0.15rem"} }, "Saved as your personal record, not official time")),
+      React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { margin:"0.9rem 0 0.4rem" }) }, "Or add paid break time"),
+      // Two choices of the same weight, not a Save+Cancel pair.
+      React.createElement("div", { style:{display:"flex",gap:"0.5rem",alignItems:"stretch"} },
+        React.createElement("button", { "data-overact":"today", onClick:function(){ props.onPick("today"); }, style:Object.assign({}, MODAL_SAVE(), { padding:"0.8rem 0.4rem" }) }, "Just today"),
+        React.createElement("button", { "data-overact":"change", onClick:function(){ props.onPick("change"); }, style:Object.assign({}, MODAL_SAVE(), { padding:"0.8rem 0.4rem" }) }, "Change my allowance")),
+      React.createElement("div", { "data-breakrules":true, style:{color:S.textMuted,fontSize:"0.74rem",lineHeight:1.4,marginTop:"0.9rem"} }, BREAK_RULES_NOTE)));
+}
+// Ending a break offers to pick the job back up.
+function BreakResumeModal(props){
+  // Save first, Cancel second: the shared action bar mirrors them per hand.
+  return React.createElement(Modal, { title:"Back from "+(props.label||"your break"), onClose:props.onClose, ownActions:true,
+      actions:[
+        React.createElement("button", { key:"job", "data-resume":"job", onClick:props.onResume, style:MODAL_SAVE() }, "Resume "+(props.jobName||"the job")),
+        React.createElement("button", { key:"none", "data-resume":"none", onClick:props.onClose, style:MODAL_CANCEL() }, "Not yet")] },
+    React.createElement("div", { "data-breakresume":true, style:{color:S.textDim,fontSize:"0.92rem",lineHeight:1.45} },
+      "Your break has ended. Pick up where you left off, or carry on clocked in with no job running."));
+}
+// A slim card just under the header, floating over the board so nothing
+// beneath it moves (the steady-box rule). place: { top } or { bottom } in px.
+function BreakBanner(props){
+  var st={ position:"fixed", left:"10px", right:"10px", zIndex:300, background:S.warnBg, border:"1.5px solid "+S.warnText,
+           borderRadius:S.radius, padding:"0.7rem 0.8rem", fontFamily:S.fontBody, boxShadow:"0 8px 28px rgba(0,0,0,0.45)" };
+  if(props.place && props.place.bottom!=null) st.bottom=props.place.bottom+"px"; else st.top=((props.place&&props.place.top)||120)+"px";
+  return React.createElement("div", Object.assign({ role:"status", style:st }, props.attrs||{}), props.children);
+}
+// The scheduled break that was due and not taken (option 4). Start it now /
+// In 30 min / Skip today - and skipping records it as MISSED, a fact kept as
+// evidence (in some states a missed rest break is owed time).
+function MissedBreakBanner(props){
+  var due=props.due, btn=function(kind, label, primary){
+    return React.createElement("button", { "data-missedact":kind, onClick:function(){ props.onAct(kind); },
+      style:{flex:primary?1.3:1,padding:"0.6rem 0.3rem",borderRadius:S.radius3,cursor:"pointer",fontWeight:primary?800:700,fontFamily:S.fontBody,fontSize:"0.86rem",
+             background:primary?S.warnText:"none",color:primary?S.bg0:(kind==="skip"?S.textDim:S.warnText),border:primary?"none":"1.5px solid "+(kind==="skip"?S.border:S.warnText)} }, label);
+  };
+  return React.createElement(BreakBanner, { place:props.place, attrs:{ "data-missedbreak":due.key } },
+    React.createElement("div", { style:{color:S.text,fontWeight:800,fontSize:"0.95rem"} }, due.name+" was due at "+fmtTime(due.at)),
+    React.createElement("div", { style:{color:S.textDim,fontSize:"0.8rem",margin:"0.15rem 0 0.55rem"} },
+      (props.jobName ? "You’re still on "+props.jobName+". " : "")+(due.paid ? "A paid break." : "An unpaid break.")),
+    React.createElement("div", { style:{display:"flex",gap:"0.45rem"} },
+      btn("start", "Start it now", true), btn("snooze", "In 30 min"), btn("skip", "Skip today")));
+}
+// The day's paid break time is used up and the break is still going.
+function BreakOverBanner(props){
+  return React.createElement(BreakBanner, { place:props.place, attrs:{ "data-breakover":true } },
+    React.createElement("div", { style:{color:S.text,fontWeight:800,fontSize:"0.95rem"} }, "Paid break time used up"),
+    React.createElement("div", { style:{color:S.warnText,fontWeight:800,fontSize:"1.25rem",margin:"0.1rem 0"} }, fmtDur(props.overMs,true)+" over"),
+    React.createElement("div", { style:{color:S.textDim,fontSize:"0.8rem"} }, "Still counting. You’ll choose what to do with it when the break ends."));
 }
 
 // ---- NEW LANE MODAL ---------------------------------------------------------
@@ -22632,9 +22779,18 @@ function normalizeSchedule(src){
   DAY_KEYS.forEach(function(k){
     custom[k]=((ub.custom&&ub.custom[k])||[]).map(function(b){ return Object.assign({},b); });
   });
+  // Each scheduled break may be paid ({paid:true}); absent = unpaid, as before.
+  // The paid break ALLOWANCE is the day's paid scheduled breaks added up, or
+  // the person's own amount ("own"). carryOver lets unused paid break time
+  // roll to the next work day (a personal record); overStyle says where the
+  // "paid break time used up" warning shows.
   sch.unpaidBreaks={ enabled:!!ub.enabled,
     weekly:(ub.weekly||[]).map(function(b){ return Object.assign({},b); }),
-    custom:custom };
+    custom:custom,
+    allowMode: ub.allowMode==="own" ? "own" : "scheduled",
+    allowMins: (+ub.allowMins>0) ? Math.min(480, Math.round(+ub.allowMins)) : 0,
+    carryOver: !!ub.carryOver,
+    overStyle: ub.overStyle==="header" ? "header" : "float" };
   // Payroll: which day the work week starts on, which days count as
   // overtime, how overtime pays, and the pay cycle. Unknown values fall back
   // to safe defaults so a stale or hand-edited save can't wedge the app.
@@ -22652,7 +22808,10 @@ function normalizeSchedule(src){
     pay: { basis:(pr.pay&&pr.pay.basis==="salary")?"salary":"hourly",
            rate:(pr.pay&&+pr.pay.rate>0)?+pr.pay.rate:0,
            salary:(pr.pay&&+pr.pay.salary>0)?+pr.pay.salary:0 },
-    cycle: { period:period, start:(pr.cycle&&pr.cycle.start)||isoDate(new Date()) }
+    cycle: { period:period, start:(pr.cycle&&pr.cycle.start)||isoDate(new Date()) },
+    // Paid break time counts toward overtime unless switched off here - and
+    // switching it off makes the figures a personal record (Brent, 10-22).
+    paidBreaksOt: pr.paidBreaksOt!==false
   };
   return sch;
 }
@@ -22688,15 +22847,128 @@ function breakOverlapMins(day, br, uptoMin){
   });
   return total;
 }
+// Only UNPAID scheduled breaks come off scheduled time; a paid one is worked
+// time as far as the schedule is concerned.
+function dayUnpaidBreaks(sch,k){ return dayBreaks(sch,k).filter(function(b){ return !b.paid; }); }
 function schDayBreakMins(sch,k,uptoMin){
   var day=sch&&sch[k];
-  return dayBreaks(sch,k).reduce(function(a,b){ return a+breakOverlapMins(day,b,uptoMin); },0);
+  return dayUnpaidBreaks(sch,k).reduce(function(a,b){ return a+breakOverlapMins(day,b,uptoMin); },0);
 }
 // Net scheduled minutes for a day: shift length minus unpaid breaks, floor 0.
 function schNetMinutes(sch,k){
   var g=schMinutes(sch&&sch[k]);
   if(!g) return 0;
   return Math.max(0, g - schDayBreakMins(sch,k));
+}
+// ---------------- Breaks taken: paid, unpaid, allowance (10-22) ----------------
+// A break RECORD is { id, day, label, startTime, endTime, duration } plus,
+// since 10-22: paid (absent = unpaid, the old behaviour), fromId (the job it
+// interrupted, for Resume), overMs (paid time past the allowance), and how
+// that overage was settled - overUnpaid (it comes off, a PERSONAL record) or
+// overCovered (paid time added for the day). personal marks a record made
+// from an unconventional choice: personal, not official, time. A MISSED
+// scheduled break is a record with missed:true and no duration - a fact, not
+// a choice. Break and pay law varies; the app records, it does not rule
+// (BREAK_RULES_NOTE).
+var BREAK_RULES_NOTE = "Break and pay rules vary by employer, state and country. Time Tracker records your time; it doesn\u2019t decide what you\u2019re owed. Check with your HR department and your local, state or federal labor rules.";
+var PERSONAL_NOTE = "A personal record of your time, not official time.";
+var BREAK_LOW_MS = 5*60000;       // the reminder shows when paid time left is under this
+var BREAK_OVER_MIN_MS = 60000;    // under a minute over is not worth a question
+// The day's paid break allowance, in minutes, for weekday key k.
+function breakAllowanceMins(sch, k){
+  var ub=sch&&sch.unpaidBreaks; if(!ub) return 0;
+  if(ub.allowMode==="own") return Math.max(0, +ub.allowMins||0);
+  return dayBreaks(sch,k).filter(function(b){ return b.paid; })
+    .reduce(function(a,b){ return a+Math.max(0, +b.mins||0); }, 0);
+}
+function breakKeyOfDay(dayStr){ return DAY_KEYS[(new Date(dayStr).getDay()+6)%7]; }
+function breakDayBefore(dayStr){ var d=new Date(dayStr); d.setDate(d.getDate()-1); return workDayOf(d.getTime()); }
+// Paid time a break RECORD is worth: all of a paid break, less an overage the
+// person chose to make unpaid. Unpaid and missed breaks are worth nothing.
+function breakPaidMs(b){
+  if(!b || !b.paid || b.missed) return 0;
+  var d=Math.max(0, b.duration||0);
+  return Math.max(0, d - (b.overUnpaid ? Math.max(0, b.overMs||0) : 0));
+}
+function breakUsedMs(b){ return (b && b.paid && !b.missed) ? Math.max(0, b.duration||0) : 0; }
+// Where the work day stands on paid break time. exceptId leaves one record
+// out (the break being measured). Carry-over is ONE day back only - the
+// day before's unused allowance - and only when carryOver is on.
+function breakDayState(sch, breaks, dayStr, exceptId){
+  var mine=(breaks||[]).filter(function(b){ return b && recordDay(b)===dayStr && b.id!==exceptId; });
+  var allowMs=breakAllowanceMins(sch, breakKeyOfDay(dayStr))*60000;
+  var extraMs=mine.reduce(function(a,b){ return a+(b.overCovered ? Math.max(0, b.overMs||0) : 0); }, 0);
+  var usedMs=mine.reduce(function(a,b){ return a+breakUsedMs(b); }, 0);
+  var carryMs=0;
+  if(sch && sch.unpaidBreaks && sch.unpaidBreaks.carryOver){
+    var prev=breakDayBefore(dayStr);
+    var prevAllow=breakAllowanceMins(sch, breakKeyOfDay(prev))*60000;
+    var prevUsed=(breaks||[]).filter(function(b){ return b && recordDay(b)===prev; })
+                             .reduce(function(a,b){ return a+breakUsedMs(b); }, 0);
+    carryMs=Math.max(0, prevAllow-prevUsed);
+  }
+  var totalMs=allowMs+carryMs+extraMs;
+  // limited: there is a paid break amount to count against. With no paid
+  // breaks scheduled and no amount of their own, nothing is measured - no
+  // reminder, no overage - so an untouched schedule behaves as before.
+  var own=!!(sch && sch.unpaidBreaks && sch.unpaidBreaks.allowMode==="own");
+  var limited=own || totalMs>0;
+  return { allowMs:allowMs, carryMs:carryMs, extraMs:extraMs, totalMs:totalMs, usedMs:usedMs, leftMs:Math.max(0, totalMs-usedMs), limited:limited };
+}
+// How far a paid break of durMs runs past what was left, and whether it
+// leaned on carried-over time (which makes it a personal record).
+function breakOverFor(st, durMs){
+  if(st.limited===false) return { overMs:0, usedCarry:false };
+  var over=Math.max(0, durMs - st.leftMs);
+  var base=Math.max(0, st.allowMs + st.extraMs - st.usedMs);
+  return { overMs:over, usedCarry: st.carryMs>0 && durMs>base };
+}
+// Paid breaks as log-shaped entries for the pay maths. paidBreaksOt false
+// declares them regular (logIsOt honours ot:false), which is a personal choice.
+function paidBreakLogs(breaks, paidBreaksOt){
+  var out=[];
+  (breaks||[]).forEach(function(b){
+    if(!b || !b.endTime) return;
+    var ms=breakPaidMs(b); if(ms<=0) return;
+    var l={ id:"pb-"+b.id, type:"paidbreak", startTime:b.startTime, endTime:b.endTime, duration:ms, day:b.day };
+    if(paidBreaksOt===false) l.ot=false;
+    out.push(l);
+  });
+  return out;
+}
+// The scheduled break that is due and not yet taken, or null. Due once its
+// start time is past (up to two hours on); taken if any break started from a
+// quarter of an hour before it; dismissed if it is in `quiet` (snoozed or
+// skipped, keyed by day + break id) or already recorded as missed.
+var BREAK_DUE_WINDOW_MS = 2*3600000, BREAK_TAKEN_EARLY_MS = 15*60000;
+function breakDueAt(sch, dayStr, br){
+  var k=breakKeyOfDay(dayStr), day=sch&&sch[k], m=toMin(br.start);
+  if(m==null) return null;
+  var base=new Date(dayStr); base.setHours(0,0,0,0);
+  var t=base.getTime()+m*60000;
+  // On a shift that runs past midnight, a break earlier on the clock than the
+  // shift's start belongs to the next morning.
+  var sp=day && day.on ? shiftSpan(day) : null;
+  if(sp && sp.wraps && m<sp.start) t+=86400000;
+  return t;
+}
+function breakNagKey(dayStr, br){ return dayStr+"|"+(br.id||br.name); }
+function missedBreakDue(sch, dayStr, now, breaks, quiet){
+  if(!sch || !dayStr) return null;
+  var k=breakKeyOfDay(dayStr);
+  if(!(sch[k] && sch[k].on)) return null;
+  var list=dayBreaks(sch, k);
+  for(var i=0;i<list.length;i++){
+    var br=list[i], at=breakDueAt(sch, dayStr, br);
+    if(at==null || now<at || now>at+BREAK_DUE_WINDOW_MS) continue;
+    var key=breakNagKey(dayStr, br), q=quiet&&quiet[key];
+    if(q==="skip" || (typeof q==="number" && now<q)) continue;
+    var taken=(breaks||[]).some(function(b){ return b && recordDay(b)===dayStr &&
+      (b.missedKey===key || (!b.missed && b.startTime>=at-BREAK_TAKEN_EARLY_MS)); });
+    if(taken) continue;
+    return { key:key, at:at, name:br.name||"Break", paid:!!br.paid, mins:+br.mins||0 };
+  }
+  return null;
 }
 // The iOS-safe time field, shared by the schedule and breaks modals. The
 // appearance reset must ride inline (the stylesheet rule alone did not defeat
@@ -23171,10 +23443,28 @@ function buildRollup(o){
   });
   var dist=(o.disruptions||[]).filter(function(d){ return d.endTime && inRange(d.startTime); });
   var brks=(o.breaks||[]).filter(function(b){ return b.endTime && inRange(b.startTime); });
+  var taken=brks.filter(function(b){ return !b.missed; });
+  // Paid break time is paid time: it joins the regular / overtime split by
+  // the work day it fell on, exactly like a job log - unless the person set
+  // paid breaks NOT to count toward overtime (a personal record), when it is
+  // all regular. Unpaid breaks, and an overage made unpaid, stay out.
+  var paidBreakMs=0, paidBreakOtMs=0;
+  paidBreakLogs(taken, o.paidBreaksOt).forEach(function(l){
+    paidBreakMs+=l.duration;
+    if(logIsOt(l, otSet)) paidBreakOtMs+=l.duration;
+  });
+  var breakMs=taken.reduce(function(a,b){ return a+(b.duration||0); },0);
   return {
-    trackedMs:trackedMs, clockedMs:clockedMs, otMs:otMs, regMs:trackedMs-otMs, lanes:lanes,
+    trackedMs:trackedMs, clockedMs:clockedMs, lanes:lanes,
+    otMs:otMs+paidBreakOtMs, regMs:(trackedMs-otMs)+(paidBreakMs-paidBreakOtMs),
+    paidBreakMs:paidBreakMs, unpaidBreakMs:breakMs-paidBreakMs,
+    overMs:taken.reduce(function(a,b){ return a+(b.paid ? Math.max(0,b.overMs||0) : 0); },0),
+    overUnpaidMs:taken.reduce(function(a,b){ return a+(b.paid && b.overUnpaid ? Math.max(0,b.overMs||0) : 0); },0),
+    missedCount:brks.length-taken.length,
+    personalCount:taken.filter(function(b){ return !!b.personal; }).length,
+    paidBreaksOtOff: o.paidBreaksOt===false && paidBreakMs>0,
     distMs:dist.reduce(function(a,d){ return a+(d.duration||0); },0), distCount:dist.length,
-    breakMs:brks.reduce(function(a,b){ return a+(b.duration||0); },0), breakCount:brks.length,
+    breakMs:breakMs, breakCount:taken.length,
     activeDays:Object.keys(days).length
   };
 }
@@ -23191,14 +23481,15 @@ function PayWorkWeekModal(props){
              otDays:(src.otDays||[]).slice(),
              ot:Object.assign({kind:"1.5x",flatExtra:6.25,excludeHrs:0,excludeUnit:"cycle"}, src.ot||{}),
              pay:Object.assign({basis:"hourly",rate:0,salary:0}, src.pay||{}),
-             cycle:Object.assign({period:"weekly",start:isoDate(new Date())}, src.cycle||{}) };
+             cycle:Object.assign({period:"weekly",start:isoDate(new Date())}, src.cycle||{}),
+             paidBreaksOt:src.paidBreaksOt!==false };
   });
   var setPr=prS[1]; var pr=prS[0];
   function mutate(fn){
     setPr(function(prev){
       var next={ weekStart:prev.weekStart, otDays:prev.otDays.slice(),
                  ot:Object.assign({},prev.ot), pay:Object.assign({},prev.pay),
-                 cycle:Object.assign({},prev.cycle) };
+                 cycle:Object.assign({},prev.cycle), paidBreaksOt:prev.paidBreaksOt };
       fn(next);
       return next;
     });
@@ -23324,6 +23615,23 @@ function PayWorkWeekModal(props){
           ? "are covered by salary - no extra pay."
           : "pay the base rate, not the overtime rate."))
     ),
+    // Paid breaks and overtime (10-22). On by default: paid break time is
+    // time worked. Off is an unconventional choice, so it says so plainly and
+    // the hours it moves become a personal record.
+    React.createElement("div", { style:sectionWrap, "data-anchor":"pay-breaksot" },
+      React.createElement("div", { style:sectionHead }, "Paid Breaks"),
+      React.createElement("div", { style:sectionNote }, "Whether paid break time counts toward overtime, like time worked."),
+      segRow("pbot", [ {k:"on",label:"Count toward overtime"}, {k:"off",label:"Don\u2019t count"} ],
+        pr.paidBreaksOt ? "on" : "off", function(k){ mutate(function(n){ n.paidBreaksOt=(k==="on"); }); }),
+      !pr.paidBreaksOt && React.createElement("div", { "data-pbotwarn":true, style:{marginTop:"0.55rem",background:S.warnBg,
+          border:"1px solid "+S.warnText,borderRadius:S.radius3,padding:"0.55rem 0.65rem",fontFamily:S.fontBody} },
+        React.createElement("div", { style:{color:S.warnText,fontWeight:700,fontSize:"0.8rem",marginBottom:"0.2rem"} },
+          "Paid breaks will never add to overtime"),
+        React.createElement("div", { style:{color:S.text,fontSize:"0.76rem",lineHeight:1.45} },
+          "Most rules count paid break time as time worked. With this off, your Reports mark the result as personal. "+PERSONAL_NOTE),
+        React.createElement("div", { "data-breakrules":true, style:{color:S.textMuted,fontSize:"0.72rem",lineHeight:1.45,marginTop:"0.35rem"} },
+          BREAK_RULES_NOTE))
+    ),
     React.createElement("div", { style:{marginBottom:"0.4rem"}, "data-anchor":"pay-cycle" },
       React.createElement("div", { style:sectionHead }, "Pay Cycle"),
       React.createElement("div", { style:sectionNote }, cycleHints[pr.cycle.period]),
@@ -23347,7 +23655,8 @@ function WorkScheduleModal(props){
     return normalizeSchedule(props.schedule);
   });
   var setDraft=draftS[1]; var draft=draftS[0];
-  var showBreaksS=useState(false); var setShowBreaks=showBreaksS[1]; var showBreaks=showBreaksS[0];
+  // openBreaks: straight into the breaks editor ("Change my allowance").
+  var showBreaksS=useState(!!props.openBreaks); var setShowBreaks=showBreaksS[1]; var showBreaks=showBreaksS[0];
   var showPayS=useState(false); var setShowPay=showPayS[1]; var showPay=showPayS[0];
   function patch(k, field, value){
     setDraft(function(prev){
@@ -23456,7 +23765,7 @@ function WorkScheduleModal(props){
         React.createElement("span", { style:{width:"10px",height:"10px",borderRadius:"50%",flexShrink:0,
           background:ub.enabled?S.successText:"transparent", border:"2px solid "+(ub.enabled?S.successText:S.chromeBdr)} }),
         React.createElement("span", { style:{color:ub.enabled?S.text:S.textMuted,fontWeight:ub.enabled?600:400,fontSize:"0.9rem",whiteSpace:"nowrap"} },
-          "Unpaid Breaks")
+          "Scheduled Breaks")
       ),
       ub.enabled && React.createElement("button", { "data-flat":true,
         onClick:function(){ setShowBreaks(true); },
@@ -23999,14 +24308,17 @@ function UnpaidBreaksModal(props){
     });
     return { enabled:src.enabled!==false,
              weekly:(src.weekly||[]).map(function(b){ return Object.assign({},b); }),
-             custom:custom };
+             custom:custom,
+             allowMode:src.allowMode==="own"?"own":"scheduled", allowMins:+src.allowMins||0,
+             carryOver:!!src.carryOver, overStyle:src.overStyle==="header"?"header":"float" };
   });
   var setUb=ubS[1]; var ub=ubS[0];
   var openDayS=useState(props.initialOpenDay||null); var setOpenDay=openDayS[1]; var openDay=openDayS[0];
 
   function mutate(fn){
     setUb(function(prev){
-      var next={ enabled:prev.enabled, weekly:prev.weekly.slice(), custom:{} };
+      var next={ enabled:prev.enabled, weekly:prev.weekly.slice(), custom:{},
+                 allowMode:prev.allowMode, allowMins:prev.allowMins, carryOver:prev.carryOver, overStyle:prev.overStyle };
       DAY_KEYS.forEach(function(k){ next.custom[k]=prev.custom[k].slice(); });
       fn(next);
       return next;
@@ -24078,7 +24390,17 @@ function UnpaidBreaksModal(props){
             textAlign:"center",
             border:"2px solid "+(minsBad?S.dangerText:S.border),
             color:minsBad?S.dangerText:S.text}) }),
-        React.createElement("span", { style:{fontSize:"0.78rem",color:S.textDim,fontFamily:S.fontBody,flexShrink:0} }, "min")
+        React.createElement("span", { style:{fontSize:"0.78rem",color:S.textDim,fontFamily:S.fontBody,flexShrink:0} }, "min"),
+        // Paid or unpaid: a paid break stays worked time and counts against
+        // the day's paid break time; an unpaid one comes off scheduled hours.
+        React.createElement("button", { "data-flat":true, "data-breakpaidtoggle":b.paid?"paid":"unpaid",
+          "aria-pressed":b.paid?"true":"false",
+          onClick:function(){ haptic(8); editBreak(dayKey, b.id, "paid", !b.paid); },
+          style:{marginLeft:"auto",flexShrink:0,background:b.paid?S.successBg2:S.bg0,
+                 border:"1.5px solid "+(b.paid?S.successBorder:S.border),borderRadius:"999px",
+                 padding:"0.3rem 0.65rem",color:b.paid?S.successText:S.textDim,cursor:"pointer",
+                 fontFamily:S.fontBody,fontWeight:800,fontSize:"0.7rem",letterSpacing:"0.06em"} },
+          b.paid ? "PAID" : "UNPAID")
       ),
       React.createElement("input", { value:b.note, placeholder:"Description (optional)",
         onChange:function(e){ editBreak(dayKey, b.id, "note", e.target.value); },
@@ -24086,8 +24408,18 @@ function UnpaidBreaksModal(props){
     );
   }
 
-  return React.createElement(Modal, { title:"Unpaid Breaks", onClose:props.onClose, wide:true,
+  var schedPaidDay=DAY_KEYS.reduce(function(a,k){
+    var m=breakAllowanceMins(Object.assign({}, preview, { unpaidBreaks:Object.assign({}, preview.unpaidBreaks, { allowMode:"scheduled" }) }), k);
+    return Math.max(a, m); }, 0);
+  var ownBad = ub.allowMode==="own" && !(+ub.allowMins>=0 && String(ub.allowMins)!=="");
+  function setField(f, v){ mutate(function(n){ n[f]=v; }); }
+  var rulesBox=function(){ return React.createElement("div", { "data-breakrules":true, style:{background:S.bg1,border:"1px solid "+S.border,
+      borderRadius:S.radius3,padding:"0.55rem 0.65rem",color:S.textMuted,fontSize:"0.74rem",lineHeight:1.45,fontFamily:S.fontBody} },
+    BREAK_RULES_NOTE); };
+
+  return React.createElement(Modal, { title:"Scheduled Breaks", onClose:props.onClose, wide:true,
     onSave:function(){ props.onDone(ub); }, saveLabel:"Done" },
+    React.createElement("div", { style:{marginBottom:"1rem"} }, rulesBox()),
     // every work day
     React.createElement("div", { style:{marginBottom:"1.1rem"}, "data-anchor":"ub-every" },
       React.createElement("div", { style:sectionHead }, "Every Work Day"),
@@ -24132,6 +24464,43 @@ function UnpaidBreaksModal(props){
         padding:"0.7rem 0 0.1rem",fontFamily:S.fontBody} },
       React.createElement("span", { style:{color:S.textDim,fontSize:"0.85rem"} }, "Unpaid per week"),
       React.createElement("span", { style:{color:S.warnText,fontWeight:700,fontFamily:S.fontMono} }, "-"+fmtHours(weekDeduct))
+    ),
+    // ---- paid break time (10-22) ----
+    React.createElement("div", { "data-anchor":"ub-allow", style:{marginTop:"1.2rem",paddingTop:"1rem",borderTop:"1px solid "+S.border} },
+      React.createElement("div", { style:sectionHead }, "Paid Break Time"),
+      React.createElement("div", { style:sectionNote }, "How much paid break time a work day has. Paid breaks you take count against it, scheduled or not."),
+      React.createElement(Toggle, { name:"Paid break time", keys:["scheduled","own"], value:ub.allowMode,
+        onChange:function(k){ setField("allowMode", k); },
+        labelOf:function(k){ return k==="own" ? "Set my own amount" : "My paid breaks"; } }),
+      ub.allowMode==="own"
+        ? React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",marginTop:"0.55rem"} },
+            React.createElement("input", { type:"number", inputMode:"numeric", min:0, step:5, value:ub.allowMins, "data-allowmins":true,
+              onChange:function(e){ setField("allowMins", e.target.value===""?"":Math.max(0, Math.min(480, Math.round(+e.target.value||0)))); },
+              style:Object.assign({},INPUT_STYLE,{width:"64px",flexShrink:0,padding:"0.42rem 0.4rem",
+                fontFamily:S.fontMono,fontSize:"0.88rem",minHeight:"2.1rem",boxSizing:"border-box",textAlign:"center",
+                border:"2px solid "+(ownBad?S.dangerText:S.border), color:ownBad?S.dangerText:S.text}) }),
+            React.createElement("span", { style:{fontSize:"0.8rem",color:S.textDim,fontFamily:S.fontBody} }, "min each work day"))
+        : React.createElement("div", { style:{marginTop:"0.5rem",fontSize:"0.8rem",color:S.textDim,fontFamily:S.fontBody} },
+            schedPaidDay>0 ? "Your paid breaks add up to "+fmtDur(schedPaidDay*60000,true)+" a day."
+                           : "No paid breaks yet. Mark a break PAID above, or set your own amount."),
+      // carry-over: only where an employer allows it; carried time is personal
+      React.createElement("button", { "data-flat":true, "data-carryover":ub.carryOver?"on":"off", "aria-pressed":ub.carryOver?"true":"false",
+        onClick:function(){ haptic(8); setField("carryOver", !ub.carryOver); },
+        style:{display:"flex",alignItems:"center",gap:"0.55rem",width:"100%",textAlign:"left",marginTop:"0.85rem",
+               background:"none",border:"none",padding:"0.25rem 0",cursor:"pointer",fontFamily:S.fontBody} },
+        React.createElement("span", { style:{width:"10px",height:"10px",borderRadius:"50%",flexShrink:0,
+          background:ub.carryOver?S.successText:"transparent", border:"2px solid "+(ub.carryOver?S.successText:S.chromeBdr)} }),
+        React.createElement("span", { style:{color:ub.carryOver?S.text:S.textMuted,fontWeight:ub.carryOver?600:400,fontSize:"0.9rem"} },
+          "Carry unused paid time to the next day")),
+      React.createElement("div", { style:Object.assign({}, sectionNote, { marginTop:"0.2rem" }) },
+        "Only if your employer allows it. A break that uses carried time is a personal record. "+PERSONAL_NOTE),
+      // how an overage shows while it is happening
+      React.createElement("div", { style:Object.assign({}, sectionHead, { marginTop:"0.9rem" }) }, "When A Paid Break Runs Over"),
+      React.createElement("div", { style:sectionNote }, "The time over shows live while you are on the break."),
+      React.createElement(Toggle, { name:"Overage display", keys:["float","header"], value:ub.overStyle,
+        onChange:function(k){ setField("overStyle", k); },
+        labelOf:function(k){ return k==="header" ? "In the header" : "Floating banner"; } }),
+      React.createElement("div", { style:{marginTop:"0.7rem"} }, rulesBox())
     )
   );
 }
@@ -24925,6 +25294,34 @@ function daySummaryTree(projectLogs, projects){
   roots.sort(order).forEach(function(r){ emit(r, 0); });
   return out;
 }
+// Breaks as text lines for Day Summary and the Reports copy (10-22): paid and
+// unpaid apart, the overage, missed breaks, and a PERSONAL footnote whenever
+// an unconventional choice is in the numbers. t is a rollup (or breakTally).
+function breakTally(list){
+  var taken=(list||[]).filter(function(b){ return b && b.endTime && !b.missed; });
+  var paid=taken.reduce(function(a,b){ return a+breakPaidMs(b); },0);
+  var all=taken.reduce(function(a,b){ return a+(b.duration||0); },0);
+  return { breakMs:all, breakCount:taken.length, paidBreakMs:paid, unpaidBreakMs:all-paid,
+    overMs:taken.reduce(function(a,b){ return a+(b.paid ? Math.max(0,b.overMs||0) : 0); },0),
+    overUnpaidMs:taken.reduce(function(a,b){ return a+(b.paid && b.overUnpaid ? Math.max(0,b.overMs||0) : 0); },0),
+    missedCount:(list||[]).filter(function(b){ return b && b.missed; }).length,
+    personalCount:taken.filter(function(b){ return !!b.personal; }).length };
+}
+function breakTextLines(t, paidBreaksOtOff){
+  var out=[];
+  if(t.breakMs>0){
+    out.push("Breaks ("+t.breakCount+"): "+fmtDur(t.breakMs,true));
+    if(t.paidBreakMs>0) out.push("  Paid: "+fmtDur(t.paidBreakMs,true)+(paidBreaksOtOff?" *":""));
+    if(t.unpaidBreakMs>0) out.push("  Unpaid: "+fmtDur(t.unpaidBreakMs,true));
+    if(t.overMs>0) out.push("  Over paid break time: "+fmtDur(t.overMs,true)+(t.overUnpaidMs>0?" ("+fmtDur(t.overUnpaidMs,true)+" made unpaid *)":""));
+  }
+  if(t.missedCount>0) out.push("Missed breaks: "+t.missedCount);
+  if(t.personalCount>0 || paidBreaksOtOff){
+    out.push("* Personal: "+[t.personalCount>0 ? t.personalCount+" break"+(t.personalCount===1?"":"s")+" from your own choices" : null,
+      paidBreaksOtOff ? "paid breaks set not to count toward overtime" : null].filter(Boolean).join("; ")+". "+PERSONAL_NOTE);
+  }
+  return out;
+}
 function DaySummary(props){
   var logs=props.logs, disruptions=props.disruptions, breaks=props.breaks, onClose=props.onClose, testMode=props.testMode;
   var copiedS = useState(false); var setCopied=copiedS[1]; var copied=copiedS[0];
@@ -24940,7 +25337,7 @@ function DaySummary(props){
 
   var lines=["Day Summary - "+today+(testMode?" [PRACTICE]":""),""].concat(daySummaryTree(projectLogs, props.projects));
   lines.push("","Total: "+fmtDur(totalMs,true));
-  if(breakTotal>0) lines.push("Breaks: "+fmtDur(breakTotal,true));
+  if(breakTotal>0 || breaks.some(function(b){ return b && b.missed; })) lines=lines.concat(breakTextLines(breakTally(breaks), false));
   if(distTotal>0) lines.push("Disruptions ("+done.length+"): "+fmtDur(distTotal,true)+" lost");
 
   function copy(){ navigator.clipboard.writeText(lines.join("\n")).then(function(){ setCopied(true); setTimeout(function(){ setCopied(false); },2000); }); }
@@ -24980,14 +25377,16 @@ function ReportsModal(props){
     logs:allLogs,
     projects:props.projects||[], disruptions:props.disruptions, breaks:props.breaks,
     laneMeta:props.laneMeta, laneOrder:props.laneOrder, range:range,
-    otDays:payroll?payroll.otDays:[]
+    otDays:payroll?payroll.otDays:[], paidBreaksOt:payroll?payroll.paidBreaksOt:true
   });
   var ot=(payroll&&payroll.ot)||{kind:"1.5x",flatExtra:6.25};
   var otMult = ot.kind==="2x" ? 2 : 1.5;
   var hasOtDays = !!(payroll && payroll.otDays && payroll.otDays.length);
   var schedMins=scheduledMinutes(props.schedule, range.start, range.end);
   var paceMins=scheduledToDate(props.schedule, range.start, range.end, now);
-  var trackedMins=roll.trackedMs/60000;
+  // Paid break time is paid time, so it counts toward the scheduled hours
+  // (paid scheduled breaks are no longer netted out of them).
+  var trackedMins=(roll.trackedMs+(roll.paidBreakMs||0))/60000;
   var coverPct = schedMins>0 ? Math.round(trackedMins/schedMins*100) : null;
   var pacePct  = paceMins>0  ? Math.round(trackedMins/paceMins*100)  : null;
   var fillPct  = schedMins>0 ? Math.min(100, trackedMins/schedMins*100) : 0;
@@ -25045,7 +25444,7 @@ function ReportsModal(props){
     }
     if(schedMins>0) out.push("Scheduled: "+fmtHours(schedMins)+(coverPct!=null?"  ("+coverPct+"% covered)":""));
     if(roll.clockedMs>0) out.push("Clocked in: "+fmtDur(roll.clockedMs,true));
-    if(roll.breakMs>0) out.push("Breaks ("+roll.breakCount+"): "+fmtDur(roll.breakMs,true));
+    out=out.concat(breakTextLines(roll, !!roll.paidBreaksOtOff));
     if(roll.distMs>0) out.push("Disruptions ("+roll.distCount+"): "+fmtDur(roll.distMs,true)+" lost");
     out.push("Days with time: "+roll.activeDays);
     // Modules append their own lines to the copied report, after the core's.
@@ -25135,7 +25534,7 @@ function ReportsModal(props){
   // weekStart-aligned week inside the period gets its own allowance
   var exclH;
   if(excludeUnit==="week" && excludeHrs>0 && isPay){
-    exclH=overtimeByWeek(allLogs, range, payroll?payroll.otDays:[], weekStart)
+    exclH=overtimeByWeek(allLogs.concat(paidBreakLogs(props.breaks, payroll?payroll.paidBreaksOt:true)), range, payroll?payroll.otDays:[], weekStart)
       .reduce(function(a,w){ return a+Math.min(w.otMs/3600000, excludeHrs); },0);
   } else {
     exclH=Math.min(otRawH, excludeHrs);
@@ -25201,6 +25600,23 @@ function ReportsModal(props){
     stat("Disrupt", roll.distCount>0?(fmtDur(roll.distMs,true)+" x"+roll.distCount):"--", roll.distCount>0?S.dangerText:S.textMuted),
     stat("Days", String(roll.activeDays))
   );
+  // Breaks, told apart (10-22): paid and unpaid, the overage, missed ones,
+  // and a PERSONAL note when an unconventional choice is in these numbers.
+  var hasPersonal=roll.personalCount>0 || !!roll.paidBreaksOtOff;
+  var breakNote=(roll.breakMs>0 || roll.missedCount>0) && React.createElement("div", { "data-breaknote":true,
+      style:{marginTop:"-0.5rem",marginBottom:"1rem",fontFamily:S.fontBody,fontSize:"0.78rem",color:S.textDim,lineHeight:1.5} },
+    React.createElement("div", null,
+      [roll.paidBreakMs>0 ? "Paid "+fmtDur(roll.paidBreakMs,true) : null,
+       roll.unpaidBreakMs>0 ? "Unpaid "+fmtDur(roll.unpaidBreakMs,true) : null,
+       roll.overMs>0 ? fmtDur(roll.overMs,true)+" over paid time" : null,
+       roll.missedCount>0 ? roll.missedCount+" missed" : null].filter(Boolean).join("  \u00b7  ")),
+    hasPersonal && React.createElement("div", { "data-personalnote":true, style:{display:"flex",gap:"0.4rem",alignItems:"baseline",marginTop:"0.25rem"} },
+      React.createElement("span", { style:{flexShrink:0,background:S.infoBg,color:S.infoText,borderRadius:S.radius3,
+        padding:"0.02rem 0.35rem",fontSize:"0.62rem",fontWeight:800,letterSpacing:"0.06em"} }, "PERSONAL"),
+      React.createElement("span", null,
+        [roll.personalCount>0 ? (roll.overUnpaidMs>0 ? fmtDur(roll.overUnpaidMs,true)+" made unpaid; " : "")+
+           roll.personalCount+" break"+(roll.personalCount===1?"":"s")+" from your own choices" : null,
+         roll.paidBreaksOtOff ? "paid breaks set not to count toward overtime" : null].filter(Boolean).join(". ")+". "+PERSONAL_NOTE)));
 
   // Milestones over the period. The line at full width with labels, then the
   // account of it: what was due, how it went, and what is next. Only drawn
@@ -25315,7 +25731,7 @@ function ReportsModal(props){
   });
 
   return React.createElement(Modal, { title:"Reports", onClose:props.onClose, wide:true, cancelLabel:"Close" },
-    seg, nav, summary, payCard, stats, milestones, body, modSections,
+    seg, nav, summary, payCard, stats, breakNote, milestones, body, modSections,
     roll.trackedMs>0 && React.createElement("button", { "data-flat":true, onClick:copy,
       style:{width:"100%",marginTop:"0.4rem",background:copied?S.successBg2:S.bg1,
              border:"1px solid "+(copied?S.successBorder:S.border),borderRadius:S.radius,
@@ -27241,7 +27657,7 @@ function TTErrorBoundary(props){ return props.children; }
 // APP_VERSION is the public number. The build stamp stays where it has always
 // been, in the boot div, because that is the thing that proves which deploy
 // landed; this is the thing a person reads.
-var APP_VERSION = "1.2";
+var APP_VERSION = "1.3";
 var SPLASH_SHOW_MS = 2500;   // fully opaque
 var SPLASH_FADE_MS = 320;    // then fades out over this
 function SplashScreen(props){
@@ -27454,6 +27870,13 @@ function TTBoard(){
   var onBreakS=useState(!!boot.breakStart); var setOnBreak=onBreakS[1]; var onBreak=onBreakS[0];
   var breakStartS=useState(boot.breakStart||null); var setBreakStart=breakStartS[1]; var breakStart=breakStartS[0];
   var breakElapsedS=useState(since(boot.breakStart)); var setBreakElapsed=breakElapsedS[1]; var breakElapsed=breakElapsedS[0];
+  // Breaks, 10-22: the overage question, the offer to resume the job, the
+  // missed scheduled break's snoozes and skips (kept for the work day only),
+  // and opening the breaks editor straight from "Change my allowance".
+  var overAskS=useState(null); var setOverAsk=overAskS[1]; var overAsk=overAskS[0];
+  var resumeAskS=useState(null); var setResumeAsk=resumeAskS[1]; var resumeAsk=resumeAskS[0];
+  var breakQuietS=useState(function(){ return load("tt_breaknags",{}); }); var setBreakQuiet=breakQuietS[1]; var breakQuiet=breakQuietS[0];
+  var openBreaksEdS=useState(false); var setOpenBreaksEd=openBreaksEdS[1]; var openBreaksEd=openBreaksEdS[0];
   var breakLabelS=useState(boot.breakLabel||""); var setBreakLabel=breakLabelS[1]; var breakLabel=breakLabelS[0];
 
   // Disruption state
@@ -27545,6 +27968,13 @@ function TTBoard(){
   useEffect(function(){ save("tt_lanemeta",laneMeta); },[laneMeta]);
   useEffect(function(){ save("tt_distpresets",distPresets); },[distPresets]);
   useEffect(function(){ save("tt_settings",settings); },[settings]);
+  useEffect(function(){ save("tt_breaknags",breakQuiet); },[breakQuiet]);
+  // An overage left unanswered (the app closed on the question) is asked
+  // again when the board opens, so it never sits undecided.
+  useEffect(function(){
+    var u=breaks.filter(function(b){ return b && b.endTime && b.paid && (b.overMs||0)>=BREAK_OVER_MIN_MS && !b.overUnpaid && !b.overCovered; });
+    if(u.length){ var b=u[u.length-1]; setOverAsk({ id:b.id, day:b.day||curDay(), label:b.label, overMs:b.overMs, fromId:null, clockingOut:true }); }
+  },[testMode]);
   // Only start timestamps are written, never elapsed counters - see the restore
   // block above. This fires on start/stop, not on every tick.
   useEffect(function(){
@@ -27821,7 +28251,7 @@ function TTBoard(){
     var now=Date.now();
     if(activeId) finalizeProject(now);
     if(openDist) closeDisruption(now);
-    if(onBreak) endBreak();
+    if(onBreak) endBreak({ clockingOut:true });
     setLogs(function(prev){ return prev.map(function(l){ return (!l.endTime&&l.type==="atwork")?Object.assign({},l,{endTime:now,duration:now-l.startTime}):l; }); });
     setAtWorkStart(null); setAtWorkElapsed(0);
     // Land on Reports for the day just finished. The question at the end of a
@@ -27881,19 +28311,77 @@ function TTBoard(){
     closeDisruption();
     setInterrupting(false); setIntStart(null); setIntElapsed(0);
   }
-  function startBreak(label){
+  // A break records whether it is paid and which job it stopped (fromId), so
+  // ending it can offer that job back. paid is absent on old records: unpaid.
+  function startBreak(label, paid){
     haptic(12);
     var now=Date.now();
     setShowBreak(false);
+    var from=activeId!=null ? activeId : null;
     if(activeId) finalizeProject(now);
-    setBreaks(function(prev){ return prev.concat([{id:uid(),day:curDay(),label:label,startTime:now,endTime:null,duration:0}]); });
+    setBreaks(function(prev){ return prev.concat([{id:uid(),day:curDay(),label:label,paid:!!paid,fromId:from,startTime:now,endTime:null,duration:0}]); });
     setOnBreak(true); setBreakStart(now); setBreakElapsed(0); setBreakLabel(label);
   }
-  function endBreak(){
+  // Ending a paid break measures it against the day's paid break time. Past
+  // it by a minute or more, the overage is recorded and asked about; a break
+  // that leaned on carried-over time is a personal record. Otherwise the job
+  // it interrupted is offered back - except when clocking out ends it.
+  function endBreak(opts){
+    opts=opts||{};
     haptic(12);
     var now=Date.now();
-    setBreaks(function(prev){ return prev.map(function(b){ return !b.endTime?Object.assign({},b,{endTime:now,duration:now-b.startTime}):b; }); });
+    var cur=breaks.filter(function(b){ return !b.endTime && !b.missed; })[0]||null;
+    var extra={}, ask=null;
+    if(cur && cur.paid){
+      var st=breakDayState(settings.workSchedule, breaks, cur.day||curDay(), cur.id);
+      var o=breakOverFor(st, now-cur.startTime);
+      if(o.usedCarry) extra.personal=true;
+      if(o.overMs>=BREAK_OVER_MIN_MS){
+        extra.overMs=o.overMs;
+        ask={ id:cur.id, day:cur.day||curDay(), label:cur.label, overMs:o.overMs, fromId:cur.fromId, clockingOut:!!opts.clockingOut };
+      }
+    }
+    setBreaks(function(prev){ return prev.map(function(b){
+      return (!b.endTime && !b.missed) ? Object.assign({}, b, { endTime:now, duration:now-b.startTime }, extra) : b; }); });
     setOnBreak(false); setBreakStart(null); setBreakElapsed(0); setBreakLabel("");
+    if(ask) setOverAsk(ask);
+    else if(!opts.clockingOut) offerResume(cur);
+  }
+  function offerResume(cur){
+    var job=(cur && cur.fromId!=null) ? findProj(projects, cur.fromId) : null;
+    if(job && !isClosed(job)) setResumeAsk({ fromId:job.id, name:job.name, label:cur.label });
+  }
+  // The overage, settled. Unpaid: it comes off and the record is personal.
+  // Just today / Change my allowance: it stays paid as extra time for the day,
+  // and Change also opens the breaks editor to change the standing amount.
+  function resolveOver(kind){
+    var ask=overAsk; if(!ask) return;
+    haptic(10);
+    setBreaks(function(prev){ return prev.map(function(b){
+      if(b.id!==ask.id) return b;
+      return kind==="unpaid" ? Object.assign({}, b, { overUnpaid:true, overCovered:false, personal:true })
+                             : Object.assign({}, b, { overCovered:true, overUnpaid:false });
+    }); });
+    setOverAsk(null);
+    if(kind==="change"){ setOpenBreaksEd(true); setShowSchedule(true); }
+    else if(!ask.clockingOut) offerResume({ fromId:ask.fromId, label:ask.label });
+  }
+  // The missed scheduled break. Start / In 30 min / Skip today - a skip is
+  // recorded as MISSED: a fact, kept as evidence, never a personal choice.
+  function quietBreak(key, val){
+    var day=curDay();
+    setBreakQuiet(function(prev){ var n={};
+      Object.keys(prev||{}).forEach(function(k){ if(k.indexOf(day+"|")===0) n[k]=prev[k]; });
+      n[key]=val; return n; });
+  }
+  function missedAct(kind){
+    var due=missedDue; if(!due) return;
+    if(kind==="start"){ startBreak(due.name, due.paid); return; }
+    if(kind==="snooze"){ haptic(8); quietBreak(due.key, Date.now()+30*60000); return; }
+    haptic(10);
+    quietBreak(due.key, "skip");
+    setBreaks(function(prev){ return prev.concat([{ id:uid(), day:curDay(), label:due.name, paid:due.paid, missed:true, missedKey:due.key,
+      startTime:due.at, endTime:due.at, duration:0 }]); });
   }
   function addProject(data){
     var id=newProjectId(projects);
@@ -28110,10 +28598,25 @@ function TTBoard(){
   UI.bottomClear = hdrBottom ? 114 : 0;
   UI.topClear = hdrBottom ? FW : (114 + FW);
 
+  // ---- Breaks (10-22): the open break, paid time left, what is due ----
+  var curBreak=breaks.filter(function(b){ return !b.endTime && !b.missed; })[0]||null;
+  var wsSched=settings.workSchedule, breakDay=curDay();
+  var breakSt=breakDayState(wsSched, breaks, breakDay, curBreak?curBreak.id:null);
+  var breakLeftMs=breakSt.limited ? breakSt.leftMs : null;
+  var overLiveMs=(onBreak && curBreak && curBreak.paid)
+    ? breakOverFor(breakDayState(wsSched, breaks, curBreak.day||breakDay, curBreak.id), breakElapsed).overMs : 0;
+  var overStyle=(wsSched && wsSched.unpaidBreaks && wsSched.unpaidBreaks.overStyle)||"float";
+  var missedDue=(clocked && !onBreak && !interrupting) ? missedBreakDue(wsSched, breakDay, nowTick, breaks, breakQuiet) : null;
+  var bannerPlace=hdrBottom ? { bottom:122 } : { top:TUT_H+122 };
+  var statusTag=onBreak ? "End" : ((clocked && !interrupting) ? "Break" : null);
+
   // ---- Screen ticker: date/time + live status ----
   var tickerEl = React.createElement(HeaderTicker, { interrupting:interrupting, activeProj:activeProj, intElapsed:intElapsed,
     wsActive:wsActive, elapsed:elapsed, onBreak:onBreak, breakLabel:breakLabel, breakElapsed:breakElapsed,
-    clocked:clocked, atWorkElapsed:atWorkElapsed, nowTick:nowTick, bottom:hdrBottom });
+    clocked:clocked, atWorkElapsed:atWorkElapsed, nowTick:nowTick, bottom:hdrBottom,
+    statusTag:statusTag,
+    onStatusTap:onBreak ? function(){ endBreak(); } : function(){ closeAllPopups(); setShowBreak(true); },
+    overNote:(overStyle==="header" && overLiveMs>0) ? "+"+fmtDur(overLiveMs,true)+" over" : null });
 
   return (
     React.createElement("div", { dir:isLeft?"rtl":"ltr", style:{minHeight:"100vh",background:S.bg0,color:S.text,fontFamily:S.fontBody,paddingBottom:rootPadBottom,paddingLeft:FW,paddingRight:FW} },
@@ -28439,7 +28942,16 @@ function TTBoard(){
         },
         onCancel:function(){ setDayAsk(null); } }),
       showDisrupt && React.createElement(DisruptionModal, { projName:disruptTarget?disruptTarget.name:null, onStart:startDisruption, onCancel:function(){ setShowDisrupt(false); } }),
-      showBreak && React.createElement(BreakModal, { onStart:startBreak, onCancel:function(){ setShowBreak(false); } }),
+      showBreak && React.createElement(BreakModal, { options:breakOptionsFor(wsSched, breakDay), leftMs:breakLeftMs,
+        onStart:startBreak, onCancel:function(){ setShowBreak(false); } }),
+      missedDue && !showBreak && React.createElement(MissedBreakBanner, { due:missedDue, place:bannerPlace,
+        jobName:activeProj ? activeProj.name : null, onAct:missedAct }),
+      overLiveMs>0 && overStyle!=="header" && React.createElement(BreakOverBanner, { overMs:overLiveMs, place:bannerPlace }),
+      overAsk && React.createElement(BreakOverModal, { label:overAsk.label, overMs:overAsk.overMs,
+        totalMs:breakDayState(wsSched, breaks, overAsk.day, overAsk.id).totalMs, onPick:resolveOver }),
+      resumeAsk && React.createElement(BreakResumeModal, { label:resumeAsk.label, jobName:resumeAsk.name,
+        onResume:function(){ var id=resumeAsk.fromId; setResumeAsk(null); toggleProject(id); },
+        onClose:function(){ setResumeAsk(null); } }),
       showDay && React.createElement(DaySummary, { logs:todayLogs, disruptions:todayDist, breaks:todayBreaks, dayKey:todayStr2, projects:projects, onClose:function(){ setShowDay(false); }, testMode:testMode }),
       notifToast && React.createElement("div", { "data-surface":"panel", role:"status",
         onClick:function(){ setNotifToast(null); },
@@ -28515,9 +29027,9 @@ function TTBoard(){
       showGuides && React.createElement(GuidesModal, { onClose:function(){ setShowGuides(false); } }),
       showThemes && React.createElement(ThemesModal, { settings:settings, onChange:setSettings, onClose:function(){ setShowThemes(false); } }),
       showLayout && React.createElement(LayoutModal, { settings:settings, onChange:setSettings, onClose:function(){ setShowLayout(false); } }),
-      showSchedule && React.createElement(WorkScheduleModal, { schedule:settings.workSchedule,
-        onSave:function(sch){ setSettings(Object.assign({},settings,{workSchedule:sch})); setShowSchedule(false); },
-        onClose:function(){ setShowSchedule(false); } }),
+      showSchedule && React.createElement(WorkScheduleModal, { schedule:settings.workSchedule, openBreaks:openBreaksEd,
+        onSave:function(sch){ setSettings(Object.assign({},settings,{workSchedule:sch})); setShowSchedule(false); setOpenBreaksEd(false); },
+        onClose:function(){ setShowSchedule(false); setOpenBreaksEd(false); } }),
       showTracking && React.createElement(TrackingModal, { settings:settings, onChange:setSettings,
         onClose:function(){ setShowTracking(false); } }),
       showEditPresets && React.createElement(EditDistPresetsModal, { presets:distPresets, onSave:function(items){ setDistPresets(items.length?items:DEFAULT_DIST_PRESETS); setShowEditPresets(false); }, onCancel:function(){ setShowEditPresets(false); } }),

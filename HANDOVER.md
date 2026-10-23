@@ -1,18 +1,28 @@
 # Time Tracker — session handover
 
-Current build: **`10-20 v1.2 ids and tracking`** (public version **1.2**, `APP_VERSION` - bumped 10-20 because Brent is pushing this build)
+Current build: **`10-22 v1.3 breaks`** (public version **1.3**, `APP_VERSION` - bumped 10-22: Brent asked for the breaks package as a single export to push)
 
 ```
-tt-tests.js  1809 assertions   208 cases   (static, no browser)
-boot.js       319 checks                    (renders the built file)
+tt-tests.js  1833 assertions   211 cases   (static, no browser)
+boot.js       367 checks                    (renders the built file)
 shift.js       46 checks                    (work days, shifts, overtime)
-lifecycle.js  573 checks                    (projects, nesting, archive, scheduling)
-e2e.js        650 checks                    (Playwright, the real board in a browser)
+lifecycle.js  628 checks                    (projects, nesting, archive, scheduling, breaks)
+e2e.js        690 checks                    (Playwright, the real board in a browser)
 ```
 
 **Everything above is green at this build.** Pushing it is Brent's step
-(Working Copy -> GitHub Pages). `10-10 one walk` was the build before (all
-five green at it too, re-run 10-20 before anything changed).
+(Working Copy -> GitHub Pages). `10-20 v1.2 ids and tracking` was the build
+before (pushed). First paint is identical to 1.2 apart from the splash's
+version number.
+
+## START HERE - 1.3 (breaks) is built. Next: the database.
+
+The breaks package (Numbers testers' top ask) shipped as 1.3 - see Recent
+work. Next development phase is the **database integration** (hosted
+Supabase, free plan, for the sandbox), but table design is PAUSED on Brent's
+answers to the five organization / share-link questions (see "Multi-user
+hurdles"). Brent also has to create the Supabase project and send the
+Project URL and publishable key (never the secret key or DB password).
 
 ## START HERE - modules bring their own help: DONE (10-20). Brent picks next.
 
@@ -541,6 +551,68 @@ which is what makes Backup & Restore whole.
   behaving exactly as they did. Nothing migrates.
 
 ## Recent work, newest first
+
+- **Version 1.3: breaks (10-22 `v1.3 breaks`).** Built from the decisions in
+  "BREAKS PACKAGE" below; Brent asked for it as one export to push.
+  - **Model** (pure, tested in lifecycle): a break record gains `paid`,
+    `fromId`, `overMs`, `overUnpaid`, `overCovered`, `personal`, `missed`,
+    `missedKey`. Absent `paid` = unpaid (old records unchanged).
+    `breakAllowanceMins` (paid scheduled breaks added up, or `allowMode:
+    "own"` + `allowMins`), `breakDayState` (allow + carry + extra - used;
+    carry is one day back and only with `carryOver`; **`limited:false` when
+    there is no paid time set at all**, so an untouched schedule never
+    measures or nags), `breakOverFor`, `paidBreakLogs`, `missedBreakDue`.
+  - **Pay:** only UNPAID scheduled breaks come off scheduled hours. Paid
+    break time joins regular/overtime in `buildRollup` by its work day
+    (`paidBreakLogs` + `logIsOt`); `payroll.paidBreaksOt:false` keeps it all
+    regular and marks the report personal. `trackedMs` is still jobs only.
+  - **Board:** header status line is the tap target with a `Break ›` /
+    `End ›` tag (`data-statustap`, `data-breaktag`). Break sheet: "I need a
+    break!" as Paid break / Unpaid break, the usual breaks tagged PAID/UNPAID
+    from today's schedule, a custom name asks which. Low paid time (<5 min)
+    is said before a paid break starts. Live overage: floating banner or a
+    header note (`overStyle`). Ending a paid break past its time asks Make
+    it unpaid (personal) / Just today / Change my allowance (opens Work
+    Schedule straight into the breaks editor - the one deliberate second
+    caller of `setShowSchedule(true)`, allowed in tt-tests). An unanswered
+    overage is asked again on next open. Then Resume <job> / Not yet
+    (never on clock-out: `endBreak({clockingOut:true})`). Missed scheduled
+    break banner: Start it now / In 30 min / Skip today; snoozes and skips
+    live in `tt_breaknags` (today only); Skip writes a `missed` record - a
+    fact, never personal.
+  - **Settings:** "Unpaid Breaks" is **Scheduled Breaks**; each break has a
+    PAID/UNPAID pill; new Paid Break Time section (My paid breaks / Set my
+    own amount, carry-over toggle with its note, overage display choice).
+    Pay & Work Week has "Paid Breaks: Count toward overtime / Don't count"
+    (off warns). `BREAK_RULES_NOTE` (the check-with-HR disclaimer) shows at
+    Scheduled Breaks (top and bottom), the overage question, the overtime
+    warning and the break guide; `PERSONAL_NOTE` wherever a choice makes a
+    personal record.
+  - **Reports / Day Summary / copy-out:** paid and unpaid apart, overage,
+    missed count, a PERSONAL tag (`data-personalnote`) and a `* Personal:`
+    footnote in the copied text (`breakTally`, `breakTextLines`).
+  - **Manual:** Scheduled Breaks picture (+ Paid Break Time), Pay & Work
+    Week picture (+ Paid Breaks), "Set up scheduled breaks" guide, "Take a
+    break" rewritten (status tag, Paid/Unpaid, resume, overage, rules note -
+    inlined as text because the help registries load before the constant).
+  - Tests: tt-tests +20 (break wiring and note placements), boot +38
+    (every new screen rendered), lifecycle +55 (model), e2e +32 (tag, missed
+    skip + reload, paid break, resume, overage unpaid -> personal + Reports
+    tag, Change my allowance). Mutation-checked: dropping `personal` on an
+    unpaid overage, offering resume on clock-out, `limited` always on, the
+    help ticker tag, the overtime-off star - each caught.
+  - Manual layout limit found: a picture's number chips wrap past six parts
+    at phone width, which makes the steady box taller and pushed Pay & Work
+    Week's marks under it. So Paid Breaks is NOT its own part there - it is
+    named in the Overtime Rate part and in `covers`. Keep pictures to six
+    parts or fewer. One full e2e run crashed once in the guide walk
+    (`[data-helpdetail]` null - a guide closed a beat early under load); the
+    walk passed alone twice and the full rerun was 690/690. Watch for it.
+  - Release notes for the About page (1.3): "Take a break from the header.
+    Breaks can be paid or unpaid, with a daily paid break allowance, a
+    heads-up when it's running low, and a choice when you go over. A
+    scheduled break you miss gets a reminder. Unconventional choices are
+    kept as personal records, and a reminder to check your local rules."
 
 - **Version 1.2 (10-20 `v1.2 ids and tracking`).** Brent is pushing, so per
   the version rule `APP_VERSION` 1.1 -> 1.2. Paint diff: the splash's
@@ -1493,7 +1565,114 @@ for the three or four topics people actually get stuck on.
 
 ## Multi-user hurdles (flag list - Brent, 10-10)
 
-**NEXT (Brent, 10-20): choose the database/server, and talk about a
+**BREAKS PACKAGE (Brent, 10-22 - BUILT as 1.3, see Recent work; this is the decision record).** A
+manual break already exists (menu -> Break -> presets/custom; End Break in
+the menu; records {id,day,label,startTime,endTime,duration}; ALWAYS unpaid,
+kept out of worked time) but is hard to find. Agreed:
+- **Header shortcut (mock option 1):** the status line carries a "Break >"
+  tag (End > while on break) that opens the break sheet. Open: tag only or
+  the whole status line as the tap target.
+- **Missed scheduled break banner (option 4):** "Lunch was due at 12:00 -
+  Start it now / In 30 min / Skip today". Open: floating over the board (as
+  mocked; nothing moves) or a strip that pushes the board down.
+- **Ending a break offers "Resume <job>"** or "Back at work, no job yet".
+- **Paid / unpaid breaks.** Each break carries paid or unpaid (absent =
+  unpaid, old records unchanged). Sheet layout B: "I need a break!" split
+  into one-tap "Paid break" / "Unpaid break"; usual breaks tagged PAID or
+  UNPAID (defaults: Morning paid, Lunch unpaid, Afternoon paid); "End of
+  Day" dropped; a CUSTOM label ASKS paid or unpaid.
+- **Paid break ALLOWANCE (Brent):** paid breaks, scheduled or not, draw
+  from a preset amount of paid break time. An unscheduled paid break
+  reminds that it uses the allowance. Going over is announced and the
+  overage tracked; then it asks: make the overage unpaid, or edit/add paid
+  break time.
+- **Allowance details (Brent, 10-22):** it is (a) the TOTAL of the scheduled
+  paid breaks, with (b) a separate "paid break time per day" number in
+  Time Settings for people who do not schedule breaks. It resets PER WORK
+  DAY (a shift counts as one day). CARRY-OVER of unused time is an OPTIONAL
+  setting, for employers that allow it. The overage prompt offers "Make it
+  unpaid", and adding time as "Just today" or "Change my allowance".
+- **Reminder before an unscheduled paid break (Brent, 10-22):** only when
+  time is running LOW ("x min left"), not every time.
+- **"Used up / over" warning style is a SETTING** in break setup: floating
+  banner over the board, or a small "+2m over" in the header.
+- **LEGAL (researched 10-22; not legal advice - say so).** Federal: breaks
+  not required, but short breaks (~5-20 min) offered MUST be paid and count
+  toward overtime (29 CFR 785.18; Third Circuit, DOL v. American Future
+  Systems, 2017: bright line); meal periods 30+ min may be unpaid;
+  extensions past an authorised break may be unpaid ONLY if the employer
+  expressly told employees the length, that extending breaks the rules, and
+  that it will be punished. Washington (WAC 296-126-092): paid 10-min rest
+  per 4 hours, never more than 3 hours without one, scheduled near the
+  midpoint; 30-min meal starting between hour 2 and 5, paid if kept on
+  duty. WA rest breaks CANNOT be waived and a MISSED paid rest break counts
+  as hours worked / can trigger overtime (WSNA v. Sacred Heart, WA Sup. Ct.
+  2012); meal periods can be waived knowingly and voluntarily. Other states
+  differ. Design consequences (proposed to Brent, awaiting his OK):
+  overage-to-unpaid stays but is worded as "your record" + policy note;
+  the "paid breaks don't count toward overtime" setting defaults to counts
+  and warns when switched off; the missed-lunch banner's "Skip today"
+  records the break as MISSED (evidence) - optionally counting a missed
+  paid break as worked time; carry-over stays optional with a note.
+  DISCLAIMER (minimum, Brent asked for it): "Break and pay rules vary by
+  employer, state and country. Time Tracker records your time; it doesn't
+  decide what you're owed. Check with your HR department and your local,
+  state or federal labor rules." Shown once at Scheduled Breaks setup,
+  beside the overage choice, beside carry-over, and in the break guide (no
+  figures in that prose). A lawyer should write the full terms of use
+  before any commercial launch.
+- **"PERSONAL RECORD, NOT OFFICIAL TIME" (Brent, 10-22).** Choosing an
+  unconventional option marks what it produces as a PERSONAL record of time,
+  not official time, and says so at the moment of choosing ("This will be
+  saved as your personal record, not official time"). Proposed list (to
+  confirm): an overage made unpaid; paid breaks set NOT to count toward
+  overtime; carried-over paid break time. A MISSED break is a fact, not a
+  choice - recorded as missed, not personal. Shown as a PERSONAL tag on the
+  record, a note on those lines in Reports, and a footnote in the copied
+  report. Stored as a field on the record (absent = official, the old
+  behaviour).
+- **Overtime:** paid break time counts toward overtime too, UNLESS the
+  overtime settings say otherwise - add that setting to Pay & Work Week.
+- Scheduled "Unpaid Breaks" becomes "Scheduled Breaks", each paid or unpaid.
+- Before building: check how a manual late lunch interacts with a scheduled
+  unpaid lunch in the pay figures, so nothing is deducted twice.
+
+**ORGANIZATIONS AND SHARE LINKS (Brent, 10-21 - raised BEFORE the table
+design; settle first).** An ORGANIZATION is the top level: members see
+each other (a directory), invite or ask to join each other's projects, and
+the org is the collection of all its shared projects (private ones never
+listed). Its ORG ADMIN = the workspace admin above project top admins (and
+answers "top admin disappears"). A SHARE LINK (token) made by a project's
+admins lets someone outside the org - another company, or no org - join
+that ONE project as a guest, seeing nothing else. Every shared project is
+owned by an org or by one person. Open: how people join an org (invite /
+code / company email); can members see all org projects' CONTENTS or only
+names; more than one org per person; links straight-in or approval, expiry,
+single-use, revocable; cross-SERVER links (Boeing in-house <-> ours) are a
+federation problem - needed or not. Table design paused until these settle;
+a local Postgres 16 (+ psql, docker) is available in the container for
+testing row-level security.
+
+**DECIDED (Brent, 10-21): hosted SUPABASE, FREE plan, for the sandbox.**
+The next development phase is the database integration. Reasons: it is the
+same software an enterprise self-hosts (supabase-js talks to both - moving
+is a change of URL and keys); free has no time limit (2 active projects,
+500 MB DB, 5 GB egress, 50k MAU); it pauses after ~1 week of low activity
+(warning email a week ahead; Resume restores everything; restorable for a
+year per the docs body, 90 days per its heading - plan on 90); FREE HAS NO
+BACKUPS. Upgrade to Pro ($25/mo: never pauses, daily backups 7 days, 8 GB,
+$10 compute credit = Micro) when beta testers depend on it. The second free
+project can become the beta server so sandbox and beta never share data.
+Firebase as a stand-in was considered and REJECTED: permissions, data
+layout and server jobs would be written twice, and its built-in offline
+sync would mask bugs in ours. The server connection stays a swappable
+layer behind the store's doorway. To check before public launch:
+Supabase's Acceptable Use Policy (pricing page has no commercial limit on
+Free). Brent must never paste the SECRET/service key or the DB password into
+a chat; the publishable (anon) key is public by design - row-level security
+is what protects the data.
+
+**Earlier (Brent, 10-20): choose the database/server, and talk about a
 SANDBOX.** Groundwork steps 1-2 are done (doorway, long ids, change
 tracking). Brent: "now we're getting into development that needs to be live
 but not shared" - a separate test server (and probably a separate test copy

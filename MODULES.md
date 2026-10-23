@@ -280,14 +280,14 @@ say, so Reports is untouched until the module is used.
 ## Tests
 
 ```
-node tt-tests.js time-tracker.jsx     # 1809 assertions, 208 cases
+node tt-tests.js time-tracker.jsx     # 1833 assertions, 211 cases
 python3 build.py --src time-tracker.jsx --shell index.html --out index.html \
         --stamp "MM-DD descriptor"
 python3 extract.py index.html /tmp/app_only.js
-node boot.js /tmp/app_only.js         # 319 checks against the built file
+node boot.js /tmp/app_only.js         # 367 checks against the built file
 node shift.js /tmp/app_only.js        # 46 - work days, shifts, overtime
-node lifecycle.js /tmp/app_only.js    # 573 - project lifecycle and nesting
-node e2e.js index.html                # 650 - the real app in Chromium, ~8 minutes
+node lifecycle.js /tmp/app_only.js    # 628 - project lifecycle, nesting and breaks
+node e2e.js index.html                # 690 - the real app in Chromium, ~8 minutes
 node paint.js /tmp/app_only.js        # first-paint markup, for diffing builds
 ```
 

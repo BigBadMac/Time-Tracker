@@ -22,6 +22,9 @@ const fn = new Function("React", "window", "localStorage", "navigator", "documen
         " ToolsScreen: typeof ToolsScreen !== 'undefined' ? ToolsScreen : null," +
         " ToolsCheckoutSheet: typeof ToolsCheckoutSheet !== 'undefined' ? ToolsCheckoutSheet : null," +
         " ToolsEditorSheet: typeof ToolsEditorSheet !== 'undefined' ? ToolsEditorSheet : null," +
+        " BRK: typeof BreakOverModal !== 'undefined' ? { Sheet: BreakModal, Over: BreakOverModal, Resume: BreakResumeModal, Missed: MissedBreakBanner," +
+        "   OverBanner: BreakOverBanner, Ticker: HeaderTicker, Sched: UnpaidBreaksModal, Pay: PayWorkWeekModal, defaults: BREAK_DEFAULTS," +
+        "   rules: BREAK_RULES_NOTE, personal: PERSONAL_NOTE, norm: normalizeSchedule, lines: breakTextLines, tally: breakTally } : null," +
         " HELP: typeof HELP_PICTURES !== 'undefined' ? { pictures: HELP_PICTURES, guides: HELP_GUIDES, index: HELP_INDEX, practice: HELP_PRACTICE, panels: HELP_PANELS," +
         "   search: typeof helpSearch !== 'undefined' ? helpSearch : null, all: typeof helpAll !== 'undefined' ? helpAll : null, stageEl: helpStageEl, Guides: GuidesModal, TryHold: HelpTryHold, seed: TEST_PROJECTS } : null };");
 const out = fn(React, win, localStorage, navigator, document, function Event(t){ return { type: t }; });
@@ -341,6 +344,66 @@ if (out.DB) {
   if (touched.length) console.log("   reached localStorage: " + touched.slice(0, 6).join(", "));
   Object.assign(localStorage, spy);
   ok.push(["ttDbUse(null) goes back to the browser's own", out.DB.use(null) === localStorage]);
+}
+
+// ---- Breaks (10-22): the sheet, the overage question, resume, banners,
+// the header tag, settings, and the copy-out lines. Rendered on their own.
+ok.push(["the break screens are reachable", !!out.BRK]);
+if (out.BRK) {
+  const B = out.BRK, nop = () => {};
+  const r = (C, p) => { try { return renderToStaticMarkup(React.createElement(C, p)); } catch (e) { return "ERR:" + e.message; } };
+  let h = r(B.Sheet, { options: B.defaults, leftMs: null, onStart: nop, onCancel: nop });
+  has(h, 'data-breakgo="paid"', "the sheet offers Paid break in one tap");
+  has(h, 'data-breakgo="unpaid"', "and Unpaid break");
+  has(h, "I need a break!", "under I need a break!");
+  ok.push(["the usual three, each tagged", (h.match(/data-breakpreset/g) || []).length === 3 && (h.match(/data-breakpaid/g) || []).length >= 3]);
+  hasnt(h, "End of Day", "End of Day is gone");
+  has(h, "data-customgo", "and a name of your own is offered");
+  h = r(B.Over, { label: "Morning Break", overMs: 7 * 60000, totalMs: 30 * 60000, onPick: nop });
+  ok.push(["the overage asks three ways", ["unpaid", "today", "change"].every((k) => h.indexOf('data-overact="' + k + '"') >= 0)]);
+  has(h, "data-breakrules", "and shows the rules note beside the choice");
+  hasnt(h, "ERR:", "the overage sheet renders");
+  h = r(B.Resume, { label: "Lunch", jobName: "Weld Frame", onResume: nop, onClose: nop });
+  has(h, 'data-resume="job"', "ending a break offers the job back");
+  has(h, "Weld Frame", "by name");
+  has(h, 'data-resume="none"', "or Not yet");
+  h = r(B.Missed, { due: { key: "k", at: Date.now(), name: "Lunch", paid: false, mins: 30 }, place: { top: 120 }, jobName: null, onAct: nop });
+  ok.push(["the missed-break banner offers start, later, skip", ["start", "snooze", "skip"].every((k) => h.indexOf('data-missedact="' + k + '"') >= 0)]);
+  has(h, "Lunch", "and names the break");
+  h = r(B.OverBanner, { overMs: 4 * 60000, place: { top: 120 } });
+  has(h, "data-breakover", "the live overage banner renders");
+  const tk = (p) => r(B.Ticker, Object.assign({ interrupting: false, activeProj: null, intElapsed: 0, wsActive: null, elapsed: 0, onBreak: false,
+    breakLabel: "", breakElapsed: 0, clocked: true, atWorkElapsed: 3600000, nowTick: Date.now(), bottom: false }, p));
+  has(tk({ statusTag: "Break", onStatusTap: nop }), "data-breaktag", "clocked in, the header carries the Break tag");
+  has(tk({ statusTag: "Break", onStatusTap: nop }), "data-statustap", "and the status line is the tap target");
+  hasnt(tk({}), "data-breaktag", "with no tag, the header is as it was");
+  hasnt(tk({}), "data-statustap", "and nothing is tappable");
+  has(tk({ onBreak: true, breakLabel: "Lunch", breakElapsed: 60000, statusTag: "End", onStatusTap: nop }), "End \u203a", "on a break the tag reads End");
+  has(tk({ onBreak: true, breakLabel: "Lunch", breakElapsed: 60000, statusTag: "End", onStatusTap: nop, overNote: "+4m over" }), "data-breakovernote", "the header can carry the overage");
+  const sch = B.norm({ wed: { on: true, start: "06:00", end: "14:30" }, unpaidBreaks: { enabled: true, weekly: [{ id: "m", name: "Morning Break", start: "09:00", mins: 15, paid: true }] } });
+  h = r(B.Sched, { value: sch.unpaidBreaks, schedule: sch, onDone: nop, onClose: nop });
+  has(h, "Scheduled Breaks", "the breaks editor is Scheduled Breaks now");
+  has(h, 'data-breakpaidtoggle="paid"', "each break says paid or unpaid");
+  has(h, 'data-anchor="ub-allow"', "with the paid break time section");
+  has(h, 'data-carryover="off"', "carry-over, off by default");
+  ok.push(["the rules note sits at setup and beside carry-over and overage", (h.match(/data-breakrules/g) || []).length === 2]);
+  h = r(B.Pay, { value: Object.assign({}, sch.payroll, { paidBreaksOt: false }), onDone: nop, onClose: nop });
+  has(h, 'data-anchor="pay-breaksot"', "Pay & Work Week has the paid breaks setting");
+  has(h, "data-pbotwarn", "switched off, it warns");
+  has(h, B.personal, "and says it is a personal record");
+  hasnt(r(B.Pay, { value: sch.payroll, onDone: nop, onClose: nop }), "data-pbotwarn", "left on, no warning");
+  const t = B.tally([{ id: "a", paid: true, startTime: 0, endTime: 1, duration: 20 * 60000, overMs: 5 * 60000, overUnpaid: true, personal: true },
+                     { id: "b", paid: false, startTime: 0, endTime: 1, duration: 30 * 60000 },
+                     { id: "c", missed: true, startTime: 0, endTime: 0, duration: 0 }]);
+  const L = B.lines(t, false).join("\n");
+  ok.push(["the copy-out splits paid and unpaid (the overage made unpaid joins unpaid)", /Paid: 15m/.test(L) && /Unpaid: 35m/.test(L)]);
+  ok.push(["notes the overage made unpaid", /made unpaid \*/.test(L)]);
+  ok.push(["counts the missed break", /Missed breaks: 1/.test(L)]);
+  ok.push(["and footnotes the personal record", L.indexOf("* Personal:") >= 0 && L.indexOf(B.personal) >= 0]);
+  const L2 = B.lines(B.tally([{ id: "p", paid: true, startTime: 0, endTime: 1, duration: 10 * 60000 }]), true).join("\n");
+  ok.push(["paid breaks kept out of overtime are starred", /Paid: 10m[^\n]* \*/.test(L2)]);
+  ok.push(["and footnoted as personal", /\* Personal: paid breaks set not to count toward overtime/.test(L2)]);
+  ok.push(["a plain day has no footnote", B.lines(B.tally([{ id: "x", paid: false, startTime: 0, endTime: 1, duration: 60000 }]), false).join().indexOf("Personal") < 0]);
 }
 
 let bad = 0;

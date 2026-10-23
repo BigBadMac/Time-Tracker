@@ -1544,6 +1544,107 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   t("with no page errors", errsSV===0);
   await pSV.close(); await ctxSV.close();
 
+  // ---- breaks, 10-22 (v1.3): the header tag, paid/unpaid, missed, overage, resume ----
+  {
+    const mk=async(seed)=>{
+      const pg=await b.newPage({viewport:{width:390,height:900}});
+      pg.__errs=0; pg.on('pageerror',()=>{ pg.__errs++; });
+      await pg.addInitScript((a)=>{
+        if(sessionStorage.getItem('bkSeeded')) return; sessionStorage.setItem('bkSeeded','1');
+        const now=Date.now(), day=new Date(now).toDateString();
+        const d=new Date(now-a.dueAgo*60000), hhmm=String(d.getHours()).padStart(2,'0')+":"+String(d.getMinutes()).padStart(2,'0');
+        const sch={}; ["mon","tue","wed","thu","fri","sat","sun"].forEach(k=>{ sch[k]={on:true,start:"00:00",end:"23:59"}; });
+        sch.unpaidBreaks={ enabled:true, weekly:[{ id:"mb", name:"Morning Break", start:hhmm, mins:15, paid:true, note:"" }], custom:{},
+          allowMode:"scheduled", allowMins:0, carryOver:false, overStyle:"float" };
+        localStorage.setItem('tt_settings', JSON.stringify({layout:'comfortable',tracking:'timer',colorScheme:'bright-pastels',theme:'neon-dream',
+          schemes:{},fonts:{},mode:'dark',handedness:'right',headerPos:'top',workSchedule:sch,shiftGrace:0}));
+        localStorage.setItem('tt_projects', JSON.stringify([{id:1,name:"Line 4 Rebuild",lane:"Daily Activity",notes:"",order:0,parentId:null,role:"project",kind:"ongoing",stages:[]}]));
+        localStorage.setItem('tt_laneorder', JSON.stringify(['Daily Activity']));
+        const aw=now-3*3600000;
+        localStorage.setItem('tt_logs', JSON.stringify([{ id:"aw1", type:"atwork", day:day, startTime:aw, endTime:null, duration:0 }]));
+        const sess={ savedAt:now, atWorkStart:aw, workDay:day, activeId:null, activeStart:null };
+        if(a.onBreakMins){
+          const bs=now-a.onBreakMins*60000;
+          localStorage.setItem('tt_breaks', JSON.stringify([{ id:"ob1", day:day, label:"Morning Break", paid:true, fromId:1, startTime:bs, endTime:null, duration:0 }]));
+          sess.breakStart=bs; sess.breakLabel="Morning Break";
+        } else {
+          sess.activeId=1; sess.activeStart=now-90000;
+          localStorage.setItem('tt_logs', JSON.stringify([{ id:"aw1", type:"atwork", day:day, startTime:aw, endTime:null, duration:0 }]));
+        }
+        localStorage.setItem('tt_session', JSON.stringify(sess));
+      }, seed);
+      await pg.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(pg); await pg.waitForTimeout(700);
+      return pg;
+    };
+    const brks=async(pg)=>pg.evaluate(()=>JSON.parse(localStorage.getItem('tt_breaks')||'[]'));
+    const running=async(pg)=>pg.locator('[data-surface="lane"] button').filter({hasText:/^Stop$/}).count();
+
+    // 1. clocked in with a job running, the scheduled paid break twenty minutes overdue
+    const pB=await mk({ dueAgo:20 });
+    t("clocked in, the header status line carries Break ›", /Break ›/.test(await pB.locator('[data-breaktag]').innerText().catch(()=>"")));
+    t("a scheduled break gone by untaken raises the missed banner", /Morning Break/.test(await pB.locator('[data-missedbreak]').innerText().catch(()=>"")));
+    await pB.locator('[data-missedact="skip"]').click(); await pB.waitForTimeout(400);
+    t("Skip today clears it", (await pB.locator('[data-missedbreak]').count())===0);
+    let L=await brks(pB);
+    const miss=L.filter(x=>x.missed)[0];
+    t("and records the break as missed", !!miss && miss.missedKey && miss.paid===true && !miss.duration);
+    t("a fact, not a personal record", !!miss && !miss.personal);
+    await pB.reload({waitUntil:'load'}); await dropSplash(pB); await pB.waitForTimeout(700);
+    t("and it stays dismissed after a reload", (await pB.locator('[data-missedbreak]').count())===0);
+    t("the job is still running", (await running(pB))>0);
+    await pB.locator('[data-statustap]').click(); await pB.waitForTimeout(400);
+    t("tapping the status line opens the break sheet", (await pB.locator('[data-breakgo="paid"]').count())===1);
+    t("with the usual break tagged PAID from the schedule", /PAID/.test(await pB.locator('[data-breakpreset]').first().innerText().catch(()=>"")));
+    await pB.locator('[data-breakgo="paid"]').click(); await pB.waitForTimeout(500);
+    L=await brks(pB);
+    const open=L.filter(x=>!x.endTime)[0];
+    t("Paid break starts a paid break at once", !!open && open.paid===true);
+    t("remembering the job it stopped", !!open && open.fromId===1);
+    t("and the job stops", (await running(pB))===0);
+    t("the tag now reads End ›", /End ›/.test(await pB.locator('[data-breaktag]').innerText().catch(()=>"")));
+    await pB.locator('[data-statustap]').click(); await pB.waitForTimeout(500);
+    t("ending it, within the paid time, asks nothing about overage", (await pB.locator('[data-overact]').count())===0);
+    t("and offers the job back by name", /Line 4 Rebuild/.test(await pB.locator('[data-resume="job"]').innerText().catch(()=>"")));
+    await pB.locator('[data-resume="job"]').click(); await pB.waitForTimeout(500);
+    t("Resume starts it again", (await running(pB))>0);
+    t("and the break is closed", (await brks(pB)).every(x=>!!x.endTime));
+    t("with no page errors", pB.__errs===0);
+    await pB.close();
+
+    // 2. on a paid break twenty minutes in, with fifteen to spend
+    const pO=await mk({ dueAgo:40, onBreakMins:20 });
+    t("past the paid time, the overage shows live", (await pO.locator('[data-breakover]').count())===1);
+    t("no missed-break banner while on a break", (await pO.locator('[data-missedbreak]').count())===0);
+    await pO.locator('[data-statustap]').click(); await pO.waitForTimeout(500);
+    t("ending it asks about the overage three ways", (await pO.locator('[data-overact]').count())===3);
+    t("beside the rules note", (await pO.locator('[data-modal-panel] [data-breakrules]').count())>=1);
+    await pO.locator('[data-overact="unpaid"]').click(); await pO.waitForTimeout(500);
+    L=await brks(pO);
+    const ob=L.filter(x=>x.id==="ob1")[0];
+    t("the overage is recorded", !!ob && ob.overMs>=4*60000 && ob.overMs<=6*60000);
+    t("made unpaid, it is a personal record", !!ob && ob.overUnpaid===true && ob.personal===true);
+    t("then the job is offered back", (await pO.locator('[data-resume="job"]').count())===1);
+    await pO.locator('[data-resume="none"]').click(); await pO.waitForTimeout(300);
+    t("Not yet leaves it stopped", (await running(pO))===0 && (await pO.locator('[data-resume]').count())===0);
+    // Reports: tagged PERSONAL
+    await pO.locator('[data-anchor="hdr-menu"]').first().click(); await pO.waitForTimeout(300);
+    await pO.locator('button').filter({hasText:/^Reports$/}).first().click(); await pO.waitForTimeout(700);
+    t("Reports split the breaks", /Paid 15m/.test(await pO.locator('[data-breaknote]').innerText().catch(()=>"")));
+    t("and tag the personal record", /PERSONAL/.test(await pO.locator('[data-personalnote]').innerText().catch(()=>"")));
+    t("with no page errors", pO.__errs===0);
+    await pO.close();
+
+    // 3. Change my allowance opens the breaks editor
+    const pC=await mk({ dueAgo:40, onBreakMins:20 });
+    await pC.locator('[data-statustap]').click(); await pC.waitForTimeout(500);
+    await pC.locator('[data-overact="change"]').click(); await pC.waitForTimeout(600);
+    t("Change my allowance opens Scheduled Breaks at the paid time", (await pC.locator('[data-anchor="ub-allow"]').count())===1);
+    const oc=(await brks(pC)).filter(x=>x.id==="ob1")[0];
+    t("and keeps the overage paid for the day", !!oc && oc.overCovered===true && !oc.personal);
+    t("with no page errors", pC.__errs===0);
+    await pC.close();
+  }
+
   await b.close();
   let bad=0; ok.forEach(([l,p])=>{ if(!p){ bad++; console.log("   x "+l); } });
   console.log("e2e        : "+(ok.length-bad)+"/"+ok.length+" passed"+(bad?"  FAILED":""));
