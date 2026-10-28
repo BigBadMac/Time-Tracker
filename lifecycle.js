@@ -26,7 +26,7 @@ const out = new Function("React", "window", "localStorage", "navigator", "docume
         " startAction, " +
         " ModalGlyph, MenuIcon, MENU_GLYPHS, readableInk, contrastOf, hexRGB," +
         " outlineRows, outlineSpan, outlineCommit, outlineApply, newProjectId, uid, ttStamp, saveTracked, ttDbUse, load, TT_TRACKED, TT_GONE_MAX, " +
-        " normalizeSchedule, schNetMinutes, breakAllowanceMins, breakDayState, breakOverFor, breakPaidMs, paidBreakLogs, missedBreakDue, breakDueAt, BREAK_DEFAULTS, PRESET_BREAKS, BREAK_RULES_NOTE, logIsOt, " +
+        " normalizeSchedule, schNetMinutes, breakAllowanceMins, breakDayState, breakOverFor, breakPaidMs, paidBreakLogs, missedBreakDue, breakAlertDue, normBreakAlerts, breakDueAt, BREAK_DEFAULTS, PRESET_BREAKS, BREAK_RULES_NOTE, logIsOt, " +
         " stepUp, stepDown, stepIn, stepOut, stepOptions, prevSibling, nextSibling, parentIndex, nestRoles, mergeOutline," +
         " worstStatus, stepActual, stepStatus, stepPoint, aggregatePoint, hasMilestonesBeneath, projectLine, projectCurrent," +
         " laneLine, laneCurrent, boardLine, lineSpan, tickUnit, groupMarks, MS_DAY, subtreePoints, tickScale, lineTicks, arcHeight, driftArcs, driftHeadroom, MS_ZOOMS, zoomAt, nextZoom, zoomSpan, panSpan, milestoneReport," +
@@ -1725,6 +1725,37 @@ const seedBoard=()=>mkSnapStore({
     out.missedBreakDue(S0, dayStr, at(9, 45), [{ id:"mm", day:D, missed:true, missedKey:dayStr + "|m", startTime:at(9,0), endTime:at(9,0), duration:0 }], {}) === null);
   t("more than two hours on, it stops asking", out.missedBreakDue(S0, dayStr, at(11, 30), [{ id:"l", day:D, startTime:at(11,0), endTime:at(11,30), duration:30*MIN }], {}) === null);
   t("a day off asks nothing", out.missedBreakDue(S0, new Date(2026, 9, 24).toDateString(), new Date(2026, 9, 24, 9, 30).getTime(), [], {}) === null);
+  // ---- flexible breaks and reminders (10-22) ----
+  const al0 = out.normBreakAlerts();
+  t("reminders default: nothing before, one missed reminder ten minutes on",
+    al0.soon.on === false && al0.missed.on === true && al0.missed.count === 1 && al0.missed.gap === 10);
+  t("a saved schedule carries them", !!S0.unpaidBreaks.alerts && S0.unpaidBreaks.alerts.missed.gap === 10);
+  t("out-of-range numbers fall back", out.normBreakAlerts({ soon:{ on:true, count:9, gap:0 } }).soon.count === 1 &&
+    out.normBreakAlerts({ soon:{ on:true, count:9, gap:0 } }).soon.gap === 5);
+  t("the first missed reminder waits a gap", out.missedBreakDue(S0, dayStr, at(9, 5), [], {}) === null);
+  const SF = sch({ weekly:[{ id:"f", name:"Coffee", start:"", mins:20, flex:true }, { id:"l", name:"Lunch", start:"11:00", mins:30 }] });
+  t("a flexible break comes off the day whole", out.schNetMinutes(SF, "wed") === 510 - 50);
+  t("it has no time to be due at", out.breakDueAt(SF, dayStr, SF.unpaidBreaks.weekly[0]) === null);
+  t("so it never reminds", out.breakAlertDue(SF, dayStr, at(9, 30), [], {}) === null);
+  t("even one that still holds an old start time from before it went flexible",
+    out.breakDueAt(SF, dayStr, { start:"09:00", mins:15, flex:true }) === null &&
+    out.breakAlertDue(sch({ weekly:[{ id:"o", name:"Old", start:"09:00", mins:15, flex:true }] }), dayStr, at(9, 30), [], {}) === null);
+  t("and it is offered on the break sheet like any other",
+    out.normalizeSchedule(SF).unpaidBreaks.weekly[0].flex === true);
+  const SA = sch({ alerts:{ soon:{ on:true, count:2, gap:5 }, missed:{ on:true, count:3, gap:10 } } });
+  t("before: nothing until the first reminder", out.breakAlertDue(SA, dayStr, at(8, 49), [], {}) === null);
+  let a = out.breakAlertDue(SA, dayStr, at(8, 50), [], {});
+  t("before: the first of two lands two gaps ahead", !!a && a.kind === "soon" && a.idx === 1 && !a.last && a.leftMs === 10*MIN);
+  t("OK quiets it until the next", out.breakAlertDue(SA, dayStr, at(8, 52), [], { [dayStr + "|m|s"]:1 }) === null);
+  a = out.breakAlertDue(SA, dayStr, at(8, 56), [], { [dayStr + "|m|s"]:1 });
+  t("then the last one, a gap before", !!a && a.idx === 2 && a.last);
+  t("missed: reminder one a gap after", (a = out.breakAlertDue(SA, dayStr, at(9, 10), [], {})) && a.kind === "missed" && a.idx === 1 && !a.last);
+  t("Later quiets it until the next", out.breakAlertDue(SA, dayStr, at(9, 15), [], { [dayStr + "|m|m"]:1 }) === null);
+  a = out.breakAlertDue(SA, dayStr, at(9, 31), [], { [dayStr + "|m|m"]:2 });
+  t("the third is the last, with no Later", !!a && a.idx === 3 && a.last);
+  t("missed reminders off: none", out.breakAlertDue(sch({ alerts:{ missed:{ on:false } } }), dayStr, at(9, 30), [], {}) === null);
+  t("a break already started counts as taken for both",
+    out.breakAlertDue(SA, dayStr, at(9, 10), [rec("t", 8, 55, 15)], {}) === null);
   t("the rules note says to check, and decides nothing", /HR department/.test(out.BREAK_RULES_NOTE) && /doesn.t decide what you.re owed/.test(out.BREAK_RULES_NOTE));
 }
 let bad = 0;

@@ -1151,7 +1151,7 @@ test("no sheet draws its own action row - every one rides in the sticky box", ()
   // renders ModalActions: sticky, mirrored for handedness, at the header's
   // end (top or bottom). A row drawn inline scrolls away on a long sheet.
   eq(count(/style:ACTION_ROW\(\)/g), 0, "no inline ACTION_ROW is left anywhere");
-  has(/props\.actions && React\.createElement\(ModalActions, null, props\.actions\),/, "Modal routes `actions` through ModalActions");
+  has(/props\.actions && React\.createElement\(ModalActions, \{ trail:trailEl \}, props\.actions\),/, "Modal routes `actions` through ModalActions");
   const ma = s.slice(s.indexOf("function ModalActions(props){"), s.indexOf("\nfunction ", s.indexOf("function ModalActions(props){") + 10));
   ok(/position:"sticky"/.test(ma), "which is sticky");
   ok(/flexDirection: ACTION_DIR\(\)/.test(ma), "mirrored for handedness");
@@ -2008,7 +2008,7 @@ test("the board and the day summary are scoped to the day, not to all time", () 
     "and breaks on the same rule");
   has(/todayLogs:todayLogs, todayDist:todayDist,/, "the board gets the day-scoped list");
   ok(!/todayDist:disruptions/.test(s), "and never the all-time one");
-  has(/React\.createElement\(DaySummary, \{ logs:todayLogs, disruptions:todayDist, breaks:todayBreaks, dayKey:todayStr2,/,
+  has(/React\.createElement\(DaySummary, \{ trail:trailFor\("day"\), logs:todayLogs, disruptions:todayDist, breaks:todayBreaks, dayKey:todayStr2,/,
     "Day Summary is day-scoped on all three collections, and headed with the shift it is summarising");
   has(/new Date\(props\.dayKey\|\|Date\.now\(\)\)\.toLocaleDateString/,
     "its heading follows the work day, not the wall clock");
@@ -2278,8 +2278,8 @@ test("closing out is not deleting, and the board knows the difference", () => {
   has(/parents:liveProjects/, "and so do the parent pickers, twice over");
   eq(count(/parents:liveProjects/g), 2, "add and edit both");
   // Reports and the archive must keep everything, or closing out loses history.
-  has(/ReportsModal, \{ logs:logs, projects:projects,/, "Reports still sees every project");
-  has(/ArchiveModal, \{ projects:projects, logs:logs/, "and so does the Archive");
+  has(/ReportsModal, \{ trail:trailFor\("reports"\), logs:logs, projects:projects,/, "Reports still sees every project");
+  has(/ArchiveModal, \{ trail:trailFor\("archive"\), projects:projects, logs:logs/, "and so does the Archive");
   has(/DeleteProjectModal, \{ proj:confirmDelete, allProjects:projects/,
     "delete still resolves against the full tree, so a closed child is not orphaned");
 });
@@ -2747,7 +2747,7 @@ test("a record with no stamp files exactly where the old code filed it", () => {
 });
 
 test("an overnight shift is visible in the schedule, not silent", () => {
-  has(/schWraps\(d\) \? "\+1d" : ""/, "the row marks a shift that ends the next day");
+  has(/schWraps\(d\) \? "\+1d" : "\\u00a0"/, "the row marks a shift that ends the next day (a blank keeps the line when it does not)");
   has(/"aria-label": schWraps\(d\) \? "ends the next day" : ""/, "and says so out loud");
   // The old rule flagged end<=start as "end?". Only end===start does now, so
   // the wrap marker is the sole thing standing between a typo and a 23h day.
@@ -3705,7 +3705,7 @@ test("Backup & Saves: copies live in IndexedDB, and every reset or load can be u
   const bm = slice("function BackupModal(props){", "function snapThenReload(");
   ok(/if\(staged\) return Promise\.resolve\(\);/.test(bm), "a staged sheet in the manual never touches the copies");
   ok(/"data-resetopen":true, disabled:clocked/.test(bm) && /"data-snapload":"latest", disabled:clocked/.test(bm), "nothing loads or resets while the clock runs");
-  has(/BackupModal, \{ clocked:!!atWorkStart,/, "the sheet is told");
+  has(/BackupModal, \{ trail:trailFor\("backup"\), clocked:!!atWorkStart,/, "the sheet is told");
   ok(/HoldButton, \{ onHold:function\(\)\{ delSave\(r\.id\); \}/.test(bm), "deleting a save is held");
 });
 
@@ -3767,8 +3767,9 @@ const count = (re) => (s.match(re) || []).length;
 const slice = (a, b) => { const i = s.indexOf(a); return s.slice(i, s.indexOf(b, i + a.length)); };
 
 test("a break is paid or unpaid, and ending it is handled in one place", () => {
-  const sb = slice("function startBreak(label, paid){", "\n  }");
+  const sb = slice("function startBreak(label, paid, mins){", "\n  }");
   ok(/paid:!!paid/.test(sb) && /fromId:from/.test(sb), "a break records paid and the job it stopped");
+  ok(/if\(\+mins>0\) rec\.mins=/.test(sb), "and its set length, when it has one");
   const eb = slice("function endBreak(opts){", "function offerResume(");
   ok(/breakDayState\(/.test(eb) && /breakOverFor\(/.test(eb), "ending a paid break measures it against the day's paid time");
   ok(/BREAK_OVER_MIN_MS/.test(eb), "and only asks about an overage worth asking about");
@@ -3783,9 +3784,9 @@ test("a break is paid or unpaid, and ending it is handled in one place", () => {
 });
 
 test("the header status line opens and ends breaks", () => {
-  has(/statusTag:statusTag,\s*onStatusTap:onBreak \? function\(\)\{ endBreak\(\); \}/, "on a break the tag ends it");
+  has(/statusTag:statusTag, breakLimitMs:breakLimitMs, mirror:isLeft,\s*onStatusTap:onBreak \? function\(\)\{ endBreak\(\); \}/, "on a break the tag ends it");
   has(/var statusTag=onBreak \? "End" : \(\(clocked && !interrupting\) \? "Break" : null\);/, "clocked in it reads Break; otherwise no tag");
-  has(/missedDue=\(clocked && !onBreak && !interrupting\)/, "a missed break only nags while clocked in and free");
+  has(/alertDue=\(clocked && !onBreak && !interrupting\)/, "break reminders only show while clocked in and free");
 });
 
 test("the rules note and the personal note are where they were promised", () => {
@@ -3799,6 +3800,61 @@ test("the rules note and the personal note are where they were promised", () => 
   ok(/PERSONAL_NOTE/.test(slice("function breakTextLines(", "\nfunction ")), "the copy-out footnotes personal records");
   has(/data-personalnote/, "and Reports tags them PERSONAL");
   ok(!/"End of Day"/.test(s), "End of Day is no longer a break");
+});
+})();
+
+// ============================================================
+// the way back: a trail under the action buttons (10-27)
+// ============================================================
+(function(){
+const s = source();
+const has = (re, label) => ok(re.test(s), label);
+const slice = (a, b) => { const i = s.indexOf(a); return s.slice(i, s.indexOf(b, i + a.length)); };
+test("every setup screen reached from the menu draws its way back", () => {
+  [["outline","menu"],["day","menu"],["reports","menu"],["archive","menu"],["backup","menu"],["extensions","menu"],
+   ["guides","manual"],["schedule","time"],["tracking","time"],["themes","interface"],["layout","interface"]].forEach(([k, f]) => {
+    has(new RegExp('navOpen\\("' + k + '","' + f + '"\\)'), k + " is opened with where it came from (" + f + ")");
+    has(new RegExp('trail:trailFor\\("' + k + '"\\)'), "and is handed its trail");
+  });
+  ["Guides","Archive","Backup & Saves","Extensions","Day Summary","Reports","Tracking","Themes","Layout","Work Schedule"].forEach((t) => {
+    const i = s.indexOf('React.createElement(Modal, { title:"' + t + '"');
+    ok(i >= 0 && /trail:props\.trail/.test(s.slice(i, i + 400)), t + " passes the trail to its sheet");
+  });
+  ok(/title:"Edit\\u2026"[\s\S]{0,200}trail:props\.trail, trailGuard:/.test(s), "Edit\u2026 passes it, with a guard");
+  has(/trail:groupTrail/, "the menu groups have one too");
+  const ct = slice("function closeAllPopups(){", "\n  }");
+  ok(/setNavFrom\(null\)/.test(ct) && /setShowArchive\(false\)/.test(ct), "closing everything forgets the route, and closes the Archive too");
+  has(/if\(kind==="change"\)\{ setNavFrom\(null\);/, "Change my allowance opens Work Schedule with no trail");
+  const tf = slice("function trailFor(screen){", "\n  }");
+  ok(/navFrom\.screen!==screen\) return null/.test(tf), "a trail only for the screen it was recorded for");
+});
+test("trails over the board: milestones, Edit... children, where a record sits", () => {
+  has(/var outlineRoute=showOutline \? \(trailFor\("outline"\)\|\|\[boardStep\]\)\.concat\(\[\{ label:"Edit\\u2026", back:true, go:closeOverOutline \}\]\) : null;/, "over Edit\u2026 a trail is the menu route plus Edit\u2026");
+  has(/var msLaneTrail=outlineRoute \? outlineRoute : \(msBoard \? \[boardStep, msBoardStep\] : null\);/, "a milestone lane view gets a trail only when it is a step down");
+  has(/msLane \? \[\{ label:getMeta\(laneMeta, msLane\)\.label, go:function\(\)\{ setMsProj\(null\); \} \}\] : \[\]/, "a milestone project editor can step back to its lane");
+  const et = slice("function editTrailFor(p){", "\n  }\n");
+  ok(/chain\.unshift\(cur\)/.test(et) && /setEditLane\(p\.lane\)/.test(et) && /setEditProj\(a\)/.test(et), "Edit Project / Task: the lane and every parent, each opening its editor (option B)");
+  has(/ProjectForm, \{ trail:editTrailFor\(editProj\), trailHere:editProj\.name,/, "and the editor is handed it, named by the record");
+  has(/key:"edit:"\+editProj\.id/, "switching to a parent remounts the form, not keeps the child's fields");
+  has(/guard:function\(item\)\{ if\(formSnap===formSnap0\.current\) item\.go\(\); else setLeavePF/, "the project form asks only with edits");
+  has(/if\(JSON\.stringify\(steps\)===JSON\.stringify\(proj\.milestones\|\|\[\]\)\) item\.go\(\); else setLeaveMS/, "so does the milestone editor");
+  has(/if\(label===\(start\.label\|\|laneKey\) && picked\.accent===start\.accent\) item\.go\(\); else setLeaveLE/, "and the lane editor");
+  has(/if\(JSON\.stringify\(items\)===JSON\.stringify\(initItems\)\) item\.go\(\); else setLeaveSt/, "and Stages");
+});
+test("the trail rides in the action box, and leaving with edits asks", () => {
+  has(/props\.actions && React\.createElement\(ModalActions, \{ trail:trailEl \}/, "sheets with their own buttons carry it");
+  has(/!props\.ownActions && React\.createElement\(ModalActions, \{ trail:props\.actions \? null : trailEl \}/, "and so does the built-in pair, never twice");
+  has(/props\.trail && props\.trail\.length && !staged/, "never on a sheet pictured in the manual");
+  const ws = slice("function WorkScheduleModal(props){", "\nfunction ");
+  ok(/trailGuard:function\(item\)\{ leaveWith\(draft, item\); \}/.test(ws), "Work Schedule leaves through one check");
+  ok(/if\(JSON\.stringify\(normalizeSchedule\(sch\)\)===savedJ\)\{ item\.go\(\); return; \}/.test(ws), "which asks only when something changed");
+  ok(/props\.onSave\(normalizeSchedule\(sch\)\); item\.go\(\);/.test(ws), "and Save saves before it goes");
+  ok(/trail:subTrail\("Scheduled Breaks"/.test(ws) && /trail:subTrail\("Pay & Work Week"/.test(ws), "its two inner sheets carry the trail one step deeper");
+  ok(/if\(subDirty\) merged\[field\]=subNext;/.test(ws), "leaving from an inner sheet folds its edits in before the one question");
+  has(/trail:ctx\.trail \}/, "Tool Tracker's screen takes the trail the host hands it");
+  has(/trail:trailFor\("mod:"\+modScreen\.id\+":"\+modScreen\.screen\)/, "and the host hands every module screen its trail");
+  has(/\{ label:"Tools", back:true, go:close \}/, "its sheets add a step back to Tools");
+  has(/\[dir='rtl'\] \[data-modal-panel\] div/, "left-handed sheet prose keeps its punctuation (plaintext, sheets only)");
 });
 })();
 

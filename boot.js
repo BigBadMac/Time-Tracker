@@ -22,8 +22,9 @@ const fn = new Function("React", "window", "localStorage", "navigator", "documen
         " ToolsScreen: typeof ToolsScreen !== 'undefined' ? ToolsScreen : null," +
         " ToolsCheckoutSheet: typeof ToolsCheckoutSheet !== 'undefined' ? ToolsCheckoutSheet : null," +
         " ToolsEditorSheet: typeof ToolsEditorSheet !== 'undefined' ? ToolsEditorSheet : null," +
-        " BRK: typeof BreakOverModal !== 'undefined' ? { Sheet: BreakModal, Over: BreakOverModal, Resume: BreakResumeModal, Missed: MissedBreakBanner," +
+        " BRK: typeof BreakOverModal !== 'undefined' ? { Sheet: BreakModal, Over: BreakOverModal, Resume: BreakResumeModal, Missed: MissedBreakBanner, Soon: UpcomingBreakBanner," +
         "   OverBanner: BreakOverBanner, Ticker: HeaderTicker, Sched: UnpaidBreaksModal, Pay: PayWorkWeekModal, defaults: BREAK_DEFAULTS," +
+        "   Modal: Modal, Group: MenuGroupModal, Leave: LeaveAskModal, tight: fmtHoursTight, Archive: ArchiveModal," +
         "   rules: BREAK_RULES_NOTE, personal: PERSONAL_NOTE, norm: normalizeSchedule, lines: breakTextLines, tally: breakTally } : null," +
         " HELP: typeof HELP_PICTURES !== 'undefined' ? { pictures: HELP_PICTURES, guides: HELP_GUIDES, index: HELP_INDEX, practice: HELP_PRACTICE, panels: HELP_PANELS," +
         "   search: typeof helpSearch !== 'undefined' ? helpSearch : null, all: typeof helpAll !== 'undefined' ? helpAll : null, stageEl: helpStageEl, Guides: GuidesModal, TryHold: HelpTryHold, seed: TEST_PROJECTS } : null };");
@@ -367,13 +368,36 @@ if (out.BRK) {
   has(h, 'data-resume="job"', "ending a break offers the job back");
   has(h, "Weld Frame", "by name");
   has(h, 'data-resume="none"', "or Not yet");
-  h = r(B.Missed, { due: { key: "k", at: Date.now(), name: "Lunch", paid: false, mins: 30 }, place: { top: 120 }, jobName: null, onAct: nop });
-  ok.push(["the missed-break banner offers start, later, skip", ["start", "snooze", "skip"].every((k) => h.indexOf('data-missedact="' + k + '"') >= 0)]);
+  h = r(B.Missed, { due: { key: "k", at: Date.now(), name: "Lunch", paid: false, mins: 30, idx: 1, count: 2, gap: 10, last: false }, place: { top: 120 }, jobName: null, onAct: nop });
+  ok.push(["the missed-break banner offers start, later, skip", ["start", "later", "skip"].every((k) => h.indexOf('data-missedact="' + k + '"') >= 0)]);
+  has(h, "In 10 min", "later is the gap to the next reminder");
   has(h, "Lunch", "and names the break");
+  hasnt(r(B.Missed, { due: { key: "k", at: Date.now(), name: "Lunch", paid: false, mins: 30, idx: 2, count: 2, gap: 10, last: true }, place: { top: 120 }, jobName: null, onAct: nop }),
+    'data-missedact="later"', "on the last reminder there is no later");
+  h = r(B.Soon, { due: { key: "k", at: Date.now() + 5 * 60000, leftMs: 5 * 60000, name: "Lunch", paid: false, mins: 30, idx: 1, count: 1, gap: 5, last: true }, place: { top: 120 }, onAct: nop });
+  has(h, "Lunch in 5 min", "a coming-up reminder says how long until the break");
+  ok.push(["and offers start or OK", ["start", "ok"].every((k) => h.indexOf('data-soonact="' + k + '"') >= 0)]);
   h = r(B.OverBanner, { overMs: 4 * 60000, place: { top: 120 } });
   has(h, "data-breakover", "the live overage banner renders");
   const tk = (p) => r(B.Ticker, Object.assign({ interrupting: false, activeProj: null, intElapsed: 0, wsActive: null, elapsed: 0, onBreak: false,
     breakLabel: "", breakElapsed: 0, clocked: true, atWorkElapsed: 3600000, nowTick: Date.now(), bottom: false }, p));
+  const ob = (p) => tk(Object.assign({ onBreak: true, breakLabel: "Lunch with the whole maintenance crew", statusTag: "End", onStatusTap: nop }, p));
+  hasnt(ob({ breakElapsed: 60000 }), "maintenance crew", "on a break the header says On Break, never the break's name");
+  has(ob({ breakElapsed: 60000 }), ">On Break<", "just On Break");
+  let bh = ob({ breakElapsed: 6 * 60000, breakLimitMs: 15 * 60000 });
+  ok.push(["a set-length break counts down", /data-breakclock="down"/.test(bh) && />9m 00s</.test(bh)]);
+  ok.push(["its line drains toward the right", /data-breakbar="down"/.test(bh) && /data-breakbarside="right"/.test(bh) && /data-breakbarpct="60"/.test(bh)]);
+  bh = ob({ breakElapsed: 60000, mirror: true });
+  ok.push(["left-handed, the End button leads the line", /data-breaktagside="left"/.test(bh) && bh.indexOf("data-breaktag") < bh.indexOf("hdr-when")]);
+  ok.push(["right-handed, it ends the line", /data-breaktagside="right"/.test(ob({ breakElapsed: 60000 })) && (ob({ breakElapsed: 60000 }).match(/data-breaktag=/g) || []).length === 1]);
+  ok.push(["left-handed, toward the left", /data-breakbarside="left"/.test(ob({ breakElapsed: 6 * 60000, breakLimitMs: 15 * 60000, mirror: true }))]);
+  bh = ob({ breakElapsed: 19 * 60000, breakLimitMs: 15 * 60000 });
+  ok.push(["past it, the overage counts up in red", /data-breakclock="over"/.test(bh) && />\+4m 00s</.test(bh) && /data-breakbar="over"/.test(bh)]);
+  hasnt(bh, "data-barpulse", "growing, it does not pulse");
+  bh = ob({ breakElapsed: 40 * 60000, breakLimitMs: 15 * 60000 });
+  ok.push(["over by the whole length: full, still counting, pulsing", /data-breakbar="maxed"/.test(bh) && />\+25m 00s</.test(bh) && /data-barpulse="1"/.test(bh)]);
+  bh = ob({ breakElapsed: 7 * 60000 });
+  ok.push(["an open break counts up, line full and pulsing", /data-breakclock="up"/.test(bh) && /data-breakbar="open"/.test(bh) && /data-barpulse="1"/.test(bh)]);
   has(tk({ statusTag: "Break", onStatusTap: nop }), "data-breaktag", "clocked in, the header carries the Break tag");
   has(tk({ statusTag: "Break", onStatusTap: nop }), "data-statustap", "and the status line is the tap target");
   hasnt(tk({}), "data-breaktag", "with no tag, the header is as it was");
@@ -386,6 +410,15 @@ if (out.BRK) {
   has(h, 'data-breakpaidtoggle="paid"', "each break says paid or unpaid");
   has(h, 'data-anchor="ub-allow"', "with the paid break time section");
   has(h, 'data-carryover="off"', "carry-over, off by default");
+  has(h, 'data-breakflex="set"', "each break is at a set time or flexible");
+  has(h, 'data-anchor="ub-alerts"', "with a Break Reminders section");
+  has(h, 'data-alerton="soon:off"', "coming-up reminders off by default");
+  has(h, 'data-alerton="missed:on"', "missed reminders on by default");
+  has(h, 'data-alertnum="missed:gap"', "with how many minutes apart");
+  const fsch = B.norm({ wed: { on: true, start: "06:00", end: "14:30" }, unpaidBreaks: { enabled: true, weekly: [{ id: "f", name: "Coffee", start: "", mins: 10, flex: true }] } });
+  h = r(B.Sched, { value: fsch.unpaidBreaks, schedule: fsch, onDone: nop, onClose: nop });
+  has(h, 'data-breakflex="flex"', "a flexible break says so");
+  has(h, "data-anytime", "and shows Any time instead of a start");
   ok.push(["the rules note sits at setup and beside carry-over and overage", (h.match(/data-breakrules/g) || []).length === 2]);
   h = r(B.Pay, { value: Object.assign({}, sch.payroll, { paidBreaksOt: false }), onDone: nop, onClose: nop });
   has(h, 'data-anchor="pay-breaksot"', "Pay & Work Week has the paid breaks setting");
@@ -404,6 +437,30 @@ if (out.BRK) {
   ok.push(["paid breaks kept out of overtime are starred", /Paid: 10m[^\n]* \*/.test(L2)]);
   ok.push(["and footnoted as personal", /\* Personal: paid breaks set not to count toward overtime/.test(L2)]);
   ok.push(["a plain day has no footnote", B.lines(B.tally([{ id: "x", paid: false, startTime: 0, endTime: 1, duration: 60000 }]), false).join().indexOf("Personal") < 0]);
+}
+
+// ---- the way back (10-27) ----
+if (out.BRK && out.BRK.Modal) {
+  const B = out.BRK, nop = () => {};
+  const r = (C, p, kids) => { try { return renderToStaticMarkup(React.createElement(C, p, kids)); } catch (e) { return "ERR:" + e.message; } };
+  const tr = [{ label: "Board", go: nop }, { label: "Menu", go: nop }, { label: "Time Settings", go: nop }];
+  let h = r(B.Modal, { title: "X", onClose: nop, onSave: nop, trail: tr }, "body");
+  has(h, 'data-trail="Board &gt; Menu &gt; Time Settings"', "a sheet given a trail draws it");
+  ok.push(["one link per step", (h.match(/data-trailgo=/g) || []).length === 3]);
+  ok.push(["it ends with where you are, not a link", /data-trailhere="true"[^>]*>X</.test(h)]);
+  ok.push(["arrows both ways, hidden until there is more", /data-trailmore="left"/.test(h) && /data-trailmore="right"/.test(h) && !/data-trailbar/.test(h)]);
+  ok.push(["a sheet can name itself in the trail", /data-trailhere="true"[^>]*>Check Out</.test(r(B.Modal, { title: "Check Out \u00b7 Wrench", trailHere: "Check Out", onClose: nop, onSave: nop, trail: tr }, "b"))]);
+  ok.push(["inside the action box, after the buttons", h.indexOf("data-trail") > h.indexOf(">Save<") && h.indexOf("data-trail") > h.indexOf(">Cancel<")]);
+  hasnt(r(B.Modal, { title: "X", onClose: nop, onSave: nop }, "body"), "data-trail", "no trail, nothing drawn");
+  h = r(B.Modal, { title: "X", onClose: nop, ownActions: true, actions: [React.createElement("button", { key: "a" }, "Go")], trail: tr }, "b");
+  ok.push(["a sheet with its own buttons carries it once", (h.match(/data-trail=/g) || []).length === 1]);
+  h = r(B.Archive, { projects: [], logs: [], laneMeta: {}, onReopen: nop, onClose: nop, trail: tr.slice(0, 2) });
+  has(h, 'data-trail="Board &gt; Menu"', "Archive draws the trail it is handed");
+  h = r(B.Group, { title: "Time Settings", onClose: nop, items: [{ label: "Work Schedule", onSelect: nop }], trail: tr.slice(0, 2) });
+  ok.push(["a menu group draws Board > Menu under Close", /data-trail="Board &gt; Menu"/.test(h) && h.indexOf("data-trail") > h.indexOf(">Close<")]);
+  h = r(B.Leave, { name: "Work Schedule", onSave: nop, onDiscard: nop, onStay: nop });
+  ok.push(["leaving with edits asks Save / Don't save / Stay", ["save", "discard", "stay"].every((k) => h.indexOf('data-leave="' + k + '"') >= 0) && /Work Schedule/.test(h)]);
+  ok.push(["a day's hours fit the narrow column", B.tight(480) === "8h" && B.tight(510) === "8.5h" && B.tight(465) === "7.75h" && B.tight(0) === "0h"]);
 }
 
 let bad = 0;

@@ -288,7 +288,8 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   // Delete must sit at the opposite end of the row from Save.
   const order5=await p5.evaluate(()=>{
     const row=document.querySelector('[data-lanesave]').parentElement;
-    return [...row.children].map(e=>({t:e.textContent,x:e.getBoundingClientRect().x}))
+    // the buttons only: the trail (10-27) rides on its own line in the same box
+    return [...row.children].filter(e=>!e.hasAttribute('data-trail')).map(e=>({t:e.textContent,x:e.getBoundingClientRect().x}))
       .sort((a,b)=>a.x-b.x).map(e=>e.t);
   });
   t("Delete is the far corner from Save", order5[0]==="Delete" && order5[order5.length-1]==="Save");
@@ -1552,12 +1553,13 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
       await pg.addInitScript((a)=>{
         if(sessionStorage.getItem('bkSeeded')) return; sessionStorage.setItem('bkSeeded','1');
         const now=Date.now(), day=new Date(now).toDateString();
-        const d=new Date(now-a.dueAgo*60000), hhmm=String(d.getHours()).padStart(2,'0')+":"+String(d.getMinutes()).padStart(2,'0');
+        const d=new Date(now-a.dueAgo*60000+30000), hhmm=String(d.getHours()).padStart(2,'0')+":"+String(d.getMinutes()).padStart(2,'0');
         const sch={}; ["mon","tue","wed","thu","fri","sat","sun"].forEach(k=>{ sch[k]={on:true,start:"00:00",end:"23:59"}; });
         sch.unpaidBreaks={ enabled:true, weekly:[{ id:"mb", name:"Morning Break", start:hhmm, mins:15, paid:true, note:"" }], custom:{},
           allowMode:"scheduled", allowMins:0, carryOver:false, overStyle:"float" };
+        if(a.alerts) sch.unpaidBreaks.alerts=a.alerts;
         localStorage.setItem('tt_settings', JSON.stringify({layout:'comfortable',tracking:'timer',colorScheme:'bright-pastels',theme:'neon-dream',
-          schemes:{},fonts:{},mode:'dark',handedness:'right',headerPos:'top',workSchedule:sch,shiftGrace:0}));
+          schemes:{},fonts:{},mode:'dark',handedness:a.hand||'right',headerPos:a.hdr||'top',workSchedule:sch,shiftGrace:0}));
         localStorage.setItem('tt_projects', JSON.stringify([{id:1,name:"Line 4 Rebuild",lane:"Daily Activity",notes:"",order:0,parentId:null,role:"project",kind:"ongoing",stages:[]}]));
         localStorage.setItem('tt_laneorder', JSON.stringify(['Daily Activity']));
         const aw=now-3*3600000;
@@ -1565,7 +1567,7 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
         const sess={ savedAt:now, atWorkStart:aw, workDay:day, activeId:null, activeStart:null };
         if(a.onBreakMins){
           const bs=now-a.onBreakMins*60000;
-          localStorage.setItem('tt_breaks', JSON.stringify([{ id:"ob1", day:day, label:"Morning Break", paid:true, fromId:1, startTime:bs, endTime:null, duration:0 }]));
+          localStorage.setItem('tt_breaks', JSON.stringify([{ id:"ob1", day:day, label:"Morning Break", paid:true, fromId:1, startTime:bs, endTime:null, duration:0, mins:a.bmins||undefined }]));
           sess.breakStart=bs; sess.breakLabel="Morning Break";
         } else {
           sess.activeId=1; sess.activeStart=now-90000;
@@ -1599,6 +1601,8 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     L=await brks(pB);
     const open=L.filter(x=>!x.endTime)[0];
     t("Paid break starts a paid break at once", !!open && open.paid===true);
+    t("an open break: no set length, the clock counts up, the line full and pulsing", !open.mins &&
+      (await pB.locator('[data-breakclock="up"]').count())===1 && (await pB.locator('[data-breakbar="open"] [data-barpulse="1"]').count())===1);
     t("remembering the job it stopped", !!open && open.fromId===1);
     t("and the job stops", (await running(pB))===0);
     t("the tag now reads End ›", /End ›/.test(await pB.locator('[data-breaktag]').innerText().catch(()=>"")));
@@ -1641,8 +1645,324 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     t("Change my allowance opens Scheduled Breaks at the paid time", (await pC.locator('[data-anchor="ub-allow"]').count())===1);
     const oc=(await brks(pC)).filter(x=>x.id==="ob1")[0];
     t("and keeps the overage paid for the day", !!oc && oc.overCovered===true && !oc.personal);
+    // flexible, and the reminder settings, on the same sheet
+    await pC.locator('[data-breakflex]').first().click(); await pC.waitForTimeout(250);
+    t("a break switches to FLEXIBLE", (await pC.locator('[data-breakflex="flex"]').count())===1 && (await pC.locator('[data-anytime]').count())===1);
+    t("Break Reminders: missed on, coming-up off", (await pC.locator('[data-alerton="missed:on"]').count())===1 && (await pC.locator('[data-alerton="soon:off"]').count())===1);
+    await pC.locator('[data-alerton="soon:off"]').click(); await pC.waitForTimeout(250);
+    t("switching coming-up on offers times and minutes", (await pC.locator('[data-alertnum="soon:count"]').count())===1 && (await pC.locator('[data-alertnum="soon:gap"]').count())===1);
+    await pC.locator('[data-alertnum="soon:count"]').fill('3'); await pC.waitForTimeout(150);
+    await pC.locator('[data-modal-panel]').last().locator('button').filter({hasText:/^Done$/}).first().click(); await pC.waitForTimeout(300);
+    await pC.locator('[data-modal-panel]').last().locator('button').filter({hasText:/^Save$/}).first().click(); await pC.waitForTimeout(400);
+    const ub=await pC.evaluate(()=>JSON.parse(localStorage.getItem('tt_settings')).workSchedule.unpaidBreaks);
+    t("saved: the break is flexible", ub.weekly[0].flex===true);
+    t("saved: coming-up reminders on, three times", ub.alerts && ub.alerts.soon.on===true && ub.alerts.soon.count===3);
     t("with no page errors", pC.__errs===0);
     await pC.close();
+
+    // 3b. a scheduled break's own length: counted down, then over (left-handed)
+    const pD=await mk({ dueAgo:40, onBreakMins:5, bmins:15, hand:'left' });
+    const hs=await pD.locator('[data-anchor="hdr-status"]').innerText();
+    t("on a break the header says On Break, not the break's name", /On Break/.test(hs) && !/Morning/.test(hs));
+    t("a set length counts down", (await pD.locator('[data-breakclock="down"]').count())===1 && /\b(9|10)m \d\ds\b/.test(hs));
+    t("left-handed, the line drains toward the left", (await pD.locator('[data-breakbar="down"][data-breakbarside="left"]').count())===1);
+    const endVis=await pD.evaluate(()=>{ const r=document.querySelector('[data-breaktag]').getBoundingClientRect(); return r.right<=innerWidth && r.width>20; });
+    t("and the End tag is fully on screen", endVis);
+    const sides=await pD.evaluate(()=>{ const t=document.querySelector('[data-breaktag]').getBoundingClientRect(), w=document.querySelector('[data-anchor="hdr-when"]').getBoundingClientRect(); return t.right<=w.left; });
+    t("left-handed, End sits at the left end of the line", sides);
+    await pD.locator('[data-breaktag]').click(); await pD.waitForTimeout(500);
+    t("and tapping it ends the break", (await brks(pD)).every(x=>!!x.endTime));
+    t("with no page errors", pD.__errs===0);
+    await pD.close();
+    const pV=await mk({ dueAgo:40, onBreakMins:50, bmins:15 });
+    t("over by more than its length: still counting, line full and pulsing",
+      (await pV.locator('[data-breakbar="maxed"] [data-barpulse="1"]').count())===1 && /\+3\dm/.test(await pV.locator('[data-anchor="hdr-status"]').innerText()));
+    await pV.close();
+    // a scheduled break started from its reminder carries its length
+    const pM=await mk({ dueAgo:20 });
+    await pM.locator('[data-missedact="start"]').click(); await pM.waitForTimeout(500);
+    t("starting a scheduled break from its reminder carries its length", (await brks(pM)).some(x=>!x.endTime && x.mins===15) &&
+      (await pM.locator('[data-breakclock="down"]').count())===1);
+    t("with no page errors", pM.__errs===0);
+    await pM.close();
+
+    // 4. a coming-up reminder, then OK
+    const pS=await mk({ dueAgo:-7, alerts:{ soon:{ on:true, count:2, gap:5 }, missed:{ on:true, count:1, gap:10 } } });
+    t("a set-time break coming up raises the reminder", /Morning Break in [6-8] min/.test(await pS.locator('[data-soonbreak]').innerText().catch(()=>"")));
+    await pS.locator('[data-soonact="ok"]').click(); await pS.waitForTimeout(300);
+    t("OK puts it away until the next one", (await pS.locator('[data-soonbreak]').count())===0);
+    t("with no page errors", pS.__errs===0);
+    await pS.close();
+
+    // 5. missed, with a second reminder to come: Later
+    const pL=await mk({ dueAgo:12, alerts:{ soon:{ on:false }, missed:{ on:true, count:2, gap:10 } }, hdr:'bottom' });
+    t("the first of two missed reminders offers Later", /In 10 min/.test(await pL.locator('[data-missedact="later"]').innerText().catch(()=>"")));
+    await pL.locator('[data-missedact="later"]').click(); await pL.waitForTimeout(300);
+    t("Later puts it away", (await pL.locator('[data-missedbreak]').count())===0);
+    t("nothing is recorded as missed yet", (await brks(pL)).every(x=>!x.missed));
+    // header at the bottom: the status line stands clear of the screen's foot
+    const foot=await pL.evaluate(()=>{ const el=document.querySelector('[data-tickerfoot]'); const st=document.querySelector('[data-anchor="hdr-status"]');
+      return el && st ? { pad:parseFloat(getComputedStyle(el).paddingBottom), gap:innerHeight-st.getBoundingClientRect().bottom } : null; });
+    t("header at the bottom: the status line sits clear of the corners", !!foot && foot.pad>=13 && foot.gap>=12);
+    t("with no page errors", pL.__errs===0);
+    await pL.close();
+  }
+
+  // ---- the way back: the trail under the action buttons (10-27) ----
+  {
+    // A trail link may be scrolled under an arrow: bring it into view, then tap it.
+    const goTrail=async(pg,label)=>{ const l=pg.locator('[data-modal-panel]').last().locator('[data-trailgo="'+label+'"]');
+      await l.evaluate(e=>{ const st=e.closest('[data-trailstrip]'); if(st){ const r=e.getBoundingClientRect(), q=st.getBoundingClientRect(); st.scrollLeft+=(r.left+r.width/2)-(q.left+q.width/2); } });
+      // the app swallows taps for a moment after any scroll (SCROLL_STATE), as it should
+      await pg.waitForTimeout(260); await l.click(); };
+    const mkT=async(o)=>{
+      const pg=await b.newPage({viewport:{width:390,height:844}});
+      pg.__errs=0; pg.on('pageerror',()=>{ pg.__errs++; });
+      await pg.addInitScript((a)=>{ localStorage.setItem('tt_testmode','true');
+        localStorage.setItem('tt_settings', JSON.stringify({layout:'comfortable',tracking:'timer',colorScheme:'bright-pastels',theme:'neon-dream',schemes:{},fonts:{},mode:'dark',handedness:a.hand||'right',headerPos:a.hdr||'top'})); }, o||{});
+      await pg.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(pg); await pg.waitForTimeout(500);
+      return pg;
+    };
+    const menu=async(pg)=>{ await pg.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await pg.waitForTimeout(300); };
+    const openWS=async(pg)=>{ await menu(pg); await pg.locator('[data-menugroup="time"]').click(); await pg.waitForTimeout(300);
+      await pg.locator('[data-groupitem]').filter({hasText:/^Work Schedule$/}).click(); await pg.waitForTimeout(450); };
+    const top=()=>'[data-modal-panel]';
+    const trailOf=async(pg)=>pg.evaluate(()=>{ const p=[...document.querySelectorAll('[data-modal-panel]')].pop(); const t=p&&p.querySelector('[data-trail]'); return t?t.getAttribute('data-trail'):null; });
+    const title=async(pg)=>pg.evaluate(()=>{ const p=[...document.querySelectorAll('[data-modal-panel]')].pop(); return p?p.innerText:""; });
+    const menuOpen=async(pg)=>(await pg.locator('[data-menugroup="time"]').count())>0;
+    const schedOn=async(pg)=>pg.evaluate(()=>{ const s=JSON.parse(localStorage.getItem('tt_settings')||'{}').workSchedule; return s&&s.sat&&s.sat.on; });
+
+    const pT=await mkT();
+    await openWS(pT);
+    t("from the menu, Work Schedule's trail runs Board > Menu > Time Settings", (await trailOf(pT))==="Board > Menu > Time Settings");
+    const geo=await pT.evaluate(()=>{ const p=[...document.querySelectorAll('[data-modal-panel]')].pop(); const t=p.querySelector('[data-trail]').getBoundingClientRect();
+      const sv=[...p.querySelectorAll('button')].find(x=>x.textContent==='Save').getBoundingClientRect(); return t.top>=sv.bottom-1 && t.right<=innerWidth; });
+    t("it sits under the buttons, on screen", geo);
+    await goTrail(pT,"Time Settings"); await pT.waitForTimeout(350);
+    t("Time Settings goes back one window, to the group", (await pT.locator('[data-groupitem]').filter({hasText:/^Work Schedule$/}).count())===1);
+    t("the group's own trail is Board > Menu", (await trailOf(pT))==="Board > Menu");
+    await goTrail(pT,"Menu"); await pT.waitForTimeout(350);
+    t("Menu goes back to the menu", await menuOpen(pT));
+    await pT.locator('[data-menugroup="time"]').click(); await pT.waitForTimeout(300);
+    await pT.locator('[data-groupitem]').filter({hasText:/^Work Schedule$/}).click(); await pT.waitForTimeout(450);
+    const before=await schedOn(pT);
+    await pT.locator('[data-schedday="sat"] button').first().click(); await pT.waitForTimeout(200);
+    await goTrail(pT,"Menu"); await pT.waitForTimeout(350);
+    t("with an unsaved change, leaving asks first", (await pT.locator('[data-leaveask]').count())===1);
+    await pT.locator('[data-leave="stay"]').click(); await pT.waitForTimeout(300);
+    t("Stay keeps the screen and the change", /Work Schedule/.test(await title(pT)) && (await pT.locator('[data-leaveask]').count())===0);
+    await goTrail(pT,"Menu"); await pT.waitForTimeout(300);
+    await pT.locator('[data-leave="discard"]').click(); await pT.waitForTimeout(400);
+    t("Don't save leaves without saving", await menuOpen(pT) && (await schedOn(pT))===before);
+    await pT.locator('[data-menugroup="time"]').click(); await pT.waitForTimeout(300);
+    await pT.locator('[data-groupitem]').filter({hasText:/^Work Schedule$/}).click(); await pT.waitForTimeout(450);
+    await pT.locator('[data-schedday="sat"] button').first().click(); await pT.waitForTimeout(200);
+    await goTrail(pT,"Board"); await pT.waitForTimeout(300);
+    await pT.locator('[data-leave="save"]').click(); await pT.waitForTimeout(500);
+    t("Save saves, and Board exits to the board", (await schedOn(pT))===!before && (await pT.locator('[data-modal-panel]').count())===0 && !(await menuOpen(pT)));
+    await openWS(pT);
+    await goTrail(pT,"Board"); await pT.waitForTimeout(400);
+    t("with nothing changed, Board leaves at once", (await pT.locator('[data-modal-panel]').count())===0 && (await pT.locator('[data-leaveask]').count())===0);
+    // a screen straight off the menu
+    await menu(pT); await pT.locator('button[data-flat]').filter({hasText:/Archive/}).first().click(); await pT.waitForTimeout(450);
+    t("Archive, straight off the menu: Board > Menu", (await trailOf(pT))==="Board > Menu");
+    await goTrail(pT,"Menu"); await pT.waitForTimeout(350);
+    t("and Menu takes it back to the menu", await menuOpen(pT) && (await pT.locator('[data-modal-panel]').count())===0);
+    await pT.keyboard.press('Escape').catch(()=>{});
+    // the practice bar's book opens Guides with no trail
+    await pT.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(pT); await pT.waitForTimeout(400);
+    await pT.locator('[data-tutorialguides]').click(); await pT.waitForTimeout(450);
+    t("a screen opened from the board itself has no trail", (await trailOf(pT))===null);
+    t("with no page errors", pT.__errs===0);
+    await pT.close();
+
+    // header at the bottom: the trail still sits directly under the buttons
+    const pB2=await mkT({ hdr:'bottom' });
+    await openWS(pB2);
+    const g2=await pB2.evaluate(()=>{ const p=[...document.querySelectorAll('[data-modal-panel]')].pop(); const t=p.querySelector('[data-trail]').getBoundingClientRect();
+      const sv=[...p.querySelectorAll('button')].find(x=>x.textContent==='Save').getBoundingClientRect(); return t.top>=sv.bottom-1 && t.bottom<=innerHeight; });
+    t("header at the bottom: the trail is still under the buttons", g2);
+    t("with no page errors", pB2.__errs===0);
+    await pB2.close();
+
+    // left-handed: sheet prose keeps its full stop at the end
+    const pL2=await mkT({ hand:'left' });
+    await openWS(pL2);
+    const bidi=await pL2.evaluate(()=>{ const p=[...document.querySelectorAll('[data-modal-panel]')].pop();
+      const d=[...p.querySelectorAll('div')].find(x=>/^Days and hours you normally work/.test(x.textContent)); return d && getComputedStyle(d).unicodeBidi; });
+    t("left-handed, sheet prose reads by its own words (the period stays at the end)", bidi==="plaintext");
+    t("left-handed, the board itself is untouched", await pL2.evaluate(()=>getComputedStyle(document.querySelector('[data-surface="lane"]')||document.body).unicodeBidi!=="plaintext"));
+    const hrs=await pL2.evaluate(()=>{ const h=document.querySelector('[data-schedhours="mon"]'); const r=h.getBoundingClientRect(), p=h.closest('[data-modal-panel]').getBoundingClientRect(); return r.left>=p.left && r.right<=p.right && h.lastElementChild.scrollWidth<=h.clientWidth+1; });
+    t("the day's hours fit on screen, left-handed too", hrs);
+    t("with no page errors", pL2.__errs===0);
+    await pL2.close();
+  }
+
+  // ---- the trail scrolls; inner sheets and Tool Tracker (10-27) ----
+  {
+    // A trail link may be scrolled under an arrow: bring it into view, then tap it.
+    const goTrail=async(pg,label)=>{ const l=pg.locator('[data-modal-panel]').last().locator('[data-trailgo="'+label+'"]');
+      await l.evaluate(e=>{ const st=e.closest('[data-trailstrip]'); if(st){ const r=e.getBoundingClientRect(), q=st.getBoundingClientRect(); st.scrollLeft+=(r.left+r.width/2)-(q.left+q.width/2); } });
+      // the app swallows taps for a moment after any scroll (SCROLL_STATE), as it should
+      await pg.waitForTimeout(260); await l.click(); };
+    const mk2=async(o)=>{
+      const pg=await b.newPage({viewport:{width:390,height:844}});
+      pg.__errs=0; pg.on('pageerror',()=>{ pg.__errs++; });
+      await pg.addInitScript((a)=>{ localStorage.setItem('tt_testmode','true'); if(a.tools) localStorage.setItem('tt_modules', JSON.stringify({ tools:true })); }, o||{});
+      await pg.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(pg); await pg.waitForTimeout(500);
+      return pg;
+    };
+    const menu=async(pg)=>{ await pg.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await pg.waitForTimeout(300); };
+    const topTrail=async(pg)=>pg.evaluate(()=>{ const p=[...document.querySelectorAll('[data-modal-panel]')].pop(); const t=p&&p.querySelector('[data-trail]');
+      if(!t) return null; const h=t.querySelector('[data-trailhere]'); const st=t.querySelector('[data-trailstrip]');
+      const op=(s)=>{ const a=t.querySelector('[data-trailmore="'+s+'"]'); return a?getComputedStyle(a).opacity:"0"; };
+      return { path:t.getAttribute('data-trail'), here:h&&h.textContent, scroll:t.getAttribute('data-trailscroll'), bar:!!t.querySelector('[data-trailbar]'),
+               left:op('left'), right:op('right'), sl:Math.round(st.scrollLeft), max:st.scrollWidth-st.clientWidth }; });
+    const pS=await mk2();
+    await menu(pS); await pS.locator('[data-menugroup="time"]').click(); await pS.waitForTimeout(300);
+    await pS.locator('[data-groupitem]').filter({hasText:/^Work Schedule$/}).click(); await pS.waitForTimeout(450);
+    let tr=await topTrail(pS);
+    t("the trail ends with where you are", !!tr && tr.here==="Work Schedule" && tr.path==="Board > Menu > Time Settings");
+    await pS.locator('[data-anchor="sch-unpaid"] button').first().click(); await pS.waitForTimeout(250);
+    await pS.locator('button').filter({hasText:/^Edit Breaks$/}).click(); await pS.waitForTimeout(600);
+    tr=await topTrail(pS);
+    t("one step deeper, the whole path: Board > Menu > Time Settings > Work Schedule", !!tr && tr.path==="Board > Menu > Time Settings > Work Schedule" && tr.here==="Scheduled Breaks");
+    t("too long for one line, it scrolls, with the position bar", !!tr && tr.scroll==="1" && tr.bar);
+    t("it opens at the end: an arrow left, none right", !!tr && tr.sl>=tr.max-2 && tr.left==="1" && tr.right==="0");
+    await pS.locator('[data-modal-panel]').last().locator('[data-trailmore="left"]').click(); await pS.waitForTimeout(700);
+    const tr2=await topTrail(pS);
+    t("tapping the arrow scrolls back, and an arrow shows on the right", !!tr2 && tr2.sl<tr.sl && tr2.right==="1");
+    // back one step with an unsaved change asks, and Save keeps it in the schedule draft
+    await pS.locator('[data-modal-panel]').last().locator('[data-carryover]').click(); await pS.waitForTimeout(200);
+    await goTrail(pS,"Work Schedule"); await pS.waitForTimeout(350);
+    t("Work Schedule (back one step) with a change asks first", (await pS.locator('[data-leaveask]').count())===1);
+    await pS.locator('[data-leave="save"]').click(); await pS.waitForTimeout(400);
+    tr=await topTrail(pS);
+    t("Save takes it back to Work Schedule", !!tr && tr.here==="Work Schedule" && (await pS.locator('[data-leaveask]').count())===0);
+    const carry0=await pS.evaluate(()=>{ const s=JSON.parse(localStorage.getItem('tt_settings')||'{}').workSchedule; return !!(s&&s.unpaidBreaks&&s.unpaidBreaks.carryOver); });
+    await goTrail(pS,"Board"); await pS.waitForTimeout(350);
+    t("then leaving Work Schedule asks again (it now holds the change)", (await pS.locator('[data-leaveask]').count())===1);
+    await pS.locator('[data-leave="discard"]').click(); await pS.waitForTimeout(400);
+    const carry1=await pS.evaluate(()=>{ const s=JSON.parse(localStorage.getItem('tt_settings')||'{}').workSchedule; return !!(s&&s.unpaidBreaks&&s.unpaidBreaks.carryOver); });
+    t("Don't save leaves it as it was, and goes to the board", carry1===carry0 && (await pS.locator('[data-modal-panel]').count())===0);
+    // from the inner sheet straight out: one question for both
+    await menu(pS); await pS.locator('[data-menugroup="time"]').click(); await pS.waitForTimeout(300);
+    await pS.locator('[data-groupitem]').filter({hasText:/^Work Schedule$/}).click(); await pS.waitForTimeout(450);
+    if(!(await pS.locator('button').filter({hasText:/^Edit Breaks$/}).count())){ await pS.locator('[data-anchor="sch-unpaid"] button').first().click(); await pS.waitForTimeout(250); }
+    await pS.locator('button').filter({hasText:/^Edit Breaks$/}).click(); await pS.waitForTimeout(500);
+    await pS.locator('[data-modal-panel]').last().locator('[data-carryover]').click(); await pS.waitForTimeout(200);
+    await pS.locator('[data-modal-panel]').last().locator('[data-trailmore="left"]').click(); await pS.waitForTimeout(400);
+    await pS.locator('[data-modal-panel]').last().locator('[data-trailmore="left"]').click().catch(()=>{}); await pS.waitForTimeout(400);
+    await goTrail(pS,"Board"); await pS.waitForTimeout(350);
+    t("leaving from the inner sheet asks once", (await pS.locator('[data-leaveask]').count())===1);
+    await pS.locator('[data-leave="save"]').click(); await pS.waitForTimeout(500);
+    const carry2=await pS.evaluate(()=>{ const s=JSON.parse(localStorage.getItem('tt_settings')||'{}').workSchedule; return !!(s&&s.unpaidBreaks&&s.unpaidBreaks.carryOver); });
+    t("and Save keeps both the inner change and the schedule", carry2===!carry0 && (await pS.locator('[data-modal-panel]').count())===0);
+    t("with no page errors", pS.__errs===0);
+    await pS.close();
+
+    // Tool Tracker
+    const pM=await mk2({ tools:true });
+    await menu(pM); await pM.locator('button[data-flat]').filter({hasText:/^Tools$/}).first().click(); await pM.waitForTimeout(500);
+    tr=await topTrail(pM);
+    t("Tools, from the menu: Board > Menu, here Tools", !!tr && tr.path==="Board > Menu" && tr.here==="Tools");
+    const nTools=async()=>pM.evaluate(()=>{ const k=Object.keys(localStorage).find(x=>/^tt_mod_tools_.*tools$/.test(x)); return k ? JSON.parse(localStorage.getItem(k)).length : 0; });
+    const n0=await nTools();
+    await pM.locator('button').filter({hasText:/^All$/}).first().click().catch(()=>{}); await pM.waitForTimeout(250);
+    await pM.locator('[data-anchor="tools-add"]').click(); await pM.waitForTimeout(400);
+    tr=await topTrail(pM);
+    t("Add Tool: Board > Menu > Tools", !!tr && tr.path==="Board > Menu > Tools" && tr.here==="Add Tool");
+    await pM.locator('[data-modal-panel]').last().locator('input').first().fill('Torque wrench'); await pM.waitForTimeout(150);
+    await goTrail(pM,"Tools"); await pM.waitForTimeout(300);
+    t("Tools (back one step) with something typed asks first", (await pM.locator('[data-leaveask]').count())===1);
+    await pM.locator('[data-leave="discard"]').click(); await pM.waitForTimeout(350);
+    tr=await topTrail(pM);
+    t("Don't save goes back to Tools, adding nothing", !!tr && tr.here==="Tools" && (await nTools())===n0);
+    await pM.locator('[data-anchor="tools-add"]').click(); await pM.waitForTimeout(400);
+    await goTrail(pM,"Tools"); await pM.waitForTimeout(300);
+    t("with nothing typed, back to Tools at once", (await pM.locator('[data-leaveask]').count())===0 && (await topTrail(pM)).here==="Tools");
+    await pM.locator('[data-anchor="tools-add"]').click(); await pM.waitForTimeout(400);
+    await pM.locator('[data-modal-panel]').last().locator('input').first().fill('Torque wrench'); await pM.waitForTimeout(150);
+    await goTrail(pM,"Board"); await pM.waitForTimeout(300);
+    await pM.locator('[data-leave="save"]').click(); await pM.waitForTimeout(500);
+    t("Board with Save adds the tool and goes to the board", (await nTools())===n0+1 && (await pM.locator('[data-modal-panel]').count())===0);
+    t("with no page errors", pM.__errs===0);
+    await pM.close();
+  }
+
+  // ---- trails over the board: milestones, Edit... children, where a record sits (10-27) ----
+  {
+    const goTrail=async(pg,label)=>{ const l=pg.locator('[data-modal-panel]').last().locator('[data-trailgo="'+label+'"]');
+      await l.evaluate(e=>{ const st=e.closest('[data-trailstrip]'); if(st){ const r=e.getBoundingClientRect(), q=st.getBoundingClientRect(); st.scrollLeft+=(r.left+r.width/2)-(q.left+q.width/2); } });
+      await pg.waitForTimeout(260); await l.click(); };
+    const D3=86400000, now3=Date.now();
+    const mk3=async()=>{ const pg=await b.newPage({viewport:{width:390,height:844}});
+      pg.__errs=0; pg.on('pageerror',()=>{ pg.__errs++; });
+      await pg.addInitScript(({D,now})=>{
+        localStorage.setItem('tt_settings', JSON.stringify({layout:'comfortable',tracking:'timer',colorScheme:'bright-pastels',theme:'neon-dream',schemes:{},fonts:{},mode:'dark',handedness:'right',headerPos:'top'}));
+        localStorage.setItem('tt_projects', JSON.stringify([
+          {id:1,name:'Install new workbench',lane:'Current Jobs',notes:'',order:0,parentId:null,role:'project',kind:'finite',stages:[],
+            milestones:[{id:'m1',label:'Measure',dueAt:now+2*D,targets:[{kind:'project',id:2}],doneAt:null,note:''}]},
+          {id:2,name:'Measure up',lane:'Current Jobs',notes:'',order:0,parentId:1,role:'task',kind:'finite',stages:[]},
+          {id:3,name:'Mark the floor',lane:'Current Jobs',notes:'',order:0,parentId:2,role:'task',kind:'finite',stages:[]}]));
+        localStorage.setItem('tt_laneorder', JSON.stringify(['Current Jobs']));
+      },{D:D3,now:now3});
+      await pg.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(pg); await pg.waitForTimeout(500); return pg; };
+    const top3=async(pg)=>pg.evaluate(()=>{ const p=[...document.querySelectorAll('[data-modal-panel]')].pop(); if(!p) return null;
+      const t=p.querySelector('[data-trail]'); const h=t&&t.querySelector('[data-trailhere]');
+      return { title:p.innerText.split("\n").find(x=>/Milestones|Edit|Stages/.test(x))||"", path:t?t.getAttribute('data-trail'):null, here:h?h.textContent:null }; });
+    const pB3=await mk3();
+    // a card's editor: the trail is where it sits
+    await pB3.locator('span:text-is("Install new workbench")').first().dblclick({force:true}); await pB3.waitForTimeout(500);
+    let tp=await top3(pB3);
+    t("Edit Project from the board: Board > its lane, here the project", !!tp && tp.path==="Board > Current Jobs" && tp.here==="Install new workbench");
+    await pB3.locator('[data-modal-panel]').last().locator('button').filter({hasText:/^Cancel$/}).first().click(); await pB3.waitForTimeout(300);
+    // milestones chain
+    await pB3.locator('[data-msstrip="board"]').click(); await pB3.waitForTimeout(500);
+    tp=await top3(pB3);
+    t("Milestones from the board: the first window has no trail", !!tp && tp.path===null);
+    await pB3.locator('[data-msboardlane]').first().click(); await pB3.waitForTimeout(500);
+    tp=await top3(pB3);
+    t("a lane in it: Board > Milestones, here the lane", !!tp && tp.path==="Board > Milestones" && tp.here==="Current Jobs");
+    await pB3.locator('[data-mslaneproj]').first().click(); await pB3.waitForTimeout(500);
+    tp=await top3(pB3);
+    t("a project in that: Board > Milestones > Current Jobs, here the project", !!tp && tp.path==="Board > Milestones > Current Jobs" && tp.here==="Install new workbench");
+    await goTrail(pB3,"Milestones"); await pB3.waitForTimeout(400);
+    tp=await top3(pB3);
+    t("Milestones jumps back two windows at once", !!tp && /Milestones · Board/.test(tp.title) && (await pB3.locator('[data-modal-panel]').count())===1);
+    await pB3.locator('[data-msboardlane]').first().click(); await pB3.waitForTimeout(450);
+    await pB3.locator('[data-mslaneproj]').first().click(); await pB3.waitForTimeout(450);
+    await goTrail(pB3,"Board"); await pB3.waitForTimeout(400);
+    t("Board leaves all three", (await pB3.locator('[data-modal-panel]').count())===0);
+    // over Edit...
+    await pB3.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await pB3.waitForTimeout(300);
+    await pB3.locator('button').filter({hasText:/^Edit…$/}).first().click(); await pB3.waitForTimeout(500);
+    const openRow3=async(name, item)=>{ const list=await pB3.locator('[data-outlineopen]').allInnerTexts();
+      await pB3.locator('[data-outlineopen]').nth(list.indexOf(name)).click(); await pB3.waitForTimeout(400);
+      await pB3.waitForTimeout(250);   // past the tap guard if the menu scrolled into view
+      await pB3.locator('[data-rowmenuitem]').filter({hasText:item}).first().click(); await pB3.waitForTimeout(500); };
+    await openRow3("Mark the floor", /^Edit task$/);
+    tp=await top3(pB3);
+    t("Edit Task over Edit…: the route, then where it sits", !!tp && tp.path==="Board > Menu > Edit… > Current Jobs > Install new workbench > Measure up" && tp.here==="Mark the floor");
+    await goTrail(pB3,"Measure up"); await pB3.waitForTimeout(400);
+    tp=await top3(pB3);
+    t("a parent in the trail opens that parent's editor", !!tp && tp.here==="Measure up" && tp.path==="Board > Menu > Edit… > Current Jobs > Install new workbench");
+    await pB3.locator('[data-modal-panel]').last().locator('input').first().fill('Measure up twice'); await pB3.waitForTimeout(150);
+    await goTrail(pB3,"Edit…"); await pB3.waitForTimeout(350);
+    t("leaving an edited record asks first", (await pB3.locator('[data-leaveask]').count())===1);
+    await pB3.locator('[data-leave="discard"]').click(); await pB3.waitForTimeout(400);
+    tp=await top3(pB3);
+    t("Edit… goes back to the outline, the change dropped", !!tp && /Edit…/.test(tp.title) && (await pB3.locator('[data-outlineopen]').allInnerTexts()).indexOf("Measure up")>=0);
+    await openRow3("Mark the floor", /^Edit task$/);
+    await goTrail(pB3,"Current Jobs"); await pB3.waitForTimeout(400);
+    tp=await top3(pB3);
+    t("the lane in the trail opens the lane's editor", !!tp && /Edit Lane/.test(tp.title) && tp.here==="Current Jobs");
+    await goTrail(pB3,"Edit…"); await pB3.waitForTimeout(400);
+    await openRow3("Install new workbench", /^Add stages$/);
+    tp=await top3(pB3);
+    t("Stages over Edit…: Board > Menu > Edit…", !!tp && tp.path==="Board > Menu > Edit…");
+    t("with no page errors", pB3.__errs===0);
+    await pB3.close();
   }
 
   await b.close();

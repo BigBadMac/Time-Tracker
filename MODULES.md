@@ -112,9 +112,28 @@ ctx.api               TT
 ```
 
 Screens additionally get `settings projects logs laneMeta laneOrder testMode
-schedule activeId activeName onClose`. `activeId` / `activeName` are the project
+schedule activeId activeName trail onClose`. `activeId` / `activeName` are the project
 running right now, so a module can default to it rather than making the user
 pick the job they are already standing in.
+
+**`ctx.trail` - the way back (10-27).** The path to this screen, as steps
+`{ label, go }` (e.g. Board > Menu when opened from the menu), or `null` when
+the screen was opened some other way. Every module screen MUST hand it to its
+sheet - `ui.Modal({ ..., trail:ctx.trail })` - and the core draws it under the
+action buttons: one sideways-scrolling line, ending with the sheet's title
+("here"; `trailHere` overrides a long title). A sheet the screen opens adds
+its own step back:
+
+```js
+trail: (ctx.trail || []).concat([{ label:"Tools", back:true, go:closeSheet }]),
+trailGuard: function(item){            // only when the sheet holds edits
+  if(unchanged){ item.go(); return; }
+  setLeave({ name:"this checkout", onSave:..., onDiscard:... });   // then
+}                                      // ui.LeaveAsk: Save / Don't save / Stay
+```
+
+`back:true` marks the step that only closes the sheet; any other step leaves
+the module altogether, so Save there must save before `item.go()`.
 
 Reports hooks additionally get `kind range rollup logs projects schedule
 testMode now` — the window the user is looking at, so a module reports against
@@ -141,7 +160,7 @@ ctx.storage.clear()            // only this module
 - **Storage** — `storage(id) key(id,k) prefix usage(id) clearData(id)`
 - **Host hooks** — `nav screen settingsPanels reportSections reportText`
 - **Chrome** — `tokens() rgba haptic closeMenus`
-- **UI** — `ui.Modal ModalActions Mono Toggle Carousel saveStyle cancelStyle timeFieldStyle inputStyle labelStyle`
+- **UI** — `ui.Modal ModalActions Mono Toggle Carousel LeaveAsk saveStyle cancelStyle timeFieldStyle inputStyle labelStyle`
 - **Format** — `fmt.dur time date hours money pad`
 - **Time and pay** — `time.periodRange periodLabel payCycleRange scheduledMinutes scheduledToDate schNetMinutes startOf* addDays dayKeyOf isoDate toMin DAY_KEYS DAY_LABELS`
 - **Data** — `data.uid findProj getChildren getDescendantIds getMeta`
@@ -162,7 +181,7 @@ TT.define({
       var S = ctx.api.tokens();                 // live, every render
       var items = ctx.storage.get("items", []);
       return React.createElement(ctx.api.ui.Modal,
-        { title:"Tools", onClose:ctx.onClose, cancelLabel:"Close" },
+        { title:"Tools", onClose:ctx.onClose, cancelLabel:"Close", trail:ctx.trail },
         /* ... */);
     }
   },
@@ -280,14 +299,14 @@ say, so Reports is untouched until the module is used.
 ## Tests
 
 ```
-node tt-tests.js time-tracker.jsx     # 1833 assertions, 211 cases
+node tt-tests.js time-tracker.jsx     # 1893 assertions, 214 cases
 python3 build.py --src time-tracker.jsx --shell index.html --out index.html \
         --stamp "MM-DD descriptor"
 python3 extract.py index.html /tmp/app_only.js
-node boot.js /tmp/app_only.js         # 367 checks against the built file
+node boot.js /tmp/app_only.js         # 403 checks against the built file
 node shift.js /tmp/app_only.js        # 46 - work days, shifts, overtime
-node lifecycle.js /tmp/app_only.js    # 628 - project lifecycle, nesting and breaks
-node e2e.js index.html                # 690 - the real app in Chromium, ~8 minutes
+node lifecycle.js /tmp/app_only.js    # 646 - project lifecycle, nesting and breaks
+node e2e.js index.html                # 768 - the real app in Chromium, ~8 minutes
 node paint.js /tmp/app_only.js        # first-paint markup, for diffing builds
 ```
 
@@ -330,5 +349,7 @@ The core has moved on underneath the platform. Modules see these through `TT`:
   `ctx.api` alongside the report window — rather than the bare window.
 - **`data.getMeta`** is exposed for lane colours.
 - **Form fields must be 16px** or iOS Safari zooms on focus and stays zoomed.
+- **Every sheet carries the way back** (`ctx.trail`, above). Tool Tracker's
+  screen and all three of its sheets do; e2e walks it.
 - **Modules bring their own help** (the `help` field, above). A module with a
   menu row and no help fails the e2e coverage check once it is switched on.

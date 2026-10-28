@@ -1,14 +1,18 @@
 # Time Tracker — session handover
 
-Current build: **`10-22 v1.3 breaks`** (public version **1.3**, `APP_VERSION` - bumped 10-22: Brent asked for the breaks package as a single export to push)
+Current build: **`10-27 v1.3B baker`** (public version **1.3B** "Baker", `APP_VERSION` - Brent named this release 10-27: the one getting the app ready for the database. A letter suffix, his call, instead of the usual minor bump to 1.4)
 
 ```
-tt-tests.js  1833 assertions   211 cases   (static, no browser)
-boot.js       367 checks                    (renders the built file)
+tt-tests.js  1893 assertions   214 cases   (static, no browser)
+boot.js       403 checks                    (renders the built file)
 shift.js       46 checks                    (work days, shifts, overtime)
-lifecycle.js  628 checks                    (projects, nesting, archive, scheduling, breaks)
-e2e.js        690 checks                    (Playwright, the real board in a browser)
+lifecycle.js  646 checks                    (projects, nesting, archive, scheduling, breaks)
+e2e.js        768 checks                    (Playwright, the real board in a browser)
 ```
+
+**Delivery rule (Brent, 10-27):** when Brent asks for files to push, send
+the full set as ONE zip **and** the built `index.html` on its own beside it,
+so he can open and check the build before pushing.
 
 **Everything above is green at this build.** Pushing it is Brent's step
 (Working Copy -> GitHub Pages). `10-20 v1.2 ids and tracking` was the build
@@ -551,6 +555,215 @@ which is what makes Backup & Restore whole.
   behaving exactly as they did. Nothing migrates.
 
 ## Recent work, newest first
+
+- **Version 1.3B "Baker" (10-27).** Brent: "Since this is getting ready for
+  the database release, can we make this release version 1.3B, as in
+  Baker?" `APP_VERSION = "1.3B"`; the splash reads v1.3B. Paint diff: the
+  version, the date, and the new CSS rules - nothing else. 1.3B ships
+  (release notes, to abridge with Brent): break reminders (before / missed,
+  times and minutes apart), flexible breaks, the break clock (countdown,
+  overage, the C-style line, "On Break", End on the left for left hand),
+  the bottom-header fix, the back trail everywhere (scrolling, arrows,
+  inner sheets, Tool Tracker, milestones, Edit..., where a record sits),
+  save-changes prompts, left-handed punctuation and Work Schedule fixes.
+  The db/ folder ships alongside but nothing in the app talks to a server.
+
+- **Database: tables and security rules, draft 1 (10-27) - `db/`.** Not
+  connected to the app yet. `db/01_schema.sql` is written for Supabase
+  (auth.users, auth.uid(), anon/authenticated); `db/00_local_shim.sql`
+  stands in for Supabase's auth LOCALLY ONLY (never run it on Supabase);
+  `db/02_tests.sql` runs as each person in turn; `db/run.sh` rebuilds a
+  fresh local database and runs them (74/74). Needs the local Postgres 16:
+  `su pg -c "/usr/lib/postgresql/16/bin/pg_ctl -D /home/pg/data -o '-k /tmp
+  -p 54329' -l /home/pg/log.txt start"`.
+  - Tables: profiles (last_active_at), orgs (join_code_hash), org_members
+    (admin/member, many orgs per person), projects (org or one owner,
+    top_admin_id, public_description), records (the shared tree; fields +
+    field_ts per field), record_history (overwritten / arrived_late),
+    project_members (role, branch, is_guest, can_edit, access window:
+    ends/from/until/days/hours/tz, hours_notice_at), hours_grants,
+    time_entries (job/atwork/break/disruption - the full record), requests,
+    share_links (every use rule + every grant rule, code and PIN hashed,
+    `server` column for parked cross-server links).
+  - Everything that changes membership goes through SECURITY DEFINER
+    functions that enforce the rules: create_org / new_join_code /
+    join_org, org_project_directory (name + public description only),
+    create_project, add_member (top admin alone adds admins; a lead adds
+    assignees/members in their branch), remove_member (top admin alone
+    removes admins; never removed/leaves until transfer_top_admin),
+    grant_hours / revoke_hours (org admin only), job_totals (teammates'
+    per-job totals), apply_edit (later edit wins per field; loser kept),
+    create_share_link / revoke_share_link / redeem_link (expiry, window,
+    uses, PIN, revoked; approval -> a 'join' request), answer_request.
+  - Policies: read = open member (guest limited to the link's branch) or
+    the org admin; access windows are re-checked on EVERY read and write
+    (`access_ok`); hours = self, the org admin for their own org's members
+    on org projects (never a guest's - even one who later joins the org),
+    or an org-admin grant scoped to a branch; hashed codes unreadable even
+    to admins (column grants); signed-out reads nothing.
+  - Mutation-checked: 15 rules removed one at a time, each caught.
+    GOTCHA found doing it: in psql, `:F` inside a string concat drops its
+    quotes - refusal tests "passed" on a syntax error. Use quote_literal().
+  - Not yet: personal (no-org) projects beyond the owner; server-sent
+    notifications; the "top admin away" hand-over rule (last_active_at is
+    recorded); closing/deleting records; module switch per board; the
+    app's sync layer (behind the storage doorway) and the sandbox copy.
+
+- **Trails over the board (10-27 `v1.3 board trails`, Brent: "1 & 2 with
+  B for 3").** Board-level windows that are ONE step from the board keep no
+  trail (Close already is the way back); stacked ones get one:
+  - **Milestones:** board view (no trail) > lane view `Board > Milestones`
+    > project editor `Board > Milestones > <lane>`; "Milestones" closes the
+    two above the board view. A view opened straight from a card/lane strip
+    has no trail. (`msBoardStep`, `msLaneTrail`, `msProjTrail`.)
+  - **Over Edit...:** Edit Project/Task, Edit Lane, Stages and Milestones
+    opened from the outline start with `outlineRoute` = the menu route +
+    "Edit..." (`back:true`, `closeOverOutline` - back to the outline).
+  - **Where a record sits (option B, "the trail IS the location"):** Edit
+    Project / Edit Task carry `editTrailFor(p)` = base route (outline route
+    or just Board) + the lane + every parent from the top, ending with the
+    record's name. A parent opens ITS editor (`setEditProj(a)`; the Modal is
+    keyed `edit:<id>` so the form remounts); the lane opens Edit Lane.
+    Over Edit... the trail is therefore route + location, complete.
+  - Each editor guards edits: ProjectForm (`formSnap` vs first render),
+    MilestoneEditModal (steps vs saved), LaneEditModal (label/colour),
+    StagesModal (items). LaneEditModal and StagesModal now return a Fragment
+    so their LeaveAsk is a sibling, never inside the backdrop-filter sheet.
+  - Tests: tt-tests +10, e2e +13. Row-menu items in e2e: wait past the tap
+    guard (~250 ms) after opening the menu, then a locator click.
+
+- **The trail scrolls; inner sheets and modules (10-27 `v1.3 trail
+  scroll`, Brent).** Brent: the trail must be COMPLETE, and moving back and
+  forth along a long one must be fluid. Mocked A-E (swipe / tap "..." /
+  chips / swipe + position bar / Path list); chose **D, with C's arrows**.
+  - `BackTrail` is one line that scrolls sideways (`data-trailstrip`,
+    scrollbar hidden), opens scrolled to the END, and ends with where you
+    are (`data-trailhere`, white, not a link - the sheet's title, or
+    `trailHere` for a long one such as "Check Out - <tool>"). Arrows
+    (`data-trailmore` left/right) show only on a side with more and, tapped,
+    scroll ~60% of the width; a thin bar (`data-trailbar`) shows which part
+    of the path is in view. A trail that fits: no arrows, no bar
+    (`data-trailscroll` 0/1). Steps are `{label, go, back?}`; guard(item).
+  - **Inner sheets:** Scheduled Breaks and Pay & Work Week carry Work
+    Schedule's trail + "Work Schedule" (`back:true`). Back one step with
+    edits asks (Save = Done). Leaving further from an inner sheet folds its
+    edits into the schedule draft first, so ONE question covers both
+    (`subGuard` / `leaveWith`, comparing normalized schedules).
+  - **Modules:** the host hands `ctx.trail` to every module screen
+    (`trailFor("mod:<id>:<screen>")`, set by `openModule`). Tool Tracker's
+    screen passes it to its sheet; Check Out / Add Tool / Edit Tool add
+    "Tools" (`back:true`) and ask if anything was typed (`ui.LeaveAsk`, new
+    in the API, resolved when drawn). Contract written up in MODULES.md.
+  - **Gotcha:** the app swallows taps for 180 ms after ANY scroll
+    (`SCROLL_STATE`, the board's anti-mis-tap guard) - including the
+    trail's own scroll. Right for fingers; e2e must wait ~250 ms after
+    scrolling a trail before tapping a link (`goTrail` helper does).
+  - Tests: tt-tests +6, boot +3, e2e +19.
+  - One full e2e run timed out once in the outline-add section (p7, a row
+    menu item that did not open); the section passed alone twice and the
+    full rerun was 755/755. Second load-only flake seen (see 10-22 guide
+    walk). Watch for it.
+
+- **The way back (10-27 `v1.3 trail`, Brent; chosen from mocks A-E, then
+  B+C, then "trail only, no Back button - Back is redundant").**
+  - Every setup screen reached from the menu draws a trail INSIDE its
+    action box, directly under the buttons (`BackTrail`, `data-trail`,
+    links `data-trailgo`): **Board** (out altogether) > **Menu** > the
+    menu group if it came through one (Time Settings / Interface / User
+    Manual). The screen's own name is not repeated (it is the title, and
+    with Board added the line wrapped). Follows the header top/bottom
+    because it rides in `ModalActions` (`flexWrap` + full-width row).
+  - Board side: `navFrom = {screen, from}` set by `navOpen()` at each menu
+    or group opener; `trailFor(screen)` builds the items only for the
+    screen it was recorded for. `closeAllPopups` clears it (and now also
+    closes the Archive, which it never did). Opened any other way (board
+    button, clock-out, practice-bar book, "Change my allowance") = no
+    trail. Groups get `groupTrail` (Board > Menu) under their Close.
+  - Screens: Edit..., Day Summary, Reports, Archive, Backup & Saves,
+    Extensions, Guides, Work Schedule, Tracking, Themes, Layout. Not yet:
+    module screens (Tool Tracker) - needs a `ctx` field in the module
+    contract; flagged to Brent.
+  - Unsaved edits (Brent: ask only when something changed): Work Schedule
+    (`schDirty` = draft vs normalized saved) and Edit... (rows vs fresh
+    `outlineRows`) pass `trailGuard`; `LeaveAskModal` = Save / Don't save
+    / Stay. Themes, Layout, Tracking apply live, so no guard.
+  - **Left-handed fixes:** (1) `[dir=rtl] [data-modal-panel] div, p,
+    button { unicode-bidi:plaintext }` - sentence punctuation no longer
+    jumps to the front (".day"). Sheets only: applied to the whole page
+    it re-ordered board chips. Side effect: sheet prose sits left in
+    left-handed mode. (2) Work Schedule's day row was wider than a 390px
+    phone and cut the hours off on both hands: hours now "8.5h"
+    (`fmtHoursTight`), "+1d" stacked above them in one 34px column, row
+    gap 0.3rem. Fits at 390; a 375px phone still overflows ~12px.
+  - Tests: tt-tests +43, boot +9, e2e +20. Mutation-checked: the guard,
+    Save-before-go, the per-screen trail, the trail drawn twice.
+
+- **Break clock and line (10-22 `v1.3 break clock`, Brent; look C chosen
+  from a three-way mock).**
+  - The header on a break says just **On Break** (a long break name pushed
+    End off screen). The clock never shrinks; the label ellipsizes first;
+    the status span clips sideways only (`overflowX:"clip"`) so the line
+    under it shows. Words "left"/"over" dropped: countdown "8m 57s" amber,
+    overage "+4m 02s" red.
+  - A break record carries `mins` (its set length) when started from a
+    scheduled break - the sheet's presets (`breakOptionsFor` now passes
+    mins), the low-time path, and the reminder banners' Start. Generic
+    Paid/Unpaid, typed names and the no-schedule defaults have none: open.
+    Flexible breaks have a length, so they count down too (told Brent;
+    one-line change if he wants them to count up).
+  - `breakBarEl(leftMs, limit, mirror)`: a faint track under On Break +
+    clock. Counting down, the amber "left" is anchored to the RIGHT and
+    drains toward it (the line runs left to right); once over, the red
+    overage grows back from the right (right to left). Over by the whole
+    length: red full, clock keeps counting, line pulses (`data-barpulse`,
+    `ttBarPulse` 2.4s, off under reduced motion). Open break: full amber
+    and pulsing. Left-handed (`mirror:isLeft`) flips every direction.
+    Hooks: `data-breakclock` up/down/over, `data-breakbar`
+    down/over/maxed/open, `data-breakbarside`, `data-breakbarpct`.
+  - Left-handed, the Break / End button leads the header line (before the
+    date, `data-breaktagside="left"`, its own onClick = the status tap);
+    right-handed it ends the line as before. Same "›" text both sides.
+  - The header's allowance overNote is suppressed when the break has its
+    own length (its clock already shows the overage).
+  - Tests: tt-tests +1, boot +9, e2e +9. Mutation-checked: mirroring, the
+    maxed pulse, the name in the header. First paint identical apart from
+    the new keyframes rule.
+
+- **Break fixes after 1.3 (10-22 `v1.3 break reminders`, Brent).**
+  - **Header at the bottom:** the status line was clipped by the phone's
+    rounded corners. `HDR_FOOT` (10px) - the ticker's bottom padding is
+    `max(HDR_FOOT, env(safe-area-inset-bottom))` and its sides 1rem when
+    the header is at the bottom (`data-tickerfoot`); `UI.bottomClear`,
+    the root's bottom padding and the break banners' place all add
+    `HDR_FOOT`. Top header untouched (first paint identical).
+  - **Flexible breaks:** each scheduled break has a SET TIME / FLEXIBLE pill
+    (`flex:true`, `data-breakflex`); flexible shows "Any time", is never
+    due (`breakDueAt` -> null) and never reminds. An unpaid flexible break
+    comes off the shift whole (capped at the shift); for pace it is spread
+    evenly over the shift. Per break, not one switch for all - lunch can be
+    at noon while coffee is whenever.
+  - **Break Reminders** (Scheduled Breaks, `data-anchor="ub-alerts"`),
+    `unpaidBreaks.alerts = { soon:{on,count,gap}, missed:{on,count,gap} }`
+    via `normBreakAlerts` (count 1-5, gap 1-60 min; defaults: coming-up
+    off, missed on x1 at +10 min). `breakAlertDue` replaces the old
+    missed check (`missedBreakDue` is now a wrapper): coming-up reminder k
+    lands (count-k+1) gaps before the start, missed reminder k lands k
+    gaps after. Missed wins over coming-up. New `UpcomingBreakBanner`
+    (Start it now / OK); the missed banner's "In 30 min" is now "In <gap>
+    min" (`data-missedact="later"`) and is not offered on the last
+    reminder. Quiet keys in `tt_breaknags`: `key|s` / `key|m` (dismissed
+    through reminder idx), `key|sn` / `key|mn` (announced through idx),
+    `key` = "skip" (and 1.3's snooze-until numbers still honoured).
+    Each reminder buzzes once and posts a system notification if allowed;
+    an Allow button sits in the section. **Limit, told to Brent:**
+    notifications only fire while the app is open - a closed or
+    backgrounded PWA needs Web Push from a server (comes with Supabase).
+  - Manual: Scheduled Breaks picture gains Break Reminders (five parts),
+    the set-up guide gains a Reminders step.
+  - Tests: boot +13, lifecycle +18, e2e +13 (flexible + reminder settings
+    saved, coming-up OK, missed Later, bottom-header clearance).
+    Mutation-checked: missed timing, flexible deduction, flexible never
+    due, Later on the last reminder.
 
 - **Version 1.3: breaks (10-22 `v1.3 breaks`).** Built from the decisions in
   "BREAKS PACKAGE" below; Brent asked for it as one export to push.
@@ -1649,7 +1862,32 @@ owned by an org or by one person. Open: how people join an org (invite /
 code / company email); can members see all org projects' CONTENTS or only
 names; more than one org per person; links straight-in or approval, expiry,
 single-use, revocable; cross-SERVER links (Boeing in-house <-> ours) are a
-federation problem - needed or not. Table design paused until these settle;
+federation problem - needed or not. ANSWERS (Brent, 10-27): (1) join an org by JOIN CODE - more
+private/anonymous than invites or company email. (2) members see only the
+NAME and a PUBLIC DESCRIPTION of each org project until they are added
+(confirmed 10-27) - so a project has a public description field separate
+from its notes. (3) YES, a person can be in more
+than one org. (4) Link behaviour is NOT fixed: the person MAKING the link
+(confirmed 10-27) chooses straight-in
+vs approval, expiry, single-use and revocable, in any combination, plus
+more: a date window ("only between this date and that"), certain days only,
+etc. Claude proposed splitting LINK rules (who/when can use the link to
+join) from GUEST ACCESS rules (what/when the guest can reach after joining).
+(5) cross-server links: PARKED (Brent, 10-27) until it is shown to be a real
+use case worth building. Design so it can be added later: a link names its
+server, and a guest from another company joins on OUR server meanwhile.
+HOURS (Brent, 10-27 - REVISES "time stays private"): within an org, the ORG
+ADMIN can see their own org's members' hours - never anyone outside the org
+or outside the company (a guest's hours belong to the guest's own side, not
+the host org). DECIDED 10-27: (1) the FULL record - clock, job time,
+breaks, disruptions (disruptions explain shortfalls); (2) only time logged
+on that org's shared projects - personal jobs and other orgs' work stay
+private; someone in two orgs is seen by each org only for its own work;
+(3) others (project admins, leads) see hours only if the appropriate admin
+GRANTS it (read: the org admin grants a "can see hours" right, scoped to a
+project or branch); (4) members are told plainly when they join an org
+project ("Your hours on this project are visible to <Org>'s admins").
+ALL SETTLED 10-27 - table design can start;
 a local Postgres 16 (+ psql, docker) is available in the container for
 testing row-level security.
 

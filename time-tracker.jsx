@@ -971,6 +971,92 @@ function Mono(props){
 // direction, and Delete at the far corner.
 function ACTION_DIR(){ return "row-reverse"; }
 function ACTION_ROW(){ return { display:"flex", gap:"0.5rem", flexDirection: ACTION_DIR() }; }
+// The way back (Brent, 10-27): under the action buttons, inside the same box
+// so it follows the header up or down, the WHOLE path to this screen - Board
+// (out altogether), Menu, the menu group, any parent screen - ending with
+// where you are (here, in white, not a link). One line that scrolls sideways
+// (look D): it opens scrolled to the end; an arrow shows (and, tapped,
+// scrolls) on any side with more; a thin bar under it shows which part of
+// the path is in view. A trail that fits has neither. Every step is
+// {label, go, back?}; guard(item) lets a screen with unsaved edits ask first.
+function BackTrail(props){
+  var items=props.items||[];
+  var stripRef=useRef(null);
+  var viewS=useState({ more:false, left:false, right:false, pos:0, vis:1 }); var view=viewS[0], setView=viewS[1];
+  function measure(){
+    var el=stripRef.current; if(!el) return;
+    var max=el.scrollWidth-el.clientWidth, more=max>1, sl=el.scrollLeft;
+    var next={ more:more, left:more && sl>1, right:more && sl<max-1,
+               pos:more ? sl/el.scrollWidth : 0, vis:more ? el.clientWidth/el.scrollWidth : 1 };
+    setView(function(prev){
+      return (prev.more===next.more && prev.left===next.left && prev.right===next.right &&
+              Math.abs(prev.pos-next.pos)<0.002 && Math.abs(prev.vis-next.vis)<0.002) ? prev : next; });
+  }
+  useEffect(function(){
+    var el=stripRef.current; if(!el) return;
+    el.scrollLeft=el.scrollWidth;   // open at the end: where you are
+    measure();
+    var on=function(){ measure(); };
+    window.addEventListener("resize", on);
+    return function(){ window.removeEventListener("resize", on); };
+  },[items.map(function(it){ return it.label; }).join("|"), props.here]);
+  function nudge(dir){
+    var el=stripRef.current; if(!el) return;
+    haptic(6);
+    var by=Math.max(60, el.clientWidth*0.6)*dir;
+    try{ el.scrollBy({ left:by, behavior:"smooth" }); }catch(e){ el.scrollLeft+=by; }
+  }
+  var link=function(it){
+    return React.createElement("button", { key:"l:"+it.label, "data-flat":true, "data-trailgo":it.label,
+      onClick:function(){ haptic(8); if(props.guard) props.guard(it); else it.go(); },
+      style:{flexShrink:0,background:"none",border:"none",padding:"0.3rem 0.15rem",color:S.infoText,fontWeight:700,fontSize:"0.85rem",
+             fontFamily:S.fontBody,cursor:"pointer",whiteSpace:"nowrap"} }, it.label);
+  };
+  var sep=function(k){ return React.createElement("span", { key:"s"+k, "aria-hidden":"true", style:{flexShrink:0,padding:"0 0.2rem"} }, "\u203a"); };
+  var kids=[];
+  items.forEach(function(it, i){ kids.push(link(it)); kids.push(sep(i)); });
+  if(props.here) kids.push(React.createElement("span", { key:"here", "data-trailhere":true, "aria-current":"page",
+    style:{flexShrink:0,padding:"0.3rem 0.15rem",color:S.titleText,fontWeight:800,whiteSpace:"nowrap"} }, props.here));
+  // spacers centre a trail that fits, and still let a long one scroll to its ends
+  kids.unshift(React.createElement("span", { key:"pre", style:{marginLeft:"auto"} }));
+  kids.push(React.createElement("span", { key:"post", style:{marginRight:"auto"} }));
+  var fadeBg=props.bg||S.menuBg;
+  var arrow=function(side){
+    var shown=side==="left" ? view.left : view.right;
+    var st={ position:"absolute", top:0, bottom:view.more?"7px":0, width:"40px", display:"flex", alignItems:"center",
+             justifyContent:side==="left"?"flex-start":"flex-end", border:"none", padding:"0 3px", cursor:"pointer",
+             background:"linear-gradient(to "+(side==="left"?"right":"left")+", "+fadeBg+" 50%, transparent)",
+             color:S.infoText, fontWeight:900, fontSize:"1.25rem", lineHeight:1, fontFamily:S.fontBody,
+             opacity:shown?1:0, pointerEvents:shown?"auto":"none", transition:"opacity 0.15s" };
+    st[side]=0;
+    return React.createElement("button", { key:side, "data-flat":true, "data-trailmore":side, "aria-label":side==="left"?"Earlier steps":"Later steps",
+      "aria-hidden":shown?undefined:"true", tabIndex:shown?0:-1, onClick:function(){ nudge(side==="left"?-1:1); }, style:st },
+      side==="left" ? "\u2039" : "\u203a");
+  };
+  return React.createElement("div", { "data-trail":items.map(function(it){ return it.label; }).join(" > "),
+      "data-trailscroll":view.more?"1":"0",
+      style:{flex:"1 1 100%",order:99,width:"100%",minWidth:0,position:"relative",overflow:"hidden",direction:"ltr",
+             color:S.textDim,fontSize:"0.85rem",fontFamily:S.fontBody,marginTop:"-0.25rem",marginBottom:"-0.3rem"} },
+    React.createElement("div", { ref:stripRef, "data-trailstrip":true, onScroll:measure,
+      style:{display:"flex",alignItems:"center",overflowX:"auto",whiteSpace:"nowrap",scrollbarWidth:"none",
+             WebkitOverflowScrolling:"touch",padding:"0 1.1rem",boxSizing:"border-box",width:"100%"} }, kids),
+    // where in the path you are looking: only when there is more than fits
+    view.more && React.createElement("div", { "data-trailbar":true, "aria-hidden":"true",
+        style:{position:"relative",height:"3px",margin:"0.15rem 0.7rem 0.2rem",borderRadius:"2px",background:S.border} },
+      React.createElement("div", { style:{position:"absolute",top:0,bottom:0,left:(view.pos*100)+"%",width:(view.vis*100)+"%",
+        borderRadius:"2px",background:S.infoText} })),
+    arrow("left"), arrow("right"));
+}
+// Leaving a screen with unsaved edits by the trail asks first (Brent chose:
+// only when something changed). Save / Don't save / Stay.
+function LeaveAskModal(props){
+  return React.createElement(Modal, { title:"Save changes?", onClose:props.onStay, ownActions:true,
+      actions:[React.createElement("button", { key:"s", "data-leave":"save", onClick:props.onSave, style:MODAL_SAVE() }, "Save"),
+               React.createElement("button", { key:"d", "data-leave":"discard", onClick:props.onDiscard, style:MODAL_CANCEL() }, "Don\u2019t save"),
+               React.createElement("button", { key:"k", "data-leave":"stay", onClick:props.onStay, style:MODAL_CANCEL() }, "Stay")] },
+    React.createElement("div", { "data-leaveask":true, style:{color:S.textDim,fontSize:"0.92rem",lineHeight:1.45,fontFamily:S.fontBody} },
+      "You changed "+(props.name||"this screen")+" and haven\u2019t saved it."));
+}
 function ModalActions(props){
   var st={ position:"sticky", zIndex:5, display:"flex", gap:"0.6rem", alignItems:"stretch",
            flexDirection: ACTION_DIR(),
@@ -978,7 +1064,8 @@ function ModalActions(props){
            padding:"0.55rem", boxShadow:"0 8px 32px rgba(0,0,0,0.45)" };
   if(UI.bottom){ st.bottom="-1.25rem"; st.order=9999; st.marginTop="0.9rem"; }
   else { st.top="-1.25rem"; st.order=-1; st.marginBottom="0.9rem"; }
-  return React.createElement("div", { "data-surface":"menu", style:st }, props.children);
+  if(props.trail){ st.flexWrap="wrap"; st.rowGap="0.35rem"; }
+  return React.createElement("div", { "data-surface":"menu", style:st }, props.children, props.trail||null);
 }
 // Built per render: a module-level constant would freeze the tokens of
 // whatever palette was active at load time and ignore every later theme or
@@ -992,10 +1079,13 @@ function MODAL_SAVE(){ return { flex:1,background:S.infoBg,border:"2.5px solid "
 // A sheet drawn as a miniature inside a guide is not a live sheet: it must not
 // answer to [data-modal-panel], which tests and the app use to find the sheet
 // on top. The guide's stage provides this context; everywhere else it is false.
+// The menu groups, by key, as the trail names them.
+var NAV_GROUPS = { time:"Time Settings", interface:"Interface", manual:"User Manual" };
 var StageCtx = (React && React.createContext) ? React.createContext(false) : null;
 function Modal(props){
   var wide = props.wide;
   var staged = (StageCtx && React.useContext) ? React.useContext(StageCtx) : false;
+  var trailEl = (props.trail && props.trail.length && !staged) ? React.createElement(BackTrail, { items:props.trail, guard:props.trailGuard, here:props.trailHere||props.title }) : null;
   return (
     React.createElement("div", {
       onClick: function(e){ if(e.target===e.currentTarget) props.onClose(); },
@@ -1032,8 +1122,8 @@ function Modal(props){
         // A sheet's own buttons - Save, Cancel, Delete, a hold - ride in the
         // same sticky, mirrored, header-following box as the built-in pair.
         // The rule: no sheet draws an action row inline any more.
-        props.actions && React.createElement(ModalActions, null, props.actions),
-        !props.ownActions && React.createElement(ModalActions, null,
+        props.actions && React.createElement(ModalActions, { trail:trailEl }, props.actions),
+        !props.ownActions && React.createElement(ModalActions, { trail:props.actions ? null : trailEl },
           props.onSave && React.createElement("button", { onClick:props.onSave, "data-anchor":props.saveAnchor, style:MODAL_SAVE() }, props.saveLabel||"Save"),
           React.createElement("button", { onClick:props.onClose, style:MODAL_CANCEL() }, props.cancelLabel||"Cancel")
         )
@@ -1920,7 +2010,8 @@ function MenuGroupModal(props){
     React.createElement("button", { onClick:onClose,
       style:{width:"100%",background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,
              padding:"0.85rem",color:S.textDim,cursor:"pointer",fontFamily:S.fontBody,
-             fontWeight:600,fontSize:MENU_FONT} }, "Close")
+             fontWeight:600,fontSize:MENU_FONT} }, "Close"),
+    props.trail && React.createElement("div", { style:{display:"flex",marginTop:"0.6rem"} }, React.createElement(BackTrail, { items:props.trail, here:title, bg:S.modalBg }))
   );
 }
 
@@ -1992,12 +2083,41 @@ function DisruptPresetList(props){
 // The ticker under (or over) the header buttons: date and time fixed on the
 // left, then what is happening now. A component so the manual can stage it;
 // the board hands it the state.
+// Header at the bottom: the status line sits this far above the screen's
+// foot (or the home-indicator inset, whichever is more), so the rounded
+// corners of the phone never clip the clock or the Break tag (Brent, 10-22).
+var HDR_FOOT = 10;
+// The line under a running break (Brent, 10-22: look C, on a faint track).
+// A break with a set length: the time left is amber, anchored to the far end
+// and draining toward it - the line runs left to right as the clock counts
+// down. Once it is used up the overage grows back the other way in red, right
+// to left, as the clock counts up. When the overage reaches the break's own
+// length the red line is full; the clock keeps counting and the line pulses.
+// An open break (no set length) shows the line full and pulsing. Left-handed
+// settings mirror every direction (mirror).
+function breakBarEl(leftMs, limit, mirror){
+  var base={ position:"absolute", bottom:"-5px", height:"3px", borderRadius:"2px", pointerEvents:"none" };
+  var track=React.createElement("span", { key:"t", style:Object.assign({}, base, { left:0, right:0, background:S.border }) });
+  var open=!(limit>0), over=!open && leftMs<0;
+  var frac=open ? 1 : over ? Math.min(1, -leftMs/limit) : Math.max(0, Math.min(1, leftMs/limit));
+  var full=open || (over && frac>=1);
+  // Countdown anchors to the right (left when mirrored); the overage to the
+  // same end, so it grows back from where the countdown finished.
+  var side=mirror ? "left" : "right";
+  var fill={ width:(frac*100)+"%", background:over ? S.dangerText : S.warnText, transition:full ? "none" : "width 0.9s linear" };
+  fill[side]=0;
+  var state=open ? "open" : over ? (full ? "maxed" : "over") : "down";
+  return React.createElement("span", { "data-breakbar":state, "data-breakbarside":side, "data-breakbarpct":Math.round(frac*100), "aria-hidden":"true" },
+    track, React.createElement("span", { key:"f", "data-barpulse":full ? "1" : undefined, style:Object.assign({}, base, fill) }));
+}
 function HeaderTicker(props){
   var interrupting=props.interrupting, activeProj=props.activeProj, intElapsed=props.intElapsed;
   var wsActive=props.wsActive, elapsed=props.elapsed, onBreak=props.onBreak, breakLabel=props.breakLabel;
   var breakElapsed=props.breakElapsed, clocked=props.clocked, atWorkElapsed=props.atWorkElapsed;
   var nowTick=props.nowTick, hdrBottom=!!props.bottom;
-  var tag=props.statusTag||null, extra=!!(tag||props.overNote);
+  var tag=props.statusTag||null, extra=!!(tag||props.overNote), mirror=!!props.mirror;
+  var tagStyle={marginLeft:"auto",flexShrink:0,whiteSpace:"nowrap",borderRadius:"999px",padding:"0.08rem 0.5rem",
+    fontSize:"0.7rem",fontWeight:800,fontFamily:S.fontBody,border:"1.5px solid "+(tag==="End"?S.warnText:S.actionBdr),color:tag==="End"?S.warnText:S.actionText};
   var tickerStatus = null;
   if(interrupting && activeProj){
     // No flashing labels. The disrupted project's own name breathes red on the
@@ -2019,9 +2139,19 @@ function HeaderTicker(props){
       React.createElement(Mono, { style:{color:wsActive?wsActive.accent:S.text,fontWeight:500,fontSize:"0.8rem",whiteSpace:"nowrap"} }, fmtDur(elapsed,true))
     );
   } else if(onBreak){
-    tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem"} },
-      React.createElement("span", { style:{color:S.warnText,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, "On Break - "+breakLabel),
-      React.createElement(Mono, { style:{color:S.warnText,fontWeight:500,fontSize:"0.8rem",whiteSpace:"nowrap"} }, fmtDur(breakElapsed,true))
+    // Just "On Break": a long break name pushed the End tag off the screen
+    // (Brent, 10-22). A break with a set length counts DOWN, then counts the
+    // overage UP in red; an open break (no set length) counts up.
+    var limit=(typeof props.breakLimitMs==="number" && props.breakLimitMs>0) ? props.breakLimitMs : null;
+    var leftMs=limit!=null ? limit-breakElapsed : null, isOver=leftMs!=null && leftMs<0;
+    // Short on purpose: the clock never gives way, the label shrinks first, and
+    // the End tag always stays on screen. Over is "+" and red.
+    var clockTxt=limit==null ? fmtDur(breakElapsed,true) : (isOver ? "+"+fmtDur(-leftMs,true) : fmtDur(leftMs,true));
+    tickerStatus = React.createElement("span", { "data-breakclock":limit==null ? "up" : (isOver ? "over" : "down"),
+        style:{display:"flex",alignItems:"center",gap:"0.5rem",position:"relative",minWidth:0} },
+      React.createElement("span", { style:{color:S.warnText,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap",minWidth:0,overflow:"hidden",textOverflow:"ellipsis"} }, "On Break"),
+      React.createElement(Mono, { style:{color:isOver?S.dangerText:S.warnText,fontWeight:isOver?800:500,fontSize:"0.8rem",whiteSpace:"nowrap",flexShrink:0} }, clockTxt),
+      breakBarEl(leftMs, limit, !!props.mirror)
     );
   } else if(clocked){
     // Clocked in with nothing running. The day clock keeps its green because
@@ -2042,19 +2172,24 @@ function HeaderTicker(props){
   // Static, not scrolling. The date and time are fixed on the left where the
   // eye can find them without waiting for them to come round again; the status
   // takes the rest of the bar and truncates rather than moving.
-  return React.createElement("div", { dir:"ltr", style:{display:"flex",alignItems:"center",gap:"0.75rem",padding:"0.25rem 0.85rem",minHeight:"28px",background:S.bg2,borderBottom:hdrBottom?"none":"1px solid "+S.border,boxShadow:hdrBottom?"inset 0 1px 0 "+S.border:"none",overflow:"hidden",whiteSpace:"nowrap"} },
+  return React.createElement("div", { dir:"ltr", "data-tickerfoot":hdrBottom?"1":undefined, style:{display:"flex",alignItems:"center",gap:"0.75rem",
+    padding:hdrBottom ? "0.25rem 1rem calc(0.25rem + max("+HDR_FOOT+"px, env(safe-area-inset-bottom, 0px)))" : "0.25rem 0.85rem",minHeight:"28px",background:S.bg2,borderBottom:hdrBottom?"none":"1px solid "+S.border,boxShadow:hdrBottom?"inset 0 1px 0 "+S.border:"none",overflow:"hidden",whiteSpace:"nowrap"} },
+    // Left-handed (Brent, 10-22): the Break / End button leads the line, at
+    // the left edge under the thumb; it does what the status line does.
+    tag && mirror && React.createElement("span", { "data-breaktag":tag, "data-breaktagside":"left", onClick:props.onStatusTap, role:"button",
+        style:Object.assign({}, tagStyle, { marginLeft:0, cursor:"pointer" }) }, tag+" \u203A"),
     tickerDate, tickerTime,
     tickerStatus && React.createElement("span", { "data-anchor":"hdr-status",
         // While clocked in the status line is the break shortcut (Brent,
         // 10-22): a small tag says what a tap does - Break, or End while on
         // one. Not clocked in: no tag, no tap, the line exactly as before.
         onClick:tag ? props.onStatusTap : undefined, role:tag ? "button" : undefined, "data-statustap":tag ? "1" : undefined,
-        style:extra ? {display:"flex",alignItems:"center",flex:1,minWidth:0,overflow:"hidden",gap:"0.4rem",cursor:tag?"pointer":undefined}
+        // clip sideways only, so the break line under the clock still shows
+        style:extra ? {display:"flex",alignItems:"center",flex:1,minWidth:0,overflow:"hidden",overflowX:"clip",overflowY:"visible",gap:"0.4rem",cursor:tag?"pointer":undefined}
                     : {display:"flex",alignItems:"center",flex:1,minWidth:0,overflow:"hidden"} },
       tickerStatus,
       props.overNote && React.createElement(Mono, { "data-breakovernote":true, style:{color:S.warnText,fontWeight:800,fontSize:"0.78rem",whiteSpace:"nowrap",flexShrink:0} }, props.overNote),
-      tag && React.createElement("span", { "data-breaktag":tag, style:{marginLeft:"auto",flexShrink:0,whiteSpace:"nowrap",borderRadius:"999px",padding:"0.08rem 0.5rem",
-          fontSize:"0.7rem",fontWeight:800,fontFamily:S.fontBody,border:"1.5px solid "+(tag==="End"?S.warnText:S.actionBdr),color:tag==="End"?S.warnText:S.actionText} }, tag+" \u203A"))
+      tag && !mirror && React.createElement("span", { "data-breaktag":tag, "data-breaktagside":"right", style:tagStyle }, tag+" \u203A"))
   );
 
 }
@@ -2155,15 +2290,17 @@ var HELP_PICTURES = {
       { anchor:'[data-anchor="pay-cycle"]', side:"corner", label:"Pay Cycle",
         text:"Daily, weekly, biweekly or monthly, counted from the start date. The Pay period in Reports follows it. Done keeps your changes." }
     ] },
-  unpaid: { title:"Scheduled Breaks", covers:["Scheduled Breaks","Unpaid Breaks","Edit Breaks","Paid Break Time"], back:"Back to Scheduled Breaks", stage:{ kind:"unpaid", full:true }, padTop:16,
+  unpaid: { title:"Scheduled Breaks", covers:["Scheduled Breaks","Unpaid Breaks","Edit Breaks","Paid Break Time","Break Reminders","Flexible"], back:"Back to Scheduled Breaks", stage:{ kind:"unpaid", full:true }, padTop:16,
     blurb:"Work Schedule, then Edit Breaks. Your breaks, each one paid or unpaid.",
     parts:[
       { anchor:'[data-anchor="ub-every"]', side:"corner", label:"Every Work Day", guide:"setunpaid",
-        text:"Breaks on every scheduled day: a name, a start and its minutes. PAID or UNPAID switches with a tap. Add Break adds another." },
+        text:"Breaks on every scheduled day: a name, a start and its minutes. Tap the tags for PAID or UNPAID, SET TIME or FLEXIBLE." },
       { anchor:'[data-anchor="ub-custom"]', side:"corner", label:"Custom Daily Breaks", guide:"setunpaid",
         text:"Extra breaks on one day of the week, on top of the ones above. Tap a day to open it; the badge counts its breaks." },
       { anchor:'[data-anchor="ub-total"]', side:"corner", label:"Unpaid per week",
         text:"Everything unpaid that comes off the week. Done keeps it, and Save on the schedule makes it stick." },
+      { anchor:'[data-anchor="ub-alerts"]', side:"corner", label:"Break Reminders", guide:"setunpaid",
+        text:"A reminder before a set-time break starts, and after one is missed: how many times and how many minutes apart." },
       { anchor:'[data-anchor="ub-allow"]', side:"corner", label:"Paid Break Time", guide:"setunpaid",
         text:"A work day's paid break time: your paid breaks added up, or your own amount. Carry-over and the overage display live here too." }
     ] },
@@ -2356,16 +2493,18 @@ var HELP_GUIDES = {
       { stage:{ kind:"paywork", full:true }, ring:'[data-anchor="pay-cycle"]', side:"corner", title:"When you are paid",
         text:"Daily, weekly, biweekly or monthly, from the start date. Reports\u2019 Pay period follows it. Done, then Save on the schedule." }
     ] },
-  setunpaid: { title:"Set up scheduled breaks", covers:["Scheduled Breaks","Unpaid Breaks","Edit Breaks","Paid Break Time"],
+  setunpaid: { title:"Set up scheduled breaks", covers:["Scheduled Breaks","Unpaid Breaks","Edit Breaks","Paid Break Time","Break Reminders"],
     steps:[
       { stage:{ kind:"schedule", day:true, full:true }, ring:'[data-anchor="sch-unpaid"]', side:"corner", title:"Switch them on",
         text:"In Work Schedule, tap Scheduled Breaks to switch it on, then Edit Breaks." },
       { stage:{ kind:"unpaid", full:true }, ring:'[data-anchor="ub-every"]', side:"below", title:"Breaks every day",
-        text:"Every Work Day holds breaks taken on each scheduled day. Give each a name, a start and its minutes, and tap PAID or UNPAID to say which it is. Add Break adds another." },
+        text:"Every Work Day holds breaks taken on each scheduled day. Give each a name, a start and its minutes, and tap PAID or UNPAID to say which it is. FLEXIBLE means no set time: take it whenever. Add Break adds another." },
       { stage:{ kind:"unpaid", full:true }, ring:'[data-anchor="ub-custom"]', side:"corner", title:"Breaks on one day",
         text:"Custom Daily Breaks adds extras on a single day of the week, on top of the ones above. Tap the day to open it." },
       { stage:{ kind:"unpaid", full:true }, ring:'[data-anchor="ub-total"]', side:"corner", title:"Check the total",
         text:"Unpaid per week shows what comes off your scheduled hours." },
+      { stage:{ kind:"unpaid", full:true }, ring:'[data-anchor="ub-alerts"]', side:"corner", title:"Reminders",
+        text:"Break Reminders can tell you a set-time break is coming up, and that one was missed. Choose how many times and how many minutes apart. Allow phone notifications to get them while the app is open." },
       { stage:{ kind:"unpaid", full:true }, ring:'[data-anchor="ub-allow"]', side:"corner", title:"Your paid break time",
         text:"Paid Break Time is what your paid breaks may add up to each work day. Carry-over is only for employers that allow it. Break and pay rules vary by employer, state and country. Time Tracker records your time; it doesn\u2019t decide what you\u2019re owed. Check with your HR department and your local, state or federal labor rules. Done, then Save on the schedule." }
     ] },
@@ -2378,7 +2517,7 @@ var HELP_GUIDES = {
       { stage:{ kind:"breaks" }, ring:"[data-breakpreset]", side:"right", title:"Or one of the usual",
         text:"The usual breaks carry a PAID or UNPAID tag from your schedule. A name of your own asks which it is. A paid break counts against your paid break time, and if little is left you are told first." },
       { stage:{ kind:"ticker" }, ring:'[data-breaktag]', title:"While you are on it",
-        text:"The header says On Break, with how long it has run. Tap End to stop it, and the app offers to resume the job you left." },
+        text:"The header says On Break. A scheduled break counts down, with a line showing what is left, then counts any time over in red; any other break counts up. Tap End to stop it, and the app offers to resume the job you left." },
       { stage:{ kind:"ticker" }, ring:'[data-anchor="hdr-status"]', title:"If it runs over",
         text:"Past your paid break time, the overage shows live. When the break ends you choose: make the extra unpaid, keep it paid just today, or change your allowance. Making it unpaid is a personal record of your time, not official time. Break and pay rules vary by employer, state and country. Time Tracker records your time; it doesn\u2019t decide what you\u2019re owed. Check with your HR department and your local, state or federal labor rules." }
     ] },
@@ -2599,7 +2738,7 @@ function helpStageEl(stage, on){
   if(stage.kind==="ticker")
     return React.createElement(HeaderTicker, { interrupting:false, activeProj:null, intElapsed:0, wsActive:null, elapsed:0,
       onBreak:!stage.idle, breakLabel:PRESET_BREAKS[1], breakElapsed:12*60000, clocked:true, atWorkElapsed:3*3600000, nowTick:Date.now(), bottom:false,
-      statusTag:stage.idle ? "Break" : "End", onStatusTap:nop });
+      statusTag:stage.idle ? "Break" : "End", onStatusTap:nop, breakLimitMs:stage.idle ? null : 15*60000 });
   if(stage.kind==="archive")
     return React.createElement(ArchiveModal, { projects:P, logs:TEST_LOGS, laneMeta:TEST_META, onReopen:nop, onClose:nop });
   // The real module registry; a staged sheet only reads it.
@@ -3107,7 +3246,7 @@ function GuidesModal(props){
     return React.createElement(HelpIndexRow, { key:key, kind:it[0], id:it[1], title:d.title, count:helpCount(it[0], d),
       onOpen:function(){ setView({ kind:it[0], id:it[1] }); } });
   };
-  return React.createElement(Modal, { title:"Guides", onClose:props.onClose, cancelLabel:"Close" },
+  return React.createElement(Modal, { title:"Guides", onClose:props.onClose, cancelLabel:"Close", trail:props.trail },
     React.createElement(HelpSearchBar, search),
     query ? React.createElement(HelpSearchResults, search) : React.createElement("div", null,
     React.createElement("p", { style:{ color:S.textDim, fontSize:"0.95rem", lineHeight:1.5, margin:"0 0 0.6rem" } },
@@ -3157,6 +3296,7 @@ function StagesModal(props){
   var noteText = useState(""); var setNoteText = noteText[1]; noteText = noteText[0];
   var editId = useState(null); var setEditId = editId[1]; editId = editId[0];
   var editText = useState(""); var setEditText = editText[1]; editText = editText[0];
+  var leaveSt = useState(null); var setLeaveSt = leaveSt[1]; leaveSt = leaveSt[0];
   var confirmDel = useState(null); var setConfirmDel = confirmDel[1]; confirmDel = confirmDel[0];
   var meta = getMeta(null, proj.lane);
 
@@ -3185,7 +3325,7 @@ function StagesModal(props){
   var pct=total>0?Math.round((done/total)*100):0;
   var allDone=total>0&&done===total;
 
-  return (
+  return React.createElement(React.Fragment, null,
     React.createElement(Modal, { title:"Stages - "+proj.name, onClose:onClose, wide:true, ownActions:true },
       total>0 && React.createElement("div", { style:{marginBottom:"0.85rem"} },
         React.createElement("div", { style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"0.3rem"} },
@@ -3236,15 +3376,18 @@ function StagesModal(props){
           onKeyDown:function(e){ if(e.key==="Enter") addStage(); } }),
         React.createElement("button", { onClick:addStage, disabled:!newLabel.trim(), style:{background:newLabel.trim()?meta.accent:S.addDisabled,border:"none",borderRadius:S.radius3,padding:"0 1rem",color:S.onAccent,cursor:newLabel.trim()?"pointer":"default",fontWeight:700,fontFamily:S.fontBody,fontSize:"1.1rem"} }, "+")
       ),
-      React.createElement(ModalActions, null,
+      React.createElement(ModalActions, { trail:(props.trail && props.trail.length) ? React.createElement(BackTrail, { items:props.trail, here:proj.name+" stages",
+          guard:function(item){ if(JSON.stringify(items)===JSON.stringify(initItems)) item.go(); else setLeaveSt({ go:item.go }); } }) : null },
         React.createElement("button", { onClick:save, style:{flex:1,background:meta.accent+"22",border:"2.5px solid "+meta.accent,borderRadius:S.radius,padding:"0.85rem",color:meta.accent,fontWeight:700,cursor:"pointer",fontFamily:S.fontBody,fontSize:MODAL_BTN_FONT} }, "Save"),
         React.createElement("button", { onClick:onClose, style:MODAL_CANCEL() }, "Cancel")
       )
-    )
+    ),
+    leaveSt && React.createElement(LeaveAskModal, { name:"these stages",
+      onSave:function(){ var go=leaveSt.go; setLeaveSt(null); onUpdate(Object.assign({},proj,{stages:items})); go(); },
+      onDiscard:function(){ var go=leaveSt.go; setLeaveSt(null); go(); },
+      onStay:function(){ setLeaveSt(null); } })
   );
 }
-
-// ---- PROJECT FORM ------------------------------------------------------------
 function ProjectForm(props){
   var project=props.project, onSave=props.onSave, onCancel=props.onCancel, onDelete=props.onDelete;
   var defaultLane=props.defaultLane, defaultParentId=props.defaultParentId;
@@ -3286,6 +3429,12 @@ function ProjectForm(props){
   var endDate=endDateS[0]; var setEndDate=endDateS[1];
   var endTimeS = useState(function(){ return tsTimeStr(projEnd(project)); });
   var endTime=endTimeS[0]; var setEndTime=endTimeS[1];
+  // The way back (10-27): an editor can carry a trail - for Edit Project /
+  // Edit Task, where the record sits (Brent: option B, the trail IS the
+  // location). Leaving by it with edits asks first.
+  var formSnap=JSON.stringify([name,lane,notes,parentId,kind,role,startMode,startDate,startTime,endDate,endTime]);
+  var formSnap0=useRef(formSnap);
+  var leavePFS=useState(null); var leavePF=leavePFS[0], setLeavePF=leavePFS[1];
   // A select hands back a string; project ids are numbers, and every child
   // lookup in the app is a strict ===. Storing the raw value here would file
   // the project under a parent nothing can match, so it is resolved back to the
@@ -3456,7 +3605,12 @@ function ProjectForm(props){
         attrs:{ "data-holddelete":true },
         style:{width:"100%",background:S.dangerBg,border:"1px solid "+S.dangerText,borderRadius:S.radius,padding:"0.7rem",color:S.dangerText,fontFamily:S.fontBody,fontWeight:600} },
         "Delete "+noun),
-      React.createElement(ModalActions, null,
+      leavePF && React.createElement(LeaveAskModal, { name:"this "+noun.toLowerCase(),
+        onSave:function(){ var go=leavePF.go; setLeavePF(null); if(name.trim()){ submit(); } go(); },
+        onDiscard:function(){ var go=leavePF.go; setLeavePF(null); go(); },
+        onStay:function(){ setLeavePF(null); } }),
+      React.createElement(ModalActions, { trail:(props.trail && props.trail.length) ? React.createElement(BackTrail, { items:props.trail, here:props.trailHere,
+          guard:function(item){ if(formSnap===formSnap0.current) item.go(); else setLeavePF({ go:item.go }); } }) : null },
         React.createElement("button", { onClick:submit, disabled:!name.trim(), style:{flex:1,background:name.trim()?S.infoBg:S.bg2,border:"2.5px solid "+(name.trim()?S.actionBdr:S.border),borderRadius:S.radius,padding:"0.85rem",color:name.trim()?S.infoText:S.textMuted,fontWeight:700,cursor:name.trim()?"pointer":"default",fontFamily:S.fontBody,fontSize:MODAL_BTN_FONT} },
           project?"Save":("Add "+noun)
         ),
@@ -3747,7 +3901,7 @@ function ArchiveModal(props){
     msById[l.projectId]=(msById[l.projectId]||0)+(l.duration||0);
   });
 
-  return React.createElement(Modal, { title:"Archive", onClose:onClose, cancelLabel:"Close" },
+  return React.createElement(Modal, { title:"Archive", onClose:onClose, cancelLabel:"Close", trail:props.trail },
     closed.length===0
       ? React.createElement("div", { style:{border:"2px dashed "+S.borderBright,borderRadius:S.radius,
           padding:"1.4rem 1rem",textAlign:"center"} },
@@ -3956,8 +4110,8 @@ function BreakTag(props){
 function breakOptionsFor(sch, dayStr){
   var list=(sch && dayStr) ? dayBreaks(sch, breakKeyOfDay(dayStr)) : [];
   var seen={}, out=[];
-  (list.length ? list.map(function(b){ return { label:b.name||"Break", paid:!!b.paid }; }) : BREAK_DEFAULTS)
-    .forEach(function(o){ if(!seen[o.label]){ seen[o.label]=1; out.push({ label:o.label, paid:!!o.paid }); } });
+  (list.length ? list.map(function(b){ return { label:b.name||"Break", paid:!!b.paid, mins:+b.mins>0 ? +b.mins : 0 }; }) : BREAK_DEFAULTS)
+    .forEach(function(o){ if(!seen[o.label]){ seen[o.label]=1; out.push({ label:o.label, paid:!!o.paid, mins:o.mins||0 }); } });
   return out;
 }
 function breakBigBtn(kind, label, onClick, extra){
@@ -3973,9 +4127,9 @@ function BreakModal(props){
   var customS=useState(""); var setCustom=customS[1]; var custom=customS[0];
   var askS=useState(false); var setAsk=askS[1]; var ask=askS[0];
   var lowS=useState(null); var setLow=lowS[1]; var low=lowS[0];
-  function go(label, paid){
-    if(paid && leftMs!=null && leftMs<BREAK_LOW_MS){ setLow({ label:label }); return; }
-    onStart(label, paid);
+  function go(label, paid, mins){
+    if(paid && leftMs!=null && leftMs<BREAK_LOW_MS){ setLow({ label:label, mins:mins||0 }); return; }
+    onStart(label, paid, mins||0);
   }
   var head=function(t){ return React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { margin:"0.9rem 0 0.4rem" }) }, t); };
   if(low){
@@ -3987,8 +4141,8 @@ function BreakModal(props){
           (leftMs>0 ? fmtDur(leftMs,true)+" left today. " : "None left today. ")+
           "Anything past it runs over, and you’ll choose what to do with that when the break ends."),
         React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
-          breakBigBtn("paid", "Start paid break", function(){ onStart(low.label, true); }, { "data-lowact":"paid" }),
-          breakBigBtn("unpaid", "Make it unpaid", function(){ onStart(low.label, false); }, { "data-lowact":"unpaid" }))));
+          breakBigBtn("paid", "Start paid break", function(){ onStart(low.label, true, low.mins); }, { "data-lowact":"paid" }),
+          breakBigBtn("unpaid", "Make it unpaid", function(){ onStart(low.label, false, low.mins); }, { "data-lowact":"unpaid" }))));
   }
   return (
     React.createElement(Modal, { title:"Start Break", onClose:onCancel },
@@ -3999,7 +4153,7 @@ function BreakModal(props){
       head("Or a usual one"),
       React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.5rem"} },
         options.map(function(o){
-          return React.createElement("button", { key:o.label, "data-breakpreset":o.label, onClick:function(){ go(o.label, o.paid); },
+          return React.createElement("button", { key:o.label, "data-breakpreset":o.label, onClick:function(){ go(o.label, o.paid, o.mins); },
             style:{display:"flex",alignItems:"center",gap:"0.5rem",background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,padding:"0.85rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontSize:"0.95rem",textAlign:"left"} },
             React.createElement("span", null, o.label), React.createElement(BreakTag, { paid:o.paid }));
         }),
@@ -4061,8 +4215,9 @@ function BreakBanner(props){
   return React.createElement("div", Object.assign({ role:"status", style:st }, props.attrs||{}), props.children);
 }
 // The scheduled break that was due and not taken (option 4). Start it now /
-// In 30 min / Skip today - and skipping records it as MISSED, a fact kept as
-// evidence (in some states a missed rest break is owed time).
+// Remind me (until the next missed reminder; not offered on the last) / Skip
+// today - and skipping records it as MISSED, a fact kept as evidence (in some
+// states a missed rest break is owed time).
 function MissedBreakBanner(props){
   var due=props.due, btn=function(kind, label, primary){
     return React.createElement("button", { "data-missedact":kind, onClick:function(){ props.onAct(kind); },
@@ -4074,7 +4229,23 @@ function MissedBreakBanner(props){
     React.createElement("div", { style:{color:S.textDim,fontSize:"0.8rem",margin:"0.15rem 0 0.55rem"} },
       (props.jobName ? "You’re still on "+props.jobName+". " : "")+(due.paid ? "A paid break." : "An unpaid break.")),
     React.createElement("div", { style:{display:"flex",gap:"0.45rem"} },
-      btn("start", "Start it now", true), btn("snooze", "In 30 min"), btn("skip", "Skip today")));
+      btn("start", "Start it now", true), due.last ? null : btn("later", "In "+due.gap+" min"), btn("skip", "Skip today")));
+}
+// A break at a set time is coming up (the "before" reminder). Start it now,
+// or OK until the next reminder.
+function UpcomingBreakBanner(props){
+  var due=props.due, mins=Math.max(1, Math.ceil((due.leftMs||0)/60000));
+  var btn=function(kind, label, primary){
+    return React.createElement("button", { "data-soonact":kind, onClick:function(){ props.onAct(kind); },
+      style:{flex:primary?1.3:1,padding:"0.6rem 0.3rem",borderRadius:S.radius3,cursor:"pointer",fontWeight:primary?800:700,fontFamily:S.fontBody,fontSize:"0.86rem",
+             background:primary?S.warnText:"none",color:primary?S.bg0:S.warnText,border:primary?"none":"1.5px solid "+S.warnText} }, label);
+  };
+  return React.createElement(BreakBanner, { place:props.place, attrs:{ "data-soonbreak":due.key } },
+    React.createElement("div", { style:{color:S.text,fontWeight:800,fontSize:"0.95rem"} }, due.name+" in "+mins+" min"),
+    React.createElement("div", { style:{color:S.textDim,fontSize:"0.8rem",margin:"0.15rem 0 0.55rem"} },
+      "At "+fmtTime(due.at)+". "+(due.paid ? "A paid break." : "An unpaid break.")),
+    React.createElement("div", { style:{display:"flex",gap:"0.45rem"} },
+      btn("start", "Start it now", true), btn("ok", "OK")));
 }
 // The day's paid break time is used up and the break is still going.
 function BreakOverBanner(props){
@@ -4151,6 +4322,7 @@ function LaneEditModal(props){
   });
   var setPicked=pickedS[1]; var picked=pickedS[0];
   var confirmS=useState(false); var setConfirm=confirmS[1]; var confirm=confirmS[0];
+  var leaveLES=useState(null); var setLeaveLE=leaveLES[1]; var leaveLE=leaveLES[0];
   var inside=projects.filter(function(p){ return p.lane===laneKey; });
   var moveTargets=laneOrder.filter(function(k){ return k!==laneKey; });
 
@@ -4184,14 +4356,16 @@ function LaneEditModal(props){
   }
 
   var name=label.trim();
-  return React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", "data-lanesave":true, onClick:function(){ if(name) onSave(laneKey, name, picked); },
+  return React.createElement(React.Fragment, null, React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", "data-lanesave":true, onClick:function(){ if(name) onSave(laneKey, name, picked); },
           disabled:!name, style:Object.assign({}, MODAL_SAVE(), name?null:{opacity:0.5,cursor:"default"}) }, "Save"),
         React.createElement("button", { key:"a1", onClick:onCancel, style:MODAL_CANCEL() }, "Cancel"),
         React.createElement(HoldButton, { key:"a2", onHold:function(){ setConfirm(true); }, holdMs:HOLD_DELETE_MS, fill:rgba(S.dangerText,0.38),
           attrs:{ "data-lanedelete":true, "data-holddelete":true },
           style:{flex:"0 0 auto",background:S.dangerBg,border:"1px solid "+S.dangerText,
                  borderRadius:S.radius,padding:"0.85rem 0.9rem",color:S.dangerText,
-                 fontFamily:S.fontBody,fontWeight:700,fontSize:MODAL_BTN_FONT} }, "Delete")], title:"Edit Lane", onClose:onCancel, ownActions:true },
+                 fontFamily:S.fontBody,fontWeight:700,fontSize:MODAL_BTN_FONT} }, "Delete")], title:"Edit Lane", onClose:onCancel, ownActions:true,
+      trail:props.trail, trailHere:start.label||laneKey,
+      trailGuard:function(item){ if(label===(start.label||laneKey) && picked.accent===start.accent) item.go(); else setLeaveLE({ go:item.go }); } },
     React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"1rem"} },
       React.createElement("div", null,
         React.createElement("label", { style:LABEL_STYLE }, "Lane Name"),
@@ -4222,7 +4396,11 @@ function LaneEditModal(props){
       // end. Children are written Save, Cancel, Delete and ACTION_ROW reverses
       // them for handedness, so Delete is always the corner furthest from
       // Save - the two should never be neighbours.
-    ));
+    )),
+    leaveLE && React.createElement(LeaveAskModal, { name:"this lane",
+      onSave:function(){ var go=leaveLE.go; setLeaveLE(null); if(name) onSave(laneKey, name, picked); go(); },
+      onDiscard:function(){ var go=leaveLE.go; setLeaveLE(null); go(); },
+      onStay:function(){ setLeaveLE(null); } }));
 }
 
 // ---- EDIT LANES MODAL -------------------------------------------------------
@@ -4819,6 +4997,7 @@ function MilestoneEditModal(props){
   var now=props.now||Date.now(), offDays=props.offDays||[];
   var stepsS=useState(function(){ return (proj.milestones||[]).slice(); }); var setSteps=stepsS[1]; var steps=stepsS[0];
   var editS=useState(null); var setEdit=editS[1]; var edit=editS[0];   // a step being edited, or {} for new
+  var leaveMSS=useState(null); var setLeaveMS=leaveMSS[1]; var leaveMS=leaveMSS[0];
   // Drafted steps are scored against the live projects, so the line and the
   // standings update as they are edited.
   var draftProj=Object.assign({}, proj, { milestones:steps });
@@ -4847,7 +5026,9 @@ function MilestoneEditModal(props){
   }
   return React.createElement(React.Fragment, null,
     React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", "data-mssaveall":true, onClick:function(){ onSave(proj.id, steps); }, style:MODAL_SAVE() }, "Save"),
-          React.createElement("button", { key:"a1", onClick:onClose, style:MODAL_CANCEL() }, "Cancel")], title:"Milestones \u00b7 "+proj.name, onClose:onClose, wide:true, ownActions:true },
+          React.createElement("button", { key:"a1", onClick:onClose, style:MODAL_CANCEL() }, "Cancel")], title:"Milestones \u00b7 "+proj.name, onClose:onClose, wide:true, ownActions:true,
+          trail:props.trail, trailHere:proj.name,
+          trailGuard:function(item){ if(JSON.stringify(steps)===JSON.stringify(proj.milestones||[])) item.go(); else setLeaveMS({ go:item.go }); } },
       React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.6rem"} },
         points.length>0 && React.createElement("div", { style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius3,padding:"0.4rem 0.3rem 0"} },
           React.createElement(MilestoneLine, { weekStart:(props.weekStart||"mon"), points:points, now:now, width:420, labels:true, offDays:offDays })),
@@ -4864,7 +5045,11 @@ function MilestoneEditModal(props){
       onSave:function(st){ setSteps(function(prev){ var i=prev.findIndex(function(x){ return x.id===st.id; });
         return i>=0 ? prev.map(function(x){ return x.id===st.id ? st : x; }) : prev.concat([st]); }); setEdit(null); },
       onDelete:function(id){ setSteps(function(prev){ return prev.filter(function(x){ return x.id!==id; }); }); setEdit(null); },
-      onCancel:function(){ setEdit(null); } }));
+      onCancel:function(){ setEdit(null); } }),
+    leaveMS && React.createElement(LeaveAskModal, { name:"these milestones",
+      onSave:function(){ var go=leaveMS.go; setLeaveMS(null); onSave(proj.id, steps); go(); },
+      onDiscard:function(){ var go=leaveMS.go; setLeaveMS(null); go(); },
+      onStay:function(){ setLeaveMS(null); } }));
 }
 
 // The lane view. A lane owns no steps: its line is its projects at their
@@ -4876,7 +5061,8 @@ function LaneMilestonesModal(props){
   var meta=getMeta(laneMeta, lane);
   var points=laneLine(projects, lane, now);
   var tops=projects.filter(function(p){ return p.lane===lane && !p.parentId && !p.closedAt && projRole(p)==="project"; });
-  return React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", onClick:onClose, style:MODAL_SAVE() }, "Done")], title:"Milestones \u00b7 "+meta.label, onClose:onClose, wide:true, ownActions:true },
+  return React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", onClick:onClose, style:MODAL_SAVE() }, "Done")], title:"Milestones \u00b7 "+meta.label, onClose:onClose, wide:true, ownActions:true,
+      trail:props.trail, trailHere:meta.label },
     React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.6rem"} },
       React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted} },
         "Lanes own no steps. Each mark is a project at its current point."),
@@ -5569,7 +5755,8 @@ function normalizeSchedule(src){
     allowMode: ub.allowMode==="own" ? "own" : "scheduled",
     allowMins: (+ub.allowMins>0) ? Math.min(480, Math.round(+ub.allowMins)) : 0,
     carryOver: !!ub.carryOver,
-    overStyle: ub.overStyle==="header" ? "header" : "float" };
+    overStyle: ub.overStyle==="header" ? "header" : "float",
+    alerts: normBreakAlerts(ub.alerts) };
   // Payroll: which day the work week starts on, which days count as
   // overtime, how overtime pays, and the pay cycle. Unknown values fall back
   // to safe defaults so a stale or hand-edited save can't wedge the app.
@@ -5594,6 +5781,17 @@ function normalizeSchedule(src){
   };
   return sch;
 }
+// Break reminders (Brent, 10-22): before a break at a set time starts, and
+// after one is missed - each on or off, how many times, how many minutes
+// apart. Flexible breaks (flex:true, no set time) never remind. Absent = the
+// 1.3 behaviour as near as it goes: no "coming up", one missed reminder.
+function normBreakAlerts(a){
+  a=a||{};
+  var n=function(v, lo, hi, d){ v=Math.round(+v); return (v>=lo && v<=hi) ? v : d; };
+  var one=function(x, dOn, dCount, dGap){ x=x||{};
+    return { on: x.on==null ? dOn : !!x.on, count: n(x.count, 1, 5, dCount), gap: n(x.gap, 1, 60, dGap) }; };
+  return { soon: one(a.soon, false, 1, 5), missed: one(a.missed, true, 1, 10) };
+}
 function dayBreaks(sch,k){
   var ub=sch&&sch.unpaidBreaks;
   if(!ub||!ub.enabled) return [];
@@ -5606,6 +5804,15 @@ function dayBreaks(sch,k){
 function breakOverlapMins(day, br, uptoMin){
   var sp=shiftSpan(day); if(!sp) return 0;
   var bs=toMin(br.start), d=Math.min(1440, Math.max(0, +br.mins||0));
+  // A FLEXIBLE break (no set time) comes off the shift whole, never more than
+  // the shift; for pace it is spread evenly over the shift, since it could be
+  // taken at any point.
+  if(br.flex){
+    var fd=Math.min(sp.len, d); if(fd<=0) return 0;
+    if(uptoMin==null) return fd;
+    var fr=uptoMin-sp.start; if(fr<0) fr+=1440;
+    return sp.len ? fd*Math.min(sp.len, Math.max(0, fr))/sp.len : 0;
+  }
   if(bs==null||d<=0) return 0;
   // Work in minutes from the start of the shift rather than from midnight, so
   // a 01:00 lunch on a 21:00 shift lands four hours in instead of twenty hours
@@ -5721,6 +5928,7 @@ function paidBreakLogs(breaks, paidBreaksOt){
 // skipped, keyed by day + break id) or already recorded as missed.
 var BREAK_DUE_WINDOW_MS = 2*3600000, BREAK_TAKEN_EARLY_MS = 15*60000;
 function breakDueAt(sch, dayStr, br){
+  if(!br || br.flex) return null;   // a flexible break has no time to be due at
   var k=breakKeyOfDay(dayStr), day=sch&&sch[k], m=toMin(br.start);
   if(m==null) return null;
   var base=new Date(dayStr); base.setHours(0,0,0,0);
@@ -5732,22 +5940,51 @@ function breakDueAt(sch, dayStr, br){
   return t;
 }
 function breakNagKey(dayStr, br){ return dayStr+"|"+(br.id||br.name); }
-function missedBreakDue(sch, dayStr, now, breaks, quiet){
+// The break reminder showing now, or null. Missed comes first: reminder k of
+// count lands k gaps after the start time. Coming up: reminder k of count
+// lands (count-k+1) gaps before it, the last one gap minutes before. `quiet`
+// holds what has been seen, per day + break: key -> "skip" (or, from 1.3, a
+// snooze-until time), key|m -> missed reminders dismissed with Later, key|s ->
+// coming-up reminders dismissed with OK. idx says which reminder this is;
+// last says no more follow (so Later is not offered).
+function breakAlertDue(sch, dayStr, now, breaks, quiet){
   if(!sch || !dayStr) return null;
   var k=breakKeyOfDay(dayStr);
   if(!(sch[k] && sch[k].on)) return null;
-  var list=dayBreaks(sch, k);
+  var al=(sch.unpaidBreaks && sch.unpaidBreaks.alerts) || normBreakAlerts();
+  var q=quiet||{}, list=dayBreaks(sch, k), soon=null;
   for(var i=0;i<list.length;i++){
     var br=list[i], at=breakDueAt(sch, dayStr, br);
-    if(at==null || now<at || now>at+BREAK_DUE_WINDOW_MS) continue;
-    var key=breakNagKey(dayStr, br), q=quiet&&quiet[key];
-    if(q==="skip" || (typeof q==="number" && now<q)) continue;
+    if(at==null) continue;
+    var key=breakNagKey(dayStr, br);
+    if(q[key]==="skip") continue;
     var taken=(breaks||[]).some(function(b){ return b && recordDay(b)===dayStr &&
       (b.missedKey===key || (!b.missed && b.startTime>=at-BREAK_TAKEN_EARLY_MS)); });
     if(taken) continue;
-    return { key:key, at:at, name:br.name||"Break", paid:!!br.paid, mins:+br.mins||0 };
+    var base={ key:key, at:at, name:br.name||"Break", paid:!!br.paid, mins:+br.mins||0 };
+    if(al.missed.on && now>=at){
+      var g=al.missed.gap*60000, n=al.missed.count;
+      var idx=Math.min(n, Math.floor((now-at)/g));
+      var end=at+Math.max(BREAK_DUE_WINDOW_MS, n*g+15*60000);
+      var snz=q[key];
+      if(idx>=1 && now<=end && (+q[key+"|m"]||0)<idx && !(typeof snz==="number" && now<snz))
+        return Object.assign(base, { kind:"missed", idx:idx, count:n, gap:al.missed.gap, last:idx>=n });
+    }
+    if(al.soon.on && now<at && !soon){
+      var g2=al.soon.gap*60000, n2=al.soon.count, first=at-n2*g2;
+      if(now>=first){
+        var idx2=Math.min(n2, Math.floor((now-first)/g2)+1);
+        if((+q[key+"|s"]||0)<idx2)
+          soon=Object.assign(base, { kind:"soon", idx:idx2, count:n2, gap:al.soon.gap, last:idx2>=n2, leftMs:at-now });
+      }
+    }
   }
-  return null;
+  return soon;
+}
+// The missed reminder alone (the 1.3 name, kept for its tests).
+function missedBreakDue(sch, dayStr, now, breaks, quiet){
+  var a=breakAlertDue(sch, dayStr, now, breaks, quiet);
+  return (a && a.kind==="missed") ? a : null;
 }
 // The iOS-safe time field, shared by the schedule and breaks modals. The
 // appearance reset must ride inline (the stylesheet rule alone did not defeat
@@ -6264,6 +6501,7 @@ function PayWorkWeekModal(props){
              paidBreaksOt:src.paidBreaksOt!==false };
   });
   var setPr=prS[1]; var pr=prS[0];
+  var prStartS=useState(function(){ return JSON.stringify(prS[0]); }); var prStart=prStartS[0];
   function mutate(fn){
     setPr(function(prev){
       var next={ weekStart:prev.weekStart, otDays:prev.otDays.slice(),
@@ -6327,6 +6565,7 @@ function PayWorkWeekModal(props){
         border:"2px solid "+(bad?S.dangerText:S.border), color:bad?S.dangerText:S.text}) });
   };
   return React.createElement(Modal, { title:"Pay & Work Week", onClose:props.onClose, wide:true,
+    trail:props.trail, trailGuard:props.trailGuard ? function(item){ props.trailGuard(item, pr, JSON.stringify(pr)!==prStart); } : null,
     onSave:function(){ props.onDone(pr); }, saveLabel:"Done" },
     React.createElement("div", { style:sectionWrap, "data-anchor":"pay-base" },
       React.createElement("div", { style:sectionHead }, "Base Pay"),
@@ -6427,6 +6666,9 @@ function PayWorkWeekModal(props){
   );
 }
 
+// A day's hours in the narrow Work Schedule column: "8h", "8.5h", "7.75h".
+// "8h 30m" did not fit and was cut off on both hands (10-27).
+function fmtHoursTight(mins){ return (Math.round((+mins||0)/60*100)/100)+"h"; }
 function WorkScheduleModal(props){
   var draftS=useState(function(){
     // normalize doubles as the deep copy, so Cancel discards cleanly and the
@@ -6473,8 +6715,39 @@ function WorkScheduleModal(props){
       style:Object.assign(TIME_FIELD_STYLE(col, invalid?S.dangerText:S.border),
         { flex:"0 1 94px", minWidth:"80px", opacity:draft[k].on?1:0.45 }) });
   };
+  // Leaving by the trail with unsaved edits asks first. leave = {name,
+  // onSave, onDiscard}. Scheduled Breaks and Pay & Work Week are a step
+  // deeper: their trail is this one plus "Work Schedule" (back one step).
+  // Leaving from there folds their edits into this draft before asking, so
+  // one question covers both.
+  var leaveS=useState(null); var setLeave=leaveS[1]; var leave=leaveS[0];
+  var savedJ=JSON.stringify(normalizeSchedule(props.schedule));
+  var schDirty=JSON.stringify(normalizeSchedule(draft))!==savedJ;
+  function leaveWith(sch, item){
+    if(JSON.stringify(normalizeSchedule(sch))===savedJ){ item.go(); return; }
+    setLeave({ name:"Work Schedule",
+      onSave:function(){ setLeave(null); props.onSave(normalizeSchedule(sch)); item.go(); },
+      onDiscard:function(){ setLeave(null); item.go(); } });
+  }
+  function subTrail(label, close){
+    return (props.trail||[]).concat([{ label:"Work Schedule", back:true, go:close }]);
+  }
+  // guard for a sub-sheet: field = "unpaidBreaks" | "payroll"
+  function subGuard(field, close, apply, name){
+    return function(item, subNext, subDirty){
+      if(item.back){
+        if(!subDirty){ close(); return; }
+        setLeave({ name:name, onSave:function(){ setLeave(null); apply(subNext); close(); },
+                   onDiscard:function(){ setLeave(null); close(); } });
+        return;
+      }
+      var merged=Object.assign({}, draft); if(subDirty) merged[field]=subNext;
+      leaveWith(merged, item);
+    };
+  }
   return React.createElement(React.Fragment, null,
     React.createElement(Modal, { title:"Work Schedule", onClose:props.onClose, wide:true,
+    trail:props.trail, trailGuard:function(item){ leaveWith(draft, item); },
     onSave:function(){ props.onSave(draft); }, saveLabel:"Save" },
     React.createElement("div", { style:{fontSize:"0.8rem",color:S.textDim,marginBottom:"0.9rem"} },
       "Days and hours you normally work. Reports will measure tracked time against this."),
@@ -6501,7 +6774,7 @@ function WorkScheduleModal(props){
       var d=draft[k];
       var invalid = d.on && schMinutes(d)===0;
       return React.createElement("div", { key:k, "data-schedday":k,
-        style:{display:"flex",alignItems:"center",gap:"0.45rem",padding:"0.5rem 0",borderBottom:"1px solid "+S.border} },
+        style:{display:"flex",alignItems:"center",gap:"0.3rem",padding:"0.5rem 0",borderBottom:"1px solid "+S.border} },
         // Day toggle: tap the name to switch the day on or off. The column is
         // sized by an invisible bold "Wednesday" so every name's right edge
         // lands on the same line, tight against the start field, in any theme
@@ -6520,17 +6793,18 @@ function WorkScheduleModal(props){
         ),
         timeInput(k,"start"),
         timeInput(k,"end"),
-        // An end earlier than its start is now a legitimate overnight shift
-        // rather than an error, so the wrap has to be visible - otherwise a
-        // fat-fingered 08:00 reads as a silent 23-hour day.
-        React.createElement("span", { "aria-label": schWraps(d) ? "ends the next day" : "",
-          style:{width:"22px",flexShrink:0,textAlign:"center",fontSize:"0.62rem",fontWeight:700,
-                 fontFamily:S.fontMono,letterSpacing:"-0.03em",
-                 color: schWraps(d) ? S.chromeSubTask : "transparent"} },
-          schWraps(d) ? "+1d" : ""),
-        React.createElement("span", { style:{width:"46px",flexShrink:0,marginLeft:"auto",textAlign:"right",fontSize:"0.74rem",fontFamily:S.fontMono,
-          color: invalid?S.dangerText:(d.on?S.textDim:S.textMuted)} },
-          d.on ? (invalid?"end?":fmtHours(schNetMinutes(draft,k))) : "off")
+        // The day's hours, and above them the overnight mark. An end earlier
+        // than its start is a legitimate overnight shift rather than an error,
+        // so the wrap has to be visible - otherwise a fat-fingered 08:00 reads
+        // as a silent 23-hour day. One narrow column for both (10-27): the
+        // row was wider than a phone and cut the hours off on either hand.
+        React.createElement("span", { "data-schedhours":k, style:{width:"34px",flexShrink:0,marginLeft:"auto",display:"flex",flexDirection:"column",
+            alignItems:"flex-end",lineHeight:1.15,fontFamily:S.fontMono} },
+          React.createElement("span", { "aria-label": schWraps(d) ? "ends the next day" : "",
+            style:{fontSize:"0.6rem",fontWeight:700,letterSpacing:"-0.03em",color: schWraps(d) ? S.chromeSubTask : "transparent"} },
+            schWraps(d) ? "+1d" : "\u00a0"),
+          React.createElement("span", { style:{fontSize:"0.7rem",color: invalid?S.dangerText:(d.on?S.textDim:S.textMuted)} },
+            d.on ? (invalid?"end?":fmtHoursTight(schNetMinutes(draft,k))) : "off"))
       );
     }),
     // ---- unpaid breaks ----
@@ -6566,11 +6840,17 @@ function WorkScheduleModal(props){
     // Nested as a sibling overlay, never inside the modal card: fixed
     // positioning breaks inside backdrop-filter surfaces (known bug class).
     showBreaks && React.createElement(UnpaidBreaksModal, { value:ub, schedule:draft,
+      trail:subTrail("Scheduled Breaks", function(){ setShowBreaks(false); }),
+      trailGuard:subGuard("unpaidBreaks", function(){ setShowBreaks(false); }, setUB, "Scheduled Breaks"),
       onDone:function(next){ setUB(next); setShowBreaks(false); },
       onClose:function(){ setShowBreaks(false); } }),
     showPay && React.createElement(PayWorkWeekModal, { value:pr,
+      trail:subTrail("Pay & Work Week", function(){ setShowPay(false); }),
+      trailGuard:subGuard("payroll", function(){ setShowPay(false); }, setPR, "Pay & Work Week"),
       onDone:function(next){ setPR(next); setShowPay(false); },
-      onClose:function(){ setShowPay(false); } })
+      onClose:function(){ setShowPay(false); } }),
+    leave && React.createElement(LeaveAskModal, { name:leave.name,
+      onSave:leave.onSave, onDiscard:leave.onDiscard, onStay:function(){ setLeave(null); } })
   );
 }
 
@@ -6796,7 +7076,7 @@ function BackupModal(props){
         "Pick a Different File")
     ));
 
-  var main=React.createElement(Modal, { title:"Backup & Saves", onClose:props.onClose, cancelLabel:"Close" },
+  var main=React.createElement(Modal, { title:"Backup & Saves", onClose:props.onClose, cancelLabel:"Close", trail:props.trail },
     autoSec, saveSec, resetSec, fileSec,
     status && React.createElement("div", { "data-snapstatus":status.ok?"ok":"bad", style:{marginTop:"0.6rem",fontSize:"0.8rem",fontFamily:S.fontBody,
       color:status.ok?S.successText:S.dangerText} }, status.msg)
@@ -7066,7 +7346,7 @@ function ExtensionsModal(props){
         })
       );
 
-  return React.createElement(Modal, { title:"Extensions", onClose:props.onClose, cancelLabel:"Close" },
+  return React.createElement(Modal, { title:"Extensions", onClose:props.onClose, cancelLabel:"Close", trail:props.trail },
     React.createElement("div", { style:{ fontSize:"0.8rem", color:S.textDim, marginBottom:"0.85rem", lineHeight:1.4 } },
       "Switching one off hides it everywhere and keeps its data. Everything here "+
       "is included in Backup & Saves."),
@@ -7089,15 +7369,18 @@ function UnpaidBreaksModal(props){
              weekly:(src.weekly||[]).map(function(b){ return Object.assign({},b); }),
              custom:custom,
              allowMode:src.allowMode==="own"?"own":"scheduled", allowMins:+src.allowMins||0,
-             carryOver:!!src.carryOver, overStyle:src.overStyle==="header"?"header":"float" };
+             carryOver:!!src.carryOver, overStyle:src.overStyle==="header"?"header":"float",
+             alerts:normBreakAlerts(src.alerts) };
   });
   var setUb=ubS[1]; var ub=ubS[0];
+  var ubStartS=useState(function(){ return JSON.stringify(ubS[0]); }); var ubStart=ubStartS[0];
   var openDayS=useState(props.initialOpenDay||null); var setOpenDay=openDayS[1]; var openDay=openDayS[0];
 
   function mutate(fn){
     setUb(function(prev){
       var next={ enabled:prev.enabled, weekly:prev.weekly.slice(), custom:{},
-                 allowMode:prev.allowMode, allowMins:prev.allowMins, carryOver:prev.carryOver, overStyle:prev.overStyle };
+                 allowMode:prev.allowMode, allowMins:prev.allowMins, carryOver:prev.carryOver, overStyle:prev.overStyle,
+                 alerts:prev.alerts };
       DAY_KEYS.forEach(function(k){ next.custom[k]=prev.custom[k].slice(); });
       fn(next);
       return next;
@@ -7142,7 +7425,7 @@ function UnpaidBreaksModal(props){
   }
   function breakCard(dayKey, b){
     var minsBad = !(+b.mins>0);
-    var startBad = toMin(b.start)==null;
+    var startBad = !b.flex && toMin(b.start)==null;
     return React.createElement("div", { key:b.id,
       style:{background:S.bg1,border:"1px solid "+S.border,borderRadius:S.radius,
              padding:"0.6rem",marginBottom:"0.5rem"} },
@@ -7150,6 +7433,13 @@ function UnpaidBreaksModal(props){
         React.createElement("input", { value:b.name, placeholder:"e.g. Lunch",
           onChange:function(e){ editBreak(dayKey, b.id, "name", e.target.value); },
           style:Object.assign({},INPUT_STYLE,{flex:1,minWidth:0,padding:"0.45rem 0.6rem",fontSize:"0.88rem"}) }),
+        // At a set time, or flexible (taken whenever; no reminders).
+        React.createElement("button", { "data-flat":true, "data-breakflex":b.flex?"flex":"set", "aria-pressed":b.flex?"true":"false",
+          onClick:function(){ haptic(8); editBreak(dayKey, b.id, "flex", !b.flex); },
+          style:{flexShrink:0,background:b.flex?S.infoBg:S.bg0,border:"1.5px solid "+(b.flex?S.actionBdr:S.border),borderRadius:"999px",
+                 padding:"0.3rem 0.6rem",color:b.flex?S.infoText:S.textDim,cursor:"pointer",
+                 fontFamily:S.fontBody,fontWeight:800,fontSize:"0.68rem",letterSpacing:"0.06em",whiteSpace:"nowrap"} },
+          b.flex ? "FLEXIBLE" : "SET TIME"),
         React.createElement("button", { "data-flat":true, "aria-label":"Remove break",
           onClick:function(){ removeBreak(dayKey, b.id); },
           style:{flexShrink:0,width:"36px",background:S.bg0,border:"1.5px solid "+S.border,
@@ -7158,7 +7448,10 @@ function UnpaidBreaksModal(props){
           "\u00d7")
       ),
       React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.45rem"} },
-        React.createElement("input", { type:"time", value:b.start,
+        b.flex
+          ? React.createElement("span", { "data-anytime":true, style:{flex:"0 1 94px",minWidth:"80px",textAlign:"center",color:S.textDim,
+              fontSize:"0.82rem",fontFamily:S.fontBody,fontWeight:600} }, "Any time")
+          : React.createElement("input", { type:"time", value:b.start,
           onChange:function(e){ editBreak(dayKey, b.id, "start", e.target.value); },
           style:Object.assign(TIME_FIELD_STYLE(startBad?S.dangerText:S.text, startBad?S.dangerText:S.border),
             { flex:"0 1 94px", minWidth:"80px" }) }),
@@ -7192,11 +7485,38 @@ function UnpaidBreaksModal(props){
     return Math.max(a, m); }, 0);
   var ownBad = ub.allowMode==="own" && !(+ub.allowMins>=0 && String(ub.allowMins)!=="");
   function setField(f, v){ mutate(function(n){ n[f]=v; }); }
+  // One reminder row: on/off, then how many times and how many minutes apart.
+  function setAlert(kind, f, v){ mutate(function(n){ var a={ soon:Object.assign({}, n.alerts.soon), missed:Object.assign({}, n.alerts.missed) };
+    a[kind][f]=v; n.alerts=a; }); }
+  function alertRow(kind, label, word){
+    var a=ub.alerts[kind];
+    var numBox=function(f, lo, hi){
+      return React.createElement("input", { type:"number", inputMode:"numeric", min:lo, max:hi, step:1, value:a[f], "data-alertnum":kind+":"+f,
+        onChange:function(e){ var v=e.target.value; setAlert(kind, f, v==="" ? "" : Math.max(lo, Math.min(hi, Math.round(+v||lo)))); },
+        onBlur:function(){ if(a[f]==="" ) setAlert(kind, f, lo); },
+        style:Object.assign({},INPUT_STYLE,{width:"52px",flexShrink:0,padding:"0.38rem 0.3rem",fontFamily:S.fontMono,fontSize:"0.88rem",
+          minHeight:"2rem",boxSizing:"border-box",textAlign:"center"}) });
+    };
+    var txt=function(t){ return React.createElement("span", { style:{fontSize:"0.8rem",color:S.textDim,fontFamily:S.fontBody,whiteSpace:"nowrap"} }, t); };
+    return React.createElement("div", { key:kind, style:{marginBottom:"0.6rem"} },
+      React.createElement("button", { "data-flat":true, "data-alerton":kind+":"+(a.on?"on":"off"), "aria-pressed":a.on?"true":"false",
+        onClick:function(){ haptic(8); setAlert(kind, "on", !a.on); },
+        style:{display:"flex",alignItems:"center",gap:"0.55rem",width:"100%",textAlign:"left",
+               background:"none",border:"none",padding:"0.25rem 0",cursor:"pointer",fontFamily:S.fontBody} },
+        React.createElement("span", { style:{width:"10px",height:"10px",borderRadius:"50%",flexShrink:0,
+          background:a.on?S.successText:"transparent", border:"2px solid "+(a.on?S.successText:S.chromeBdr)} }),
+        React.createElement("span", { style:{color:a.on?S.text:S.textMuted,fontWeight:a.on?600:400,fontSize:"0.9rem"} }, label)),
+      a.on && React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.4rem",flexWrap:"wrap",margin:"0.3rem 0 0 1.2rem"} },
+        numBox("count", 1, 5), txt(+a.count===1 ? "time," : "times, every"), numBox("gap", 1, 60), txt("min "+word+" it")));
+  }
+  var notifPermS=useState(function(){ return (typeof Notification!=="undefined") ? Notification.permission : "unsupported"; });
+  var setNotifPerm=notifPermS[1], notifPerm=notifPermS[0];
   var rulesBox=function(){ return React.createElement("div", { "data-breakrules":true, style:{background:S.bg1,border:"1px solid "+S.border,
       borderRadius:S.radius3,padding:"0.55rem 0.65rem",color:S.textMuted,fontSize:"0.74rem",lineHeight:1.45,fontFamily:S.fontBody} },
     BREAK_RULES_NOTE); };
 
   return React.createElement(Modal, { title:"Scheduled Breaks", onClose:props.onClose, wide:true,
+    trail:props.trail, trailGuard:props.trailGuard ? function(item){ props.trailGuard(item, ub, JSON.stringify(ub)!==ubStart); } : null,
     onSave:function(){ props.onDone(ub); }, saveLabel:"Done" },
     React.createElement("div", { style:{marginBottom:"1rem"} }, rulesBox()),
     // every work day
@@ -7243,6 +7563,24 @@ function UnpaidBreaksModal(props){
         padding:"0.7rem 0 0.1rem",fontFamily:S.fontBody} },
       React.createElement("span", { style:{color:S.textDim,fontSize:"0.85rem"} }, "Unpaid per week"),
       React.createElement("span", { style:{color:S.warnText,fontWeight:700,fontFamily:S.fontMono} }, "-"+fmtHours(weekDeduct))
+    ),
+    // ---- reminders (10-22): before a set-time break, and after a missed one ----
+    React.createElement("div", { "data-anchor":"ub-alerts", style:{marginTop:"1.2rem",paddingTop:"1rem",borderTop:"1px solid "+S.border} },
+      React.createElement("div", { style:sectionHead }, "Break Reminders"),
+      React.createElement("div", { style:sectionNote }, "For breaks at a set time. Flexible breaks never remind."),
+      alertRow("soon", "Before a break starts", "before"),
+      alertRow("missed", "When a break is missed", "after"),
+      React.createElement("div", { "data-alertperm":notifPerm, style:Object.assign({}, sectionNote, { display:"flex",alignItems:"center",gap:"0.6rem",marginTop:"0.5rem",marginBottom:0 }) },
+        React.createElement("span", { style:{flex:1} },
+          "Reminders show on the board and buzz. "+(notifPerm==="granted" ? "Phone notifications are allowed; they appear while Time Tracker is open."
+            : notifPerm==="denied" ? "Phone notifications are blocked in your phone's settings."
+            : notifPerm==="unsupported" ? "Phone notifications are not available here."
+            : "Allow phone notifications to get them while Time Tracker is open.")),
+        notifPerm==="default" && React.createElement("button", { "data-flat":true, "data-alertallow":true,
+          onClick:function(){ try{ Notification.requestPermission().then(function(){ setNotifPerm(Notification.permission); }); }catch(e){} },
+          style:{flexShrink:0,background:S.bg1,border:"1.5px solid "+S.borderBright,borderRadius:S.radius3,
+                 padding:"0.4rem 0.7rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:"0.78rem"} },
+          "Allow"))
     ),
     // ---- paid break time (10-22) ----
     React.createElement("div", { "data-anchor":"ub-allow", style:{marginTop:"1.2rem",paddingTop:"1rem",borderTop:"1px solid "+S.border} },
@@ -7292,7 +7630,7 @@ function TrackingModal(props){
   var sectionBox={marginBottom:"1.1rem",paddingBottom:"1rem",borderBottom:"1px solid "+S.border};
   var sectionHead={fontSize:"0.78rem",textTransform:"uppercase",letterSpacing:"0.08em",color:S.textDim,fontWeight:700,marginBottom:"0.35rem"};
   var note={fontSize:"0.8rem",color:S.textDim,marginBottom:"0.7rem"};
-  return React.createElement(Modal, { title:"Tracking", onClose:props.onClose, onSave:props.onClose, wide:true },
+  return React.createElement(Modal, { title:"Tracking", onClose:props.onClose, onSave:props.onClose, wide:true, trail:props.trail },
     // How time is captured. Applies live, like Themes and Layout.
     React.createElement("div", { style:sectionBox },
       React.createElement("div", { style:sectionHead }, "Capture"),
@@ -7446,7 +7784,7 @@ function ThemesModal(props){
   var themeKey=themeKeyOf(settings);
 
   return (
-    React.createElement(Modal, { title:"Themes", onClose:onClose, onSave:onClose, wide:true },
+    React.createElement(Modal, { title:"Themes", onClose:onClose, onSave:onClose, wide:true, trail:props.trail },
       // Ordered the way it is chosen: theme first, then the palette and type
       // that theme allows, then the mode it renders in.
       React.createElement("div", { style:B.box },
@@ -7512,7 +7850,7 @@ function LayoutModal(props){
   function set(key, val){ var n=Object.assign({},settings); n[key]=val; onChange(n); }
 
   return (
-    React.createElement(Modal, { title:"Layout", onClose:onClose, onSave:onClose, wide:true },
+    React.createElement(Modal, { title:"Layout", onClose:onClose, onSave:onClose, wide:true, trail:props.trail },
       React.createElement("div", { style:B.box },
         React.createElement("div", { style:B.head }, "Density"),
         React.createElement("div", { style:{fontSize:"0.8rem",color:S.textDim,marginBottom:"0.55rem"} },
@@ -7680,6 +8018,7 @@ function OutlineModal(props){
   var onOpen=props.onOpen, onSave=props.onSave, onClose=props.onClose;
   var rowsS=useState(function(){ return outlineRows(laneOrder, laneMeta, projects); });
   var setRows=rowsS[1]; var rows=rowsS[0];
+  var leaveOS=useState(null); var setLeaveO=leaveOS[1]; var leaveO=leaveOS[0];
   // Editing a row's details happens in a child sheet on top of this one, and
   // this one stays mounted so its unsaved moves survive. When the board comes
   // back changed - a rename, a deletion, a stage added - the new content is
@@ -7812,7 +8151,10 @@ function OutlineModal(props){
     // separate moments: Done puts the controller away, and the action row is
     // there underneath it.
     React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", "data-anchor":"outline-save", onClick:function(){ onSave(rows); }, style:MODAL_SAVE() }, "Save"),
-          React.createElement("button", { key:"a1", onClick:onClose, style:MODAL_CANCEL() }, "Cancel")], title:"Edit\u2026", onClose:onClose, wide:true, ownActions:true },
+          React.createElement("button", { key:"a1", onClick:onClose, style:MODAL_CANCEL() }, "Cancel")], title:"Edit\u2026", onClose:onClose, wide:true, ownActions:true,
+          trail:props.trail, trailGuard:function(item){
+            var dirty=JSON.stringify(rows)!==JSON.stringify(outlineRows(laneOrder, laneMeta, projects));
+            if(dirty) setLeaveO({ go:item.go }); else item.go(); } },
       React.createElement("div", { style:{fontSize:"0.72rem",color:S.textMuted,marginBottom:"0.8rem",lineHeight:1.4} },
         "Tap a row\u2019s icon to move it. Tap its name for its menu, twice to edit it."),
       React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.3rem",
@@ -7921,7 +8263,11 @@ function OutlineModal(props){
     ask && React.createElement(Modal, { actions:[React.createElement("button", { key:"a0", "data-outlineconfirm":true, onClick:ask.apply, style:MODAL_SAVE() }, "Move"),
         React.createElement("button", { key:"a1", onClick:function(){ setAsk(null); }, style:MODAL_CANCEL() }, "Cancel")], title:"Move it?", onClose:function(){ setAsk(null); }, ownActions:true },
       React.createElement("p", { style:{color:S.textDim,fontSize:"0.9rem",lineHeight:1.5,marginBottom:"1rem"} }, ask.label)
-    )
+    ),
+    leaveO && React.createElement(LeaveAskModal, { name:"the outline",
+      onSave:function(){ var go=leaveO.go; setLeaveO(null); onSave(rows); go(); },
+      onDiscard:function(){ var go=leaveO.go; setLeaveO(null); go(); },
+      onStay:function(){ setLeaveO(null); } })
   );
 }
 
@@ -8122,7 +8468,7 @@ function DaySummary(props){
   function copy(){ navigator.clipboard.writeText(lines.join("\n")).then(function(){ setCopied(true); setTimeout(function(){ setCopied(false); },2000); }); }
 
   return (
-    React.createElement(Modal, { title:"Day Summary", onClose:onClose, wide:true },
+    React.createElement(Modal, { title:"Day Summary", onClose:onClose, wide:true, trail:props.trail },
       React.createElement("div", { style:{display:"flex",gap:"0.5rem",marginBottom:"1rem"} },
         React.createElement("button", { "data-anchor":"sum-copy", onClick:copy, style:{flex:1,background:copied?S.successBg2:S.bg1,border:"1px solid "+(copied?S.successBorder:S.border),borderRadius:S.radius,padding:"0.7rem",color:copied?S.successText:S.textDim,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600} }, copied?"Copied!":"Copy")
       ),
@@ -8509,7 +8855,7 @@ function ReportsModal(props){
     return React.createElement("div", { key:sec.id, style:{marginTop:"0.9rem"} }, sec.el);
   });
 
-  return React.createElement(Modal, { title:"Reports", onClose:props.onClose, wide:true, cancelLabel:"Close" },
+  return React.createElement(Modal, { title:"Reports", onClose:props.onClose, wide:true, cancelLabel:"Close", trail:props.trail },
     seg, nav, summary, payCard, stats, breakNote, milestones, body, modSections,
     roll.trackedMs>0 && React.createElement("button", { "data-flat":true, onClick:copy,
       style:{width:"100%",marginTop:"0.4rem",background:copied?S.successBg2:S.bg1,
@@ -9720,6 +10066,9 @@ var TT = {
 
   ui: {
     Modal: Modal,
+    // Save / Don't save / Stay, for a sheet left by its trail with edits.
+    // Resolved when drawn, so the contract does not depend on load order.
+    LeaveAsk: function LeaveAsk(p){ return React.createElement(LeaveAskModal, p); },
     ModalActions: ModalActions,
     Mono: Mono,
     Toggle: Toggle,
@@ -9896,6 +10245,12 @@ function ToolsScreen(ctx){
   var editorS = useState(null); var editor = editorS[0], setEditor = editorS[1];
   var sheetS = useState(null); var sheet = sheetS[0], setSheet = sheetS[1];
   var askS = useState(null); var ask = askS[0], setAsk = askS[1];
+  // The way back from a sheet (10-27): its trail is the screen's plus
+  // "Tools"; leaving with something typed asks first.
+  var leaveS = useState(null); var leave = leaveS[0], setLeave = leaveS[1];
+  var sheetStart = useRef(null), editorStart = useRef(null);
+  useEffect(function(){ sheetStart.current = sheet ? JSON.stringify(sheet) : null; }, [!!sheet]);
+  useEffect(function(){ editorStart.current = editor ? JSON.stringify(editor) : null; }, [!!editor]);
   var nowS = useState(Date.now()); var now = nowS[0], setNow = nowS[1];
 
   // Elapsed times tick while the screen is open, and only while it is open.
@@ -10094,7 +10449,7 @@ function ToolsScreen(ctx){
     chip(tools.length + (tools.length === 1 ? " tool" : " tools") + " tracked", S.bg3, S.textDim)
   );
 
-  var main = React.createElement(UIkit.Modal, { title:"Tools", onClose:ctx.onClose, cancelLabel:"Close" },
+  var main = React.createElement(UIkit.Modal, { title:"Tools", onClose:ctx.onClose, cancelLabel:"Close", trail:ctx.trail },
     summary,
     React.createElement(UIkit.Toggle, { name:"Tool view", keys:["out", "all", "log"], value:view,
       labelOf:function(k){ return k === "out" ? "Out" : k === "all" ? "All" : "History"; },
@@ -10105,18 +10460,33 @@ function ToolsScreen(ctx){
 
   // Sheets are siblings of the main modal, never children of it: nesting inside
   // a backdrop-filter surface is what breaks the glass themes.
+  function saveSheet(d){
+    var proj = api.data.findProj(ctx.projects || [], d.projectId);
+    checkOut(d.tool, (d.holder || "").trim(), proj ? proj.id : null, proj ? proj.name : "",
+             (d.note || "").trim());
+  }
+  function sheetTrail(close){ return (ctx.trail || []).concat([{ label:"Tools", back:true, go:close }]); }
+  function sheetGuard(cur, start, close, save, name){
+    return function(item){
+      if(JSON.stringify(cur) === start.current){ item.go(); return; }
+      setLeave({ name:name,
+        onSave:function(){ setLeave(null); save(cur); if(!item.back) item.go(); },
+        onDiscard:function(){ setLeave(null); close(); if(!item.back) item.go(); } });
+    };
+  }
+  var closeSheet = function(){ setSheet(null); }, closeEditor = function(){ setEditor(null); };
   return React.createElement(React.Fragment, null,
     main,
     sheet && React.createElement(ToolsCheckoutSheet, { ctx:ctx, draft:sheet, projects:ctx.projects || [],
-      onChange:setSheet, onCancel:function(){ setSheet(null); },
-      onSave:function(d){
-        var proj = api.data.findProj(ctx.projects || [], d.projectId);
-        checkOut(d.tool, (d.holder || "").trim(), proj ? proj.id : null, proj ? proj.name : "",
-                 (d.note || "").trim());
-      } }),
+      trail:sheetTrail(closeSheet), trailGuard:sheetGuard(sheet, sheetStart, closeSheet, saveSheet, "this checkout"),
+      onChange:setSheet, onCancel:closeSheet,
+      onSave:saveSheet }),
     editor && React.createElement(ToolsEditorSheet, { ctx:ctx, draft:editor, onChange:setEditor,
-      onCancel:function(){ setEditor(null); }, onSave:saveTool,
+      trail:sheetTrail(closeEditor), trailGuard:sheetGuard(editor, editorStart, closeEditor, saveTool, editor.id ? "this tool" : "the new tool"),
+      onCancel:closeEditor, onSave:saveTool,
       onDelete:editor.id ? function(){ setAsk(editor.id); } : null }),
+    leave && React.createElement(UIkit.LeaveAsk, { name:leave.name, onSave:leave.onSave, onDiscard:leave.onDiscard,
+      onStay:function(){ setLeave(null); } }),
     ask && React.createElement(ToolsConfirmSheet, { ctx:ctx,
       tool:tools.filter(function(t){ return t.id === ask; })[0] || null,
       onCancel:function(){ setAsk(null); },
@@ -10155,7 +10525,7 @@ function ToolsCheckoutSheet(props){
   }
 
   return React.createElement(UIkit.Modal, {
-      title:"Check Out \u00B7 " + d.tool.name, onClose:props.onCancel,
+      title:"Check Out \u00B7 " + d.tool.name, onClose:props.onCancel, trail:props.trail, trailGuard:props.trailGuard, trailHere:"Check Out",
       onSave:function(){ props.onSave(d); }, saveLabel:"Check Out", saveAnchor:"tools-save" },
     React.createElement("div", { style:{ marginBottom:"0.8rem" }, "data-anchor":"tools-holder" },
       React.createElement("label", { style:label }, "Who has it"),
@@ -10198,7 +10568,7 @@ function ToolsEditorSheet(props){
   var field = { marginBottom:"0.8rem" };
 
   return React.createElement(UIkit.Modal, {
-      title:d.id ? "Edit Tool" : "Add Tool", onClose:props.onCancel,
+      title:d.id ? "Edit Tool" : "Add Tool", onClose:props.onCancel, trail:props.trail, trailGuard:props.trailGuard,
       onSave:function(){ props.onSave(d); }, saveLabel:"Save" },
     React.createElement("div", { style:field },
       React.createElement("label", { style:label }, "Name"),
@@ -10436,7 +10806,7 @@ function TTErrorBoundary(props){ return props.children; }
 // APP_VERSION is the public number. The build stamp stays where it has always
 // been, in the boot div, because that is the thing that proves which deploy
 // landed; this is the thing a person reads.
-var APP_VERSION = "1.3";
+var APP_VERSION = "1.3B";   // "Baker": the release getting the app ready for the database (Brent, 10-27)
 var SPLASH_SHOW_MS = 2500;   // fully opaque
 var SPLASH_FADE_MS = 320;    // then fades out over this
 function SplashScreen(props){
@@ -10655,6 +11025,7 @@ function TTBoard(){
   var overAskS=useState(null); var setOverAsk=overAskS[1]; var overAsk=overAskS[0];
   var resumeAskS=useState(null); var setResumeAsk=resumeAskS[1]; var resumeAsk=resumeAskS[0];
   var breakQuietS=useState(function(){ return load("tt_breaknags",{}); }); var setBreakQuiet=breakQuietS[1]; var breakQuiet=breakQuietS[0];
+  var navFromS=useState(null); var setNavFrom=navFromS[1]; var navFrom=navFromS[0];
   var openBreaksEdS=useState(false); var setOpenBreaksEd=openBreaksEdS[1]; var openBreaksEd=openBreaksEdS[0];
   var breakLabelS=useState(boot.breakLabel||""); var setBreakLabel=breakLabelS[1]; var breakLabel=breakLabelS[0];
 
@@ -10888,12 +11259,27 @@ function TTBoard(){
 
   // Close every popup - modals and all dropdown menus - before opening a new one
   function closeAllPopups(){
+    setNavFrom(null); setShowArchive(false);
     setShowAdd(null); setEditProj(null); setStagesProj(null); setShowDisrupt(false);
     setShowBreak(false); setShowDay(false); setShowNewLane(false);
     setShowReports(false); setShowBackup(false); setShowExtensions(false); setModScreen(null);
     setConfirmDelete(null); setShowTestConfirm(false); setShowGuides(false); setStartAsk(null);
     setMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowThemes(false); setShowLayout(false); setShowSchedule(false); setShowTracking(false); setMenuGroup(null); setShowOutline(false); setEditLane(null); setMsProj(null); setMsLane(null); setMsBoard(false); setStagesDone(null);
     try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){}
+  }
+  // ---- The way back (10-27) ----
+  // navFrom records how a setup screen was reached - straight from the menu,
+  // or through one of its groups - so the screen can draw its trail back.
+  // Keyed by screen: a screen opened any other way (a button on the board,
+  // clock-out, "Change my allowance") has no trail.
+  function navOpen(screen, from){ setNavFrom({ screen:screen, from:from }); }
+  function trailFor(screen){
+    if(!navFrom || navFrom.screen!==screen) return null;
+    var from=navFrom.from;
+    var items=[{ label:"Board", go:function(){ closeAllPopups(); } },
+               { label:"Menu",  go:function(){ closeAllPopups(); setMenuOpen(true); } }];
+    if(NAV_GROUPS[from]) items.push({ label:NAV_GROUPS[from], go:function(){ closeAllPopups(); setMenuGroup(from); } });
+    return items;
   }
   // ---- Module nav ----
   // Enabled modules that declare a nav entry become rows in the settings menu,
@@ -10906,7 +11292,7 @@ function TTBoard(){
     if(!g){ g={ name:entry.group, items:[] }; modGroups.push(g); }
     g.items.push(entry);
   });
-  function openModule(entry){ closeAllPopups(); setModScreen({ id:entry.id, screen:entry.screen }); }
+  function openModule(entry){ closeAllPopups(); setModScreen({ id:entry.id, screen:entry.screen }); navOpen("mod:"+entry.id+":"+entry.screen, "menu"); }
 
   useEffect(function(){
     function closeHeaderMenus(){ setMenuOpen(false); setDistMenuOpen(false); setMenuGroup(null); }
@@ -11092,13 +11478,17 @@ function TTBoard(){
   }
   // A break records whether it is paid and which job it stopped (fromId), so
   // ending it can offer that job back. paid is absent on old records: unpaid.
-  function startBreak(label, paid){
+  // mins: the break's set length (a scheduled break's minutes), or none for an
+  // open break - the header counts a set length down, an open one up.
+  function startBreak(label, paid, mins){
     haptic(12);
     var now=Date.now();
     setShowBreak(false);
     var from=activeId!=null ? activeId : null;
     if(activeId) finalizeProject(now);
-    setBreaks(function(prev){ return prev.concat([{id:uid(),day:curDay(),label:label,paid:!!paid,fromId:from,startTime:now,endTime:null,duration:0}]); });
+    var rec={id:uid(),day:curDay(),label:label,paid:!!paid,fromId:from,startTime:now,endTime:null,duration:0};
+    if(+mins>0) rec.mins=Math.round(+mins);
+    setBreaks(function(prev){ return prev.concat([rec]); });
     setOnBreak(true); setBreakStart(now); setBreakElapsed(0); setBreakLabel(label);
   }
   // Ending a paid break measures it against the day's paid break time. Past
@@ -11142,7 +11532,7 @@ function TTBoard(){
                              : Object.assign({}, b, { overCovered:true, overUnpaid:false });
     }); });
     setOverAsk(null);
-    if(kind==="change"){ setOpenBreaksEd(true); setShowSchedule(true); }
+    if(kind==="change"){ setNavFrom(null); setOpenBreaksEd(true); setShowSchedule(true); }
     else if(!ask.clockingOut) offerResume({ fromId:ask.fromId, label:ask.label });
   }
   // The missed scheduled break. Start / In 30 min / Skip today - a skip is
@@ -11154,9 +11544,11 @@ function TTBoard(){
       n[key]=val; return n; });
   }
   function missedAct(kind){
-    var due=missedDue; if(!due) return;
-    if(kind==="start"){ startBreak(due.name, due.paid); return; }
-    if(kind==="snooze"){ haptic(8); quietBreak(due.key, Date.now()+30*60000); return; }
+    var due=alertDue; if(!due) return;
+    if(kind==="start"){ startBreak(due.name, due.paid, due.mins); return; }
+    // Later / OK: quiet until the next reminder of the same kind.
+    if(kind==="later"){ haptic(8); quietBreak(due.key+"|m", due.idx); return; }
+    if(kind==="ok"){ haptic(8); quietBreak(due.key+"|s", due.idx); return; }
     haptic(10);
     quietBreak(due.key, "skip");
     setBreaks(function(prev){ return prev.concat([{ id:uid(), day:curDay(), label:due.name, paid:due.paid, missed:true, missedKey:due.key,
@@ -11371,31 +11763,72 @@ function TTBoard(){
     ? { position:"fixed", bottom:0, left:0, right:0, zIndex:300, boxShadow:"0 -4px 24px rgba(0,0,0,0.55)" }
     : { position:"fixed", top:TUT_H, left:0, right:0, zIndex:300, boxShadow:"0 4px 24px rgba(0,0,0,0.55)" };
   var spacerH = hdrBottom ? (testMode ? (8+TUT_H)+"px" : "8px") : (testMode ? (104+TUT_H)+"px" : "104px");
-  var rootPadBottom = hdrBottom ? "178px" : "4rem";
+  var rootPadBottom = hdrBottom ? (178+HDR_FOOT)+"px" : "4rem";
   var ddTop = hdrBottom ? "auto" : "calc(100% + 6px)";
   var ddBottom = hdrBottom ? "calc(100% + 6px)" : "auto";
-  UI.bottomClear = hdrBottom ? 114 : 0;
+  UI.bottomClear = hdrBottom ? 114+HDR_FOOT : 0;
   UI.topClear = hdrBottom ? FW : (114 + FW);
 
   // ---- Breaks (10-22): the open break, paid time left, what is due ----
   var curBreak=breaks.filter(function(b){ return !b.endTime && !b.missed; })[0]||null;
+  var breakLimitMs=(onBreak && curBreak && +curBreak.mins>0) ? curBreak.mins*60000 : null;
   var wsSched=settings.workSchedule, breakDay=curDay();
   var breakSt=breakDayState(wsSched, breaks, breakDay, curBreak?curBreak.id:null);
   var breakLeftMs=breakSt.limited ? breakSt.leftMs : null;
   var overLiveMs=(onBreak && curBreak && curBreak.paid)
     ? breakOverFor(breakDayState(wsSched, breaks, curBreak.day||breakDay, curBreak.id), breakElapsed).overMs : 0;
   var overStyle=(wsSched && wsSched.unpaidBreaks && wsSched.unpaidBreaks.overStyle)||"float";
-  var missedDue=(clocked && !onBreak && !interrupting) ? missedBreakDue(wsSched, breakDay, nowTick, breaks, breakQuiet) : null;
-  var bannerPlace=hdrBottom ? { bottom:122 } : { top:TUT_H+122 };
+  var alertDue=(clocked && !onBreak && !interrupting) ? breakAlertDue(wsSched, breakDay, nowTick, breaks, breakQuiet) : null;
+  // Each reminder announces itself once, when it first shows: a buzz and, if
+  // allowed, a system notification (while the app is open - as with the
+  // schedule notifications). key|sn / key|mn remember what was announced.
+  var alertSig=alertDue ? alertDue.kind+"|"+alertDue.key+"|"+alertDue.idx : "";
+  useEffect(function(){
+    if(!alertDue) return;
+    var nk=alertDue.key+(alertDue.kind==="soon" ? "|sn" : "|mn");
+    if((+breakQuiet[nk]||0)>=alertDue.idx) return;
+    quietBreak(nk, alertDue.idx);
+    haptic([30,60,30]);
+    var title=alertDue.kind==="soon" ? alertDue.name+" in "+Math.max(1, Math.ceil(alertDue.leftMs/60000))+" min"
+                                     : alertDue.name+" was due at "+fmtTime(alertDue.at);
+    try{
+      if(typeof Notification!=="undefined" && Notification.permission==="granted")
+        new Notification(title, { body:alertDue.kind==="soon" ? "Time Tracker: break coming up" : "Time Tracker: break missed" });
+    }catch(e){}
+  },[alertSig]);
+  var bannerPlace=hdrBottom ? { bottom:122+HDR_FOOT } : { top:TUT_H+122 };
   var statusTag=onBreak ? "End" : ((clocked && !interrupting) ? "Break" : null);
 
   // ---- Screen ticker: date/time + live status ----
+  var groupTrail=[{ label:"Board", go:function(){ closeAllPopups(); } }, { label:"Menu", go:function(){ closeAllPopups(); setMenuOpen(true); } }];
+  // ---- Trails for what opens over the board (10-27, Brent) ----
+  // Over Edit...: the menu route plus "Edit..." (back to the outline).
+  // Elsewhere a chain starts at Board.
+  function closeOverOutline(){ setEditProj(null); setStagesProj(null); setEditLane(null); setShowAdd(null); setMsProj(null); setMsLane(null); }
+  var boardStep={ label:"Board", go:function(){ closeAllPopups(); } };
+  var outlineRoute=showOutline ? (trailFor("outline")||[boardStep]).concat([{ label:"Edit\u2026", back:true, go:closeOverOutline }]) : null;
+  var baseRoute=outlineRoute || [boardStep];
+  // Milestones: board view > lane view > project editor, each a step.
+  var msBoardStep={ label:"Milestones", go:function(){ setMsProj(null); setMsLane(null); } };
+  var msLaneTrail=outlineRoute ? outlineRoute : (msBoard ? [boardStep, msBoardStep] : null);
+  var msProjTrail=(outlineRoute || msBoard || msLane) ? baseRoute.concat(msBoard ? [msBoardStep] : [],
+      msLane ? [{ label:getMeta(laneMeta, msLane).label, go:function(){ setMsProj(null); } }] : []) : null;
+  // Edit Project / Edit Task: the trail IS the location (option B) - the
+  // lane, then every parent from the top, each opening its own editor.
+  function editTrailFor(p){
+    if(!p) return null;
+    var chain=[], cur=p.parentId!=null ? findProj(projects, p.parentId) : null, guard=0;
+    while(cur && guard++<50){ chain.unshift(cur); cur=cur.parentId!=null ? findProj(projects, cur.parentId) : null; }
+    return baseRoute.concat([{ label:getMeta(laneMeta, p.lane).label, go:function(){ setEditProj(null); setEditLane(p.lane); } }],
+      chain.map(function(a){ return { label:a.name, go:function(){ setEditProj(a); } }; }));
+  }
   var tickerEl = React.createElement(HeaderTicker, { interrupting:interrupting, activeProj:activeProj, intElapsed:intElapsed,
     wsActive:wsActive, elapsed:elapsed, onBreak:onBreak, breakLabel:breakLabel, breakElapsed:breakElapsed,
     clocked:clocked, atWorkElapsed:atWorkElapsed, nowTick:nowTick, bottom:hdrBottom,
-    statusTag:statusTag,
+    statusTag:statusTag, breakLimitMs:breakLimitMs, mirror:isLeft,
     onStatusTap:onBreak ? function(){ endBreak(); } : function(){ closeAllPopups(); setShowBreak(true); },
-    overNote:(overStyle==="header" && overLiveMs>0) ? "+"+fmtDur(overLiveMs,true)+" over" : null });
+    // A break with its own length already counts its overage in the clock.
+    overNote:(overStyle==="header" && overLiveMs>0 && breakLimitMs==null) ? "+"+fmtDur(overLiveMs,true)+" over" : null });
 
   return (
     React.createElement("div", { dir:isLeft?"rtl":"ltr", style:{minHeight:"100vh",background:S.bg0,color:S.text,fontFamily:S.fontBody,paddingBottom:rootPadBottom,paddingLeft:FW,paddingRight:FW} },
@@ -11413,6 +11846,18 @@ function TTBoard(){
         // serves every lane color.
         "@keyframes ttPulse { 0%,100% { border-color:var(--pulse-a); box-shadow:0 0 8px var(--pulse-s1); } 50% { border-color:var(--pulse-b); box-shadow:0 0 20px var(--pulse-s2); } } "+
         "[data-pulse='1']{ animation: ttPulse 2.4s ease-in-out infinite; } "+
+        "[data-trailstrip]::-webkit-scrollbar{ display:none; } "+
+        // Left-handed mirrors the page with dir=rtl, which also ran English
+        // sentences right-to-left at their ends: the closing period jumped to
+        // the front of the last line (".day"). plaintext sets each paragraph's
+        // direction from its own words, so prose reads normally while the
+        // layout stays mirrored (10-27). Prose in a sheet then sits on the left.
+        // Scoped to blocks inside a sheet: the board keeps its mirrored look.
+        "[dir='rtl'] [data-modal-panel] div, [dir='rtl'] [data-modal-panel] p, [dir='rtl'] [data-modal-panel] button{ unicode-bidi:plaintext; } "+
+        // The break line, once it can grow no further, breathes on the same cycle.
+        "@keyframes ttBarPulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } } "+
+        "[data-barpulse='1']{ animation: ttBarPulse 2.4s ease-in-out infinite; } "+
+        "@media (prefers-reduced-motion: reduce){ [data-barpulse='1']{ animation:none; } } "+
         // iOS renders a time input's value inside shadow parts with their own
         // UA background and color. Make every part transparent and force it to
         // carry the input's color; -webkit-text-fill-color outranks UA color.
@@ -11487,7 +11932,7 @@ function TTBoard(){
               // more ways to do the same thing were two more to keep in step.
               // The lanes list is still reachable from a lane header on the
               // board (long-press, or its + menu).
-              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowOutline(true); },
+              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowOutline(true); navOpen("outline","menu"); },
                 style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
                 React.createElement(MenuIcon, { name:"arrange", col:S.chromeText }),
                 React.createElement("span", { style:{flex:1} }, "Edit\u2026")
@@ -11510,19 +11955,19 @@ function TTBoard(){
                 React.createElement("span", { style:{fontSize:"0.9rem",color:S.textDim} }, "\u203A")
               ),
               // Summary
-              React.createElement("button", { "data-flat":true, onClick:function(){ if(todayLogs.length){ closeAllPopups(); setShowDay(true); } },
+              React.createElement("button", { "data-flat":true, onClick:function(){ if(todayLogs.length){ closeAllPopups(); setShowDay(true); navOpen("day","menu"); } },
                 style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:summaryCol,cursor:todayLogs.length?"pointer":"default",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
                 React.createElement(MenuIcon, { name:"summary", col:summaryCol }),
                 "Summary"
               ),
               // Reports
-              React.createElement("button", { "data-flat":true, onClick:function(){ openReports("week"); },
+              React.createElement("button", { "data-flat":true, onClick:function(){ openReports("week"); navOpen("reports","menu"); },
                 style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
                 React.createElement(MenuIcon, { name:"reports", col:S.text }),
                 "Reports"
               ),
               // Archive: everything closed out, with its history intact.
-              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowArchive(true); },
+              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowArchive(true); navOpen("archive","menu"); },
                 style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
                 React.createElement(MenuIcon, { name:"archive", col:S.chromeText }),
                 React.createElement("span", { style:{flex:1} }, "Archive"),
@@ -11532,13 +11977,13 @@ function TTBoard(){
                 })()
               ),
               // Backup & Saves
-              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowBackup(true); },
+              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowBackup(true); navOpen("backup","menu"); },
                 style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
                 React.createElement(MenuIcon, { name:"backup", col:S.text }),
                 "Backup & Saves"
               ),
               // Extensions
-              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowExtensions(true); },
+              React.createElement("button", { "data-flat":true, onClick:function(){ closeAllPopups(); setShowExtensions(true); navOpen("extensions","menu"); },
                 style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
                 React.createElement(MenuIcon, { name:"extensions", col:S.text }),
                 "Extensions"
@@ -11671,7 +12116,7 @@ function TTBoard(){
       ),
 
       // ---- MODALS ----
-      showOutline && React.createElement(OutlineModal, { laneOrder:laneOrder, laneMeta:laneMeta,
+      showOutline && React.createElement(OutlineModal, { trail:trailFor("outline"), laneOrder:laneOrder, laneMeta:laneMeta,
         projects:liveProjects, msProjects:projects, offDays:offDaysOf(settings.workSchedule),
         onOpen:openFromOutline, onSave:saveOutline,
         // The row menu's add actions. The outline stays open behind them, the
@@ -11699,20 +12144,20 @@ function TTBoard(){
       msBoard && React.createElement(BoardMilestonesModal, { laneOrder:laneOrder, laneMeta:laneMeta, projects:projects,
         offDays:offDaysOf(settings.workSchedule),
         onOpenLane:function(k){ setMsLane(k); }, onClose:function(){ setMsBoard(false); } }),
-      msLane && React.createElement(LaneMilestonesModal, { lane:msLane, laneMeta:laneMeta, projects:projects,
+      msLane && React.createElement(LaneMilestonesModal, { trail:msLaneTrail, lane:msLane, laneMeta:laneMeta, projects:projects,
         offDays:offDaysOf(settings.workSchedule),
         onOpenProject:function(p){ setMsProj(p.id); }, onClose:function(){ setMsLane(null); } }),
-      msProj && findProj(projects,msProj) && React.createElement(MilestoneEditModal, { project:findProj(projects,msProj),
+      msProj && findProj(projects,msProj) && React.createElement(MilestoneEditModal, { key:"ms:"+msProj, trail:msProjTrail, project:findProj(projects,msProj),
         projects:projects, offDays:offDaysOf(settings.workSchedule),
         onSave:saveMilestones, onClose:function(){ setMsProj(null); } }),
-      editLane && React.createElement(LaneEditModal, { laneKey:editLane, laneMeta:laneMeta,
+      editLane && React.createElement(LaneEditModal, { key:"lane:"+editLane, trail:baseRoute, laneKey:editLane, laneMeta:laneMeta,
         projects:projects, laneOrder:laneOrder, onSave:saveLaneEdit,
         onDeleteLane:function(key,mode,target){ deleteLaneWithProjects(key,mode,target); setEditLane(null); },
         onCancel:function(){ setEditLane(null); } }),
-      editProj && React.createElement(Modal, { title:editProj.parentId?"Edit Task":"Edit Project", onClose:function(){ setEditProj(null); } , ownActions:true },
-        React.createElement(ProjectForm, { project:editProj, onSave:saveEdit, onCancel:function(){ setEditProj(null); }, onDelete:deleteProject, parents:liveProjects, laneMeta:laneMeta, laneOrder:laneOrder, structure:!showOutline })
+      editProj && React.createElement(Modal, { key:"edit:"+editProj.id, title:editProj.parentId?"Edit Task":"Edit Project", onClose:function(){ setEditProj(null); } , ownActions:true },
+        React.createElement(ProjectForm, { trail:editTrailFor(editProj), trailHere:editProj.name, project:editProj, onSave:saveEdit, onCancel:function(){ setEditProj(null); }, onDelete:deleteProject, parents:liveProjects, laneMeta:laneMeta, laneOrder:laneOrder, structure:!showOutline })
       ),
-      stagesProj && React.createElement(StagesModal, { proj:stagesProj, onClose:function(){ setStagesProj(null); }, onUpdate:updateStages }),
+      stagesProj && React.createElement(StagesModal, { trail:outlineRoute, proj:stagesProj, onClose:function(){ setStagesProj(null); }, onUpdate:updateStages }),
       dayAsk && React.createElement(ClockDayModal, { when:dayAsk.when, position:dayAsk.position,
         choices:dayAsk.choices, title:dayAsk.title, stage:dayAsk.stage,
         onPick:function(c){
@@ -11723,15 +12168,16 @@ function TTBoard(){
       showDisrupt && React.createElement(DisruptionModal, { projName:disruptTarget?disruptTarget.name:null, onStart:startDisruption, onCancel:function(){ setShowDisrupt(false); } }),
       showBreak && React.createElement(BreakModal, { options:breakOptionsFor(wsSched, breakDay), leftMs:breakLeftMs,
         onStart:startBreak, onCancel:function(){ setShowBreak(false); } }),
-      missedDue && !showBreak && React.createElement(MissedBreakBanner, { due:missedDue, place:bannerPlace,
+      alertDue && alertDue.kind==="missed" && !showBreak && React.createElement(MissedBreakBanner, { due:alertDue, place:bannerPlace,
         jobName:activeProj ? activeProj.name : null, onAct:missedAct }),
+      alertDue && alertDue.kind==="soon" && !showBreak && React.createElement(UpcomingBreakBanner, { due:alertDue, place:bannerPlace, onAct:missedAct }),
       overLiveMs>0 && overStyle!=="header" && React.createElement(BreakOverBanner, { overMs:overLiveMs, place:bannerPlace }),
       overAsk && React.createElement(BreakOverModal, { label:overAsk.label, overMs:overAsk.overMs,
         totalMs:breakDayState(wsSched, breaks, overAsk.day, overAsk.id).totalMs, onPick:resolveOver }),
       resumeAsk && React.createElement(BreakResumeModal, { label:resumeAsk.label, jobName:resumeAsk.name,
         onResume:function(){ var id=resumeAsk.fromId; setResumeAsk(null); toggleProject(id); },
         onClose:function(){ setResumeAsk(null); } }),
-      showDay && React.createElement(DaySummary, { logs:todayLogs, disruptions:todayDist, breaks:todayBreaks, dayKey:todayStr2, projects:projects, onClose:function(){ setShowDay(false); }, testMode:testMode }),
+      showDay && React.createElement(DaySummary, { trail:trailFor("day"), logs:todayLogs, disruptions:todayDist, breaks:todayBreaks, dayKey:todayStr2, projects:projects, onClose:function(){ setShowDay(false); }, testMode:testMode }),
       notifToast && React.createElement("div", { "data-surface":"panel", role:"status",
         onClick:function(){ setNotifToast(null); },
         style:{position:"fixed",left:"50%",transform:"translateX(-50%)",
@@ -11741,8 +12187,8 @@ function TTBoard(){
         React.createElement("div", { style:{color:S.text,fontWeight:700,fontSize:"0.86rem",fontFamily:S.fontBody} }, notifToast.title),
         React.createElement("div", { style:{color:S.textDim,fontSize:"0.78rem",marginTop:"0.15rem",fontFamily:S.fontBody} }, notifToast.body)
       ),
-      showBackup && React.createElement(BackupModal, { clocked:!!atWorkStart, onClose:function(){ setShowBackup(false); } }),
-      showExtensions && React.createElement(ExtensionsModal, {
+      showBackup && React.createElement(BackupModal, { trail:trailFor("backup"), clocked:!!atWorkStart, onClose:function(){ setShowBackup(false); } }),
+      showExtensions && React.createElement(ExtensionsModal, { trail:trailFor("extensions"),
         onChange:function(){ setModTick(function(x){ return x+1; }); },
         onClose:function(){ setShowExtensions(false); } }),
       // Module screens mount here: a sibling of the core modals, never nested
@@ -11755,9 +12201,13 @@ function TTBoard(){
             // What is running right now, so a module can default to it rather
             // than making the user pick the job they are already standing in.
             activeId:activeId, activeName:activeProj?activeProj.name:null,
+            // The way back (10-27): the path to this screen, or null when it
+            // was opened some other way. A module hands it to TT.ui.Modal and
+            // adds its own steps for its sheets.
+            trail:trailFor("mod:"+modScreen.id+":"+modScreen.screen),
             onClose:function(){ setModScreen(null); }
           })),
-      showReports && React.createElement(ReportsModal, { logs:logs, projects:projects, disruptions:disruptions,
+      showReports && React.createElement(ReportsModal, { trail:trailFor("reports"), logs:logs, projects:projects, disruptions:disruptions,
         breaks:breaks, laneMeta:laneMeta, laneOrder:laneOrder, schedule:settings.workSchedule, testMode:testMode,
         liveLogs:liveLogs(), initialKind:reportsKind, onClose:function(){ setShowReports(false); } }),
       showNewLane && React.createElement(NewLaneModal, { onSave:function(label,col){ addLane(label,col); setShowNewLane(false); }, onCancel:function(){ setShowNewLane(false); } }),
@@ -11776,40 +12226,41 @@ function TTBoard(){
         onCloseOut:function(){ var pr=findProj(projects,stagesDone.id)||stagesDone; setStagesDone(null); askCloseOut(pr); },
         onMoreStages:function(){ var pr=findProj(projects,stagesDone.id)||stagesDone; setStagesDone(null); setStagesProj(pr); },
         onLater:function(){ setStagesDone(null); } }),
-      showArchive && React.createElement(ArchiveModal, { projects:projects, logs:logs, laneMeta:laneMeta,
+      showArchive && React.createElement(ArchiveModal, { trail:trailFor("archive"), projects:projects, logs:logs, laneMeta:laneMeta,
         onReopen:doReopen, onClose:function(){ setShowArchive(false); } }),
       confirmDelete && React.createElement(DeleteProjectModal, { proj:confirmDelete, allProjects:projects, laneMeta:laneMeta, onMoveTasks:doMoveTasks, onDeleteAll:doDeleteAll, onCancel:function(){ setConfirmDelete(null); } }),
       // The menu groups. Selecting an item runs closeAllPopups first, which
       // clears the group itself, then opens the screen that was chosen.
       // Both ways out of the practice board go through the confirm: the bar's
       // EXIT and this group's Leave row.
+      // A group's own trail: Board (out) or Menu (back to the menu).
       menuGroup==="manual" && React.createElement(MenuGroupModal, { title:"User Manual",
-        onClose:function(){ setMenuGroup(null); },
+        onClose:function(){ setMenuGroup(null); }, trail:groupTrail,
         items:[
-          { label:"Guides", onSelect:function(){ closeAllPopups(); setShowGuides(true); } },
+          { label:"Guides", onSelect:function(){ closeAllPopups(); setShowGuides(true); navOpen("guides","manual"); } },
           testMode
             ? { label:"Leave Practice Board", onSelect:function(){ closeAllPopups(); setShowTestConfirm(true); } }
             : { label:"Practice Board", onSelect:function(){ closeAllPopups(); setTestMode(true); } }
         ] }),
       menuGroup==="time" && React.createElement(MenuGroupModal, { title:"Time Settings",
-        onClose:function(){ setMenuGroup(null); },
+        onClose:function(){ setMenuGroup(null); }, trail:groupTrail,
         items:[
-          { label:"Work Schedule", onSelect:function(){ closeAllPopups(); setShowSchedule(true); } },
-          { label:"Tracking", onSelect:function(){ closeAllPopups(); setShowTracking(true); } }
+          { label:"Work Schedule", onSelect:function(){ closeAllPopups(); setShowSchedule(true); navOpen("schedule","time"); } },
+          { label:"Tracking", onSelect:function(){ closeAllPopups(); setShowTracking(true); navOpen("tracking","time"); } }
         ] }),
       menuGroup==="interface" && React.createElement(MenuGroupModal, { title:"Interface",
-        onClose:function(){ setMenuGroup(null); },
+        onClose:function(){ setMenuGroup(null); }, trail:groupTrail,
         items:[
-          { label:"Themes", onSelect:function(){ closeAllPopups(); setShowThemes(true); } },
-          { label:"Layout", onSelect:function(){ closeAllPopups(); setShowLayout(true); } }
+          { label:"Themes", onSelect:function(){ closeAllPopups(); setShowThemes(true); navOpen("themes","interface"); } },
+          { label:"Layout", onSelect:function(){ closeAllPopups(); setShowLayout(true); navOpen("layout","interface"); } }
         ] }),
-      showGuides && React.createElement(GuidesModal, { onClose:function(){ setShowGuides(false); } }),
-      showThemes && React.createElement(ThemesModal, { settings:settings, onChange:setSettings, onClose:function(){ setShowThemes(false); } }),
-      showLayout && React.createElement(LayoutModal, { settings:settings, onChange:setSettings, onClose:function(){ setShowLayout(false); } }),
-      showSchedule && React.createElement(WorkScheduleModal, { schedule:settings.workSchedule, openBreaks:openBreaksEd,
+      showGuides && React.createElement(GuidesModal, { trail:trailFor("guides"), onClose:function(){ setShowGuides(false); } }),
+      showThemes && React.createElement(ThemesModal, { trail:trailFor("themes"), settings:settings, onChange:setSettings, onClose:function(){ setShowThemes(false); } }),
+      showLayout && React.createElement(LayoutModal, { trail:trailFor("layout"), settings:settings, onChange:setSettings, onClose:function(){ setShowLayout(false); } }),
+      showSchedule && React.createElement(WorkScheduleModal, { trail:trailFor("schedule"), schedule:settings.workSchedule, openBreaks:openBreaksEd,
         onSave:function(sch){ setSettings(Object.assign({},settings,{workSchedule:sch})); setShowSchedule(false); setOpenBreaksEd(false); },
         onClose:function(){ setShowSchedule(false); setOpenBreaksEd(false); } }),
-      showTracking && React.createElement(TrackingModal, { settings:settings, onChange:setSettings,
+      showTracking && React.createElement(TrackingModal, { trail:trailFor("tracking"), settings:settings, onChange:setSettings,
         onClose:function(){ setShowTracking(false); } }),
       showEditPresets && React.createElement(EditDistPresetsModal, { presets:distPresets, onSave:function(items){ setDistPresets(items.length?items:DEFAULT_DIST_PRESETS); setShowEditPresets(false); }, onCancel:function(){ setShowEditPresets(false); } }),
       showTestConfirm && React.createElement(Modal, { title:"Leave Practice Board", onClose:function(){ setShowTestConfirm(false); },
