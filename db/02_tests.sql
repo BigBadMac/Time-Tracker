@@ -256,9 +256,22 @@ select tests.login(:F);
 select tests.ok(exists(select 1 from public.profiles where id = :A), 'you see the profiles of people in your orgs');
 select tests.login(:L);
 select tests.ok(not exists(select 1 from public.profiles where id = :F), 'not of strangers');
+select tests.ok(not exists(select 1 from public.profiles where id = :B), 'nor of people on projects you are not on');
 reset role;
 set role anon;
 select tests.refused('select * from public.projects', 'signed out, nothing is readable');
+select tests.refused('select public.create_project(''x'')', 'and no function can even be called');
+select tests.refused('select private.can_read(gen_random_uuid())', 'nor a permission helper');
+reset role;
+
+-- ------------------------------------------------- helpers kept private --
+set role authenticated;
+select tests.login(:F);
+select tests.ok(not exists(select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+                            where n.nspname = 'public' and p.proname in ('can_read','can_write','can_see_hours','is_org_member',
+                              'is_org_admin','my_membership','project_org','is_top_admin','in_branch','can_answer','join_by_link')),
+                'no permission helper sits in the API schema');
+select tests.refused('select private.join_by_link(null::public.share_links, ' || quote_literal(:F) || ')', 'join_by_link stays uncallable');
 reset role;
 
 \o

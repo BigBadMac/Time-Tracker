@@ -140,6 +140,173 @@ function saveTracked(key, list){
   }
 }
 
+// ---------------- The account: email-code sign-in (10-28) ----------------
+// The sandbox server is Supabase. Only its PUBLIC address and PUBLISHABLE key
+// live here - both are public by design; row-level security on the server is
+// what protects the data. The secret key and the database password never
+// appear in the app, in a chat or in git.
+//
+// Sign-in is a code by email (Brent, 10-28): no password. Nothing about the
+// board leaves the device yet - signing in only proves who you are and
+// records that you were here (touch_active). Sync comes later, behind ttDb.
+//
+// The session lives under ttacct_*, NOT tt_*: a backup file is every tt_ key,
+// and a backup must never carry sign-in tokens. ttacct_email outlives a sign
+// out - it is what makes "an account was set up on this device" true, so the
+// badge shows Zz (set up, not connected) rather than ? (never set up).
+var TT_CLOUD_URL = "https://giqeknvzfeznxouxegxk.supabase.co";
+var TT_CLOUD_KEY = "sb_publishable_a3wqVV8WuCzRZNALQ6V4xA_q-VFpJ3v";
+var TT_ACCT_SESSION = "ttacct_session", TT_ACCT_EMAIL = "ttacct_email";
+var TT_CLOUD_RECHECK_MS = 2*60000;     // back in view or online: check in again if older than this
+var TT_CLOUD_RETRY_MS = 60000;         // while in trouble, try again this often
+var TT_CODE_RESEND_S = 60;             // the server refuses a new code sooner than this
+// The badge's five states (Brent, 10-28):
+//   none     ?   no account has been set up on this device
+//   synced   ✓   signed in, and the last check-in with the server worked
+//   syncing  ↻   talking to the server right now
+//   trouble  !   online, but the server is not answering properly
+//   offline  Zz  an account is set up, but not connected: no internet, or signed out
+function ttCloudBadgeOf(s){
+  if(!s || s.phase==="none") return "none";
+  if(s.phase==="out" || !s.online) return "offline";
+  if(s.net==="busy") return "syncing";
+  if(s.net==="trouble") return "trouble";
+  return "synced";
+}
+// One controller for the whole app. env swaps the outside world for tests:
+// { fetch, store:{get,set,remove}, now, online, setTimeout, clearTimeout }.
+function ttCloudMake(env){
+  env=env||{};
+  function F(){ return env.fetch || (typeof fetch!=="undefined" ? fetch : null); }
+  var store=env.store || { get:ttDb.getRaw, set:ttDb.setRaw, remove:ttDb.remove };
+  function now(){ return env.now ? env.now() : Date.now(); }
+  function isOnline(){ if(env.online) return !!env.online(); try{ return typeof navigator==="undefined" || navigator.onLine!==false; }catch(e){ return true; } }
+  var later=env.setTimeout || (typeof setTimeout!=="undefined" ? setTimeout : function(){ return 0; });
+  var cancel=env.clearTimeout || (typeof clearTimeout!=="undefined" ? clearTimeout : function(){});
+  function readSession(){ try{ var v=JSON.parse(store.get(TT_ACCT_SESSION)||"null"); return v && v.access_token && v.refresh_token ? v : null; }catch(e){ return null; } }
+  var sess=readSession(), email=store.get(TT_ACCT_EMAIL)||(sess&&sess.email)||"";
+  var st={ phase:sess ? "in" : (email ? "out" : "none"), net:"idle", online:isOnline(), email:email,
+           okAt:0, triedAt:0, note:"", user:sess&&sess.user_id||null };
+  var subs=[], retryT=null, inflight=null;
+  function emit(patch){ st=Object.assign({}, st, patch||{}); subs.slice().forEach(function(fn){ try{ fn(st); }catch(e){} }); }
+  function keep(s){ sess=s; if(s) store.set(TT_ACCT_SESSION, JSON.stringify(s)); else store.remove(TT_ACCT_SESSION); }
+  // A request to the server. Resolves {status, body} for any HTTP answer and
+  // {status:0} when the request never got an answer (offline, blocked, DNS).
+  function call(path, body, token){
+    var f=F(); if(!f) return Promise.resolve({ status:0, body:null });
+    var h={ "apikey":TT_CLOUD_KEY, "Content-Type":"application/json" };
+    if(token) h["Authorization"]="Bearer "+token;
+    var p;
+    try{ p=f(TT_CLOUD_URL+path, { method:"POST", headers:h, body:JSON.stringify(body||{}) }); }
+    catch(e){ return Promise.resolve({ status:0, body:null }); }
+    return Promise.resolve(p).then(function(r){
+      return Promise.resolve(r.text ? r.text() : "").then(function(t){ var b=null; try{ b=t?JSON.parse(t):null; }catch(e){} return { status:r.status, body:b }; },
+                                                       function(){ return { status:r.status, body:null }; });
+    }, function(){ return { status:0, body:null }; });
+  }
+  function sessionFrom(b, mail){
+    var exp=b.expires_at ? b.expires_at*1000 : now()+(b.expires_in||3600)*1000;
+    return { access_token:b.access_token, refresh_token:b.refresh_token, expires_at:exp,
+             user_id:b.user&&b.user.id||null, email:(b.user&&b.user.email)||mail||"" };
+  }
+  // What a person reads when a request fails. Plain words, no codes unless
+  // nothing better is known.
+  function explain(r, during){
+    if(r.status===0) return "Can’t reach the server. Check your connection and try again.";
+    var code=r.body && (r.body.error_code||r.body.code), msg=String(r.body && (r.body.msg||r.body.message||r.body.error_description)||"");
+    if(r.status===429 || code==="over_email_send_rate_limit" || code==="over_request_rate_limit")
+      return "Too many codes asked for. Wait a minute, then try again.";
+    if(during==="verify" && (code==="otp_expired" || r.status===403 || /expired|invalid/i.test(msg)))
+      return "That code is wrong or has expired. Check it, or send a new one.";
+    if(during==="send" && (code==="validation_failed" || code==="email_address_invalid" || /email/i.test(msg)) && r.status<500)
+      return "That email address doesn’t look right.";
+    if(r.status>=500) return "The server isn’t answering properly right now. Try again in a minute.";
+    return "Something went wrong ("+r.status+"). Try again.";
+  }
+  function goodEmail(e){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(e||"").trim()); }
+  var api={
+    get:function(){ return st; },
+    badge:function(){ return ttCloudBadgeOf(st); },
+    subscribe:function(fn){ subs.push(fn); return function(){ subs=subs.filter(function(x){ return x!==fn; }); }; },
+    goodEmail:goodEmail,
+    sendCode:function(mail){
+      mail=String(mail||"").trim().toLowerCase();
+      if(!goodEmail(mail)) return Promise.resolve({ ok:false, msg:"That email address doesn’t look right." });
+      return call("/auth/v1/otp", { email:mail, create_user:true }).then(function(r){
+        if(r.status>=200 && r.status<300) return { ok:true };
+        return { ok:false, msg:explain(r, "send") };
+      });
+    },
+    verify:function(mail, code){
+      mail=String(mail||"").trim().toLowerCase(); code=String(code||"").replace(/\D/g,"");
+      if(code.length<6) return Promise.resolve({ ok:false, msg:"Enter the whole code from the email." });
+      return call("/auth/v1/verify", { type:"email", email:mail, token:code }).then(function(r){
+        if(r.status>=200 && r.status<300 && r.body && r.body.access_token){
+          var s=sessionFrom(r.body, mail); keep(s); store.set(TT_ACCT_EMAIL, s.email||mail);
+          emit({ phase:"in", email:s.email||mail, user:s.user_id, net:"idle", note:"" });
+          api.check();
+          return { ok:true };
+        }
+        return { ok:false, msg:explain(r, "verify") };
+      });
+    },
+    // Check in with the server: refresh the sign-in if it is about to lapse,
+    // then record that this person was here. Drives syncing / synced /
+    // trouble. A sign-in the server no longer accepts signs out (Zz).
+    check:function(){
+      if(st.phase!=="in" || !sess) return Promise.resolve(false);
+      if(!isOnline()){ emit({ online:false }); return Promise.resolve(false); }
+      if(inflight) return inflight;
+      if(retryT){ cancel(retryT); retryT=null; }
+      emit({ online:true, net:"busy", triedAt:now() });
+      function fail(r){
+        if(r.status===400 || r.status===401 || r.status===403){
+          keep(null); emit({ phase:"out", net:"idle", note:"Your sign-in ran out. Sign in again with a new code." });
+          return false;
+        }
+        emit({ net:"trouble", online:isOnline() });
+        retryT=later(function(){ retryT=null; api.check(); }, TT_CLOUD_RETRY_MS);
+        return false;
+      }
+      function touch(){
+        return call("/rest/v1/rpc/touch_active", {}, sess.access_token).then(function(r){
+          if(r.status>=200 && r.status<300){ emit({ net:"ok", okAt:now(), note:"" }); return true; }
+          if(r.status===401) return refresh().then(function(ok){ return ok ? call("/rest/v1/rpc/touch_active", {}, sess.access_token).then(function(r2){
+              if(r2.status>=200 && r2.status<300){ emit({ net:"ok", okAt:now(), note:"" }); return true; } return fail(r2); }) : false; });
+          return fail(r);
+        });
+      }
+      function refresh(){
+        return call("/auth/v1/token?grant_type=refresh_token", { refresh_token:sess.refresh_token }).then(function(r){
+          if(r.status>=200 && r.status<300 && r.body && r.body.access_token){ keep(sessionFrom(r.body, st.email)); return true; }
+          fail(r); return false;
+        });
+      }
+      var soon=sess.expires_at && sess.expires_at-now() < 60000;
+      inflight=(soon ? refresh().then(function(ok){ return ok ? touch() : false; }) : touch())
+        .then(function(v){ inflight=null; return v; }, function(){ inflight=null; return fail({ status:0 }); });
+      return inflight;
+    },
+    signOut:function(){
+      var tok=sess && sess.access_token;
+      if(retryT){ cancel(retryT); retryT=null; }
+      keep(null); emit({ phase:"out", net:"idle", note:"" });
+      if(tok) call("/auth/v1/logout?scope=local", {}, tok);   // best effort: the device forgets either way
+      return Promise.resolve(true);
+    },
+    // The world changed: back online, back in view. Check in when it has been
+    // a while, or straight away when the last try failed.
+    poke:function(){
+      var on=isOnline();
+      if(on!==st.online) emit({ online:on });
+      if(!on || st.phase!=="in") return;
+      if(st.net==="trouble" || now()-Math.max(st.okAt, st.triedAt) > TT_CLOUD_RECHECK_MS) api.check();
+    }
+  };
+  return api;
+}
+var ttCloud = ttCloudMake(null);
+
 // ---------------- Backup & restore ----------------
 // Every app key is tt_-prefixed, so a backup is simply every tt_* key with its
 // raw (already-JSON) string value. Modules that store under tt_mod_* later
@@ -387,6 +554,8 @@ function resetApply(sel, storage){
   }
   if(sel.projects){
     ["tt_projects","tt_laneorder","tt_lanemeta","tt_lanecollapse","tt_cardcollapse"].forEach(function(k){ storage.removeItem(k); });
+    // their reminders go with them (11-12)
+    ["tt_remind_fired","tt_remind_away"].forEach(function(k){ storage.removeItem(k); });
   } else if((sel.ticks || sel.archive) && storage.getItem("tt_projects")!=null){
     var ps=get("tt_projects", []);
     if(sel.archive){
@@ -1740,6 +1909,7 @@ function laneColors(){ return S.lanes || LANE_COLORS; }
 function applyTokens(settings){
   if(!LANE_INDEX.__built){ buildLaneIndex(); LANE_INDEX.__built=true; }
   TIME_INC = settings.timeInc==="tenths" ? "tenths" : "standard";
+  REMIND_CFG = normalizeRemind(settings.remind); REMIND_SCHED = settings.workSchedule||null;
   var sch = SCHEMES[schemeKeyOf(settings)] || SCHEMES["bright-pastels"];
   var mode = settings.mode==="light" ? "light" : "dark";
   var c = sch[mode];
@@ -1829,6 +1999,9 @@ function GearSVG(props){
 // Entries: ["p", d, width] path, ["c", cx, cy, r, width] circle,
 //          ["r", x, y, w, h, rx, width] rect.
 var MENU_GLYPHS = {
+  // The account's cloud (10-28), bare: the sheet title's glyph. The live badge
+  // with its marks is CloudBadge.
+  cloud: [["p","M9 21.5H19.5a4.5 4.5 0 0 0 .6-8.96A6.5 6.5 0 0 0 7.6 13.4 4.1 4.1 0 0 0 9 21.5Z",2.5]],
   // A plus in a ring, rather than a bare plus that reads as a maths symbol.
   add: [["c",14,14,10.5,2.5], ["p","M14 9V19 M9 14H19",2.5]],
   // A road running to the horizon. The dashes shorten, their gaps tighten and
@@ -1891,7 +2064,7 @@ var MODAL_GLYPHS = {
   "Edit Project":"project", "Edit Task":"task", "Add Task":"task",
   "Edit Lanes":"lanes", "Time Settings":"clock",
   "Interface":"interface", "Day Summary":"summary", "Reports":"reports",
-  "Archive":"archive", "Backup & Saves":"backup", "Extensions":"extensions",
+  "Archive":"archive", "Backup & Saves":"backup", "Extensions":"extensions", "Account":"cloud",
   "Leave Practice Board":"test", "Start Break":"break",
   "User Manual":"manual", "Guides":"manual"
 };
@@ -2110,6 +2283,67 @@ function breakBarEl(leftMs, limit, mirror){
   return React.createElement("span", { "data-breakbar":state, "data-breakbarside":side, "data-breakbarpct":Math.round(frac*100), "aria-hidden":"true" },
     track, React.createElement("span", { key:"f", "data-barpulse":full ? "1" : undefined, style:Object.assign({}, base, fill) }));
 }
+// ---- The account badge (Brent, 10-28: look A, the cloud) ----
+// One cloud, five marks, the theme's own colours. Only the mark moves; the
+// cloud never does, and the box is the same size in every state.
+//   ?  grey     fades in, grows and shrinks (six seconds), holds, fades out - a 10s cycle, always
+//   ✓  green    draws itself in when a check-in succeeds, holds ~12s, fades,
+//               leaving the plain green cloud (synced, at rest). If the state
+//               changes while it shows, it fades out first.
+//   ↻  blue     two arcs turn while syncing
+//   !  yellow   waggles three times when trouble starts, then holds
+//   Zz red      drift up three times on going offline, then hold
+// All motion stops under the phone's Reduce Motion setting (CSS in App).
+var CLOUD_PATH = "M9 21.5H19.5a4.5 4.5 0 0 0 .6-8.96A6.5 6.5 0 0 0 7.6 13.4 4.1 4.1 0 0 0 9 21.5Z";
+var CLOUD_CHECK_MS = 13400;     // draw + hold + fade, as the CSS plays it
+var CLOUD_WORDS = { none:"Account not set", synced:"Signed in", syncing:"Syncing", trouble:"Connection trouble", offline:"Offline" };
+function cloudCol(state){
+  return state==="synced" ? S.successText : state==="syncing" ? S.actionText : state==="trouble" ? S.warnText
+       : state==="offline" ? S.dangerText : S.textDim;
+}
+function CloudGlyph(props){
+  var state=props.state||"none", size=props.size||20, col=props.col||cloudCol(state);
+  var P=function(d, extra){ return React.createElement("path", Object.assign({ d:d }, extra||{})); };
+  var mark=null;
+  if(state==="none") mark=React.createElement("g", { "data-cloudmark":"q" },
+      P("M12 13a2.2 2.2 0 1 1 3.1 2c-.7.3-1.1.8-1.1 1.5v.2"), P("M14 18.9v0"));
+  else if(state==="synced") mark=props.check ? P("M10.5 16.5l2.4 2.4 4.6-4.6", { pathLength:1, "data-cloudmark":props.check }) : null;
+  else if(state==="syncing") mark=React.createElement("g", { "data-cloudmark":"spin" },
+      P("M10.9 15.6a3.2 3.2 0 0 1 5.6-1.6"), P("M17.1 17.4a3.2 3.2 0 0 1-5.6 1.6"));
+  else if(state==="trouble") mark=React.createElement("g", { "data-cloudmark":"nudge" }, P("M14 13.2v3.3"), P("M14 19.4v0"));
+  else if(state==="offline") mark=React.createElement("g", null,
+      P("M9.8 15.2h3.4l-3.4 3.4h3.4", { strokeWidth:2.2, "data-cloudmark":"z1" }),
+      P("M15.4 12.9h2.5l-2.5 2.5h2.5", { strokeWidth:1.9, "data-cloudmark":"z2" }));
+  return React.createElement("svg", { width:size, height:size, viewBox:"0 0 28 28", fill:"none", stroke:col, strokeWidth:2.5,
+      strokeLinecap:"round", strokeLinejoin:"round", "aria-hidden":"true", style:{ overflow:"visible", display:"block" } },
+    P(CLOUD_PATH), mark);
+}
+// The live badge. It keeps the check's timing and the fade-out before a
+// change; everything else is the glyph for the state.
+function CloudBadge(props){
+  var state=props.state||"none", okAt=props.okAt||0;
+  var shownS=useState(state); var shown=shownS[0], setShown=shownS[1];
+  var leaveS=useState(false); var leaving=leaveS[0], setLeaving=leaveS[1];
+  var tickS=useState(0); var setTick=tickS[1];
+  var checkOn=function(){ return okAt>0 && Date.now()-okAt < CLOUD_CHECK_MS; };
+  useEffect(function(){
+    if(state===shown) return;
+    if(shown==="synced" && checkOn()){
+      setLeaving(true);
+      var t=setTimeout(function(){ setLeaving(false); setShown(state); }, 500);
+      return function(){ clearTimeout(t); };
+    }
+    setLeaving(false); setShown(state);
+  }, [state]);
+  // Once the check has faded, draw the plain cloud from then on.
+  useEffect(function(){
+    if(shown!=="synced" || !checkOn()) return;
+    var t=setTimeout(function(){ setTick(function(n){ return n+1; }); }, Math.max(0, CLOUD_CHECK_MS-(Date.now()-okAt))+50);
+    return function(){ clearTimeout(t); };
+  }, [shown, okAt]);
+  var check=shown==="synced" && checkOn() ? (leaving ? "chkout" : "chk") : null;
+  return React.createElement(CloudGlyph, { key:shown+":"+(check?okAt:0), state:shown, size:props.size, check:check });
+}
 function HeaderTicker(props){
   var interrupting=props.interrupting, activeProj=props.activeProj, intElapsed=props.intElapsed;
   var wsActive=props.wsActive, elapsed=props.elapsed, onBreak=props.onBreak, breakLabel=props.breakLabel;
@@ -2135,8 +2369,10 @@ function HeaderTicker(props){
     );
   } else if(activeProj){
     tickerStatus = React.createElement("span", { style:{display:"flex",alignItems:"center",gap:"0.5rem",minWidth:0} },
-      React.createElement("span", { style:{color:wsActive?wsActive.accent:S.text,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap"} }, activeProj.name),
-      React.createElement(Mono, { style:{color:wsActive?wsActive.accent:S.text,fontWeight:500,fontSize:"0.8rem",whiteSpace:"nowrap"} }, fmtDur(elapsed,true))
+      // A long name shortens with an ellipsis: the time and the Break tag
+      // always stay readable (10-28 - a long name used to run under the tag).
+      React.createElement("span", { "data-hdrjob":true, style:{color:wsActive?wsActive.accent:S.text,fontWeight:700,fontSize:"0.85rem",whiteSpace:"nowrap",minWidth:0,overflow:"hidden",textOverflow:"ellipsis"} }, activeProj.name),
+      React.createElement(Mono, { style:{color:wsActive?wsActive.accent:S.text,fontWeight:500,fontSize:"0.8rem",whiteSpace:"nowrap",flexShrink:0} }, fmtDur(elapsed,true))
     );
   } else if(onBreak){
     // Just "On Break": a long break name pushed the End tag off the screen
@@ -2176,6 +2412,9 @@ function HeaderTicker(props){
     padding:hdrBottom ? "0.25rem 1rem calc(0.25rem + max("+HDR_FOOT+"px, env(safe-area-inset-bottom, 0px)))" : "0.25rem 0.85rem",minHeight:"28px",background:S.bg2,borderBottom:hdrBottom?"none":"1px solid "+S.border,boxShadow:hdrBottom?"inset 0 1px 0 "+S.border:"none",overflow:"hidden",whiteSpace:"nowrap"} },
     // Left-handed (Brent, 10-22): the Break / End button leads the line, at
     // the left edge under the thumb; it does what the status line does.
+    // The account badge sits at the outer end of the line: far right, or far
+    // left when left-handed (Brent, 10-28).
+    props.cloud && mirror && props.cloud,
     tag && mirror && React.createElement("span", { "data-breaktag":tag, "data-breaktagside":"left", onClick:props.onStatusTap, role:"button",
         style:Object.assign({}, tagStyle, { marginLeft:0, cursor:"pointer" }) }, tag+" \u203A"),
     tickerDate, tickerTime,
@@ -2189,7 +2428,8 @@ function HeaderTicker(props){
                     : {display:"flex",alignItems:"center",flex:1,minWidth:0,overflow:"hidden"} },
       tickerStatus,
       props.overNote && React.createElement(Mono, { "data-breakovernote":true, style:{color:S.warnText,fontWeight:800,fontSize:"0.78rem",whiteSpace:"nowrap",flexShrink:0} }, props.overNote),
-      tag && !mirror && React.createElement("span", { "data-breaktag":tag, "data-breaktagside":"right", style:tagStyle }, tag+" \u203A"))
+      tag && !mirror && React.createElement("span", { "data-breaktag":tag, "data-breaktagside":"right", style:tagStyle }, tag+" \u203A")),
+    props.cloud && !mirror && props.cloud
   );
 
 }
@@ -2239,6 +2479,8 @@ var HELP_PICTURES = {
         text:"Always the current day and time." },
       { anchor:'[data-anchor="hdr-status"]', side:"above", label:"What is happening",
         text:"The job that is running and how long it has run. On a break it says so, and with nothing running it reads No Activity." },
+      { anchor:'[data-anchor="hdr-cloud"]', side:"above", label:"Your account",
+        text:"A question mark until an account is set up. A green tick when you are signed in, blue arrows while it talks to the server, a yellow warning when the server isn\u2019t answering, and a sleeping cloud when you are offline or signed out. Tap it to open your account.", guide:"signin" },
       { anchor:'[data-anchor="hdr-disrupt"]', side:"below", label:"Disruption",
         text:"Log an interruption. While one is running this reads Resume.", guide:"disrupt" },
       { anchor:'[data-anchor="hdr-clock"]', side:"below", label:"Clock in and out",
@@ -2424,6 +2666,32 @@ var HELP_GUIDES = {
       { stage:{ kind:"shiftask", ot:true }, ring:"[data-shiftchoice]", side:"right", title:"A day off asks one more thing",
         text:"Working a day that is not on your schedule? Say whether it is regular time or overtime. Reports uses that answer for pay." }
     ] },
+  signin: { title:"Sign in to your account", covers:["Account"],
+    steps:[
+      { stage:{ kind:"account", step:"email" }, ring:'[data-anchor="acct-email"]', side:"below", title:"Your email",
+        text:"Account is the last row in the menu; the cloud at the end of the top bar opens it too. Type your email and tap Send code." },
+      { stage:{ kind:"account", step:"code" }, ring:'[data-anchor="acct-code"]', side:"below", title:"The code from the email",
+        text:"A short code arrives by email. Type it in, or tap the suggestion above the keyboard. There is no password to remember. No email? Look in spam, or send a new code after a minute." },
+      { stage:{ kind:"account", step:"in" }, ring:'[data-anchor="acct-who"]', side:"below", title:"Signed in",
+        text:"The sheet shows who you are signed in as and whether the app can reach the server. Signing in sends nothing from your board yet; sharing comes later." },
+      { stage:{ kind:"account", step:"in" }, ring:'[data-anchor="acct-signout"]', side:"above", title:"Sign out",
+        text:"Signs this device out and leaves the board here untouched. The cloud then sleeps until you sign in again." }
+    ] },
+  reminders: { title:"Reminders & nudges", covers:["Reminders & nudges"],
+    steps:[
+      { stage:{ kind:"remind" }, ring:'[data-reminddue]', side:"below", title:"Before it ends",
+        text:"Edit a project with an end date and look under Remind me. The switch reminds you before it ends, at the times your default sets. Milestone steps have the same switch, for before each one is due." },
+      { stage:{ kind:"remind" }, ring:'[data-remindchange]', side:"below", title:"Change it for this one",
+        text:"Change picks other times for this record only: at the time, an hour before, the start of that shift, a day before or a week before. Pick My default to follow Time Settings again." },
+      { stage:{ kind:"remind" }, ring:'[data-reminderadd]', side:"above", title:"Your own reminders",
+        text:"Add a reminder for anything about the project: a call to make, a part to order. Each one has its own name, time and repeat, and opens again to edit." },
+      { stage:{ kind:"reminder" }, ring:'[data-anchor="set-reminderwhen"]', side:"below", title:"When it goes off",
+        text:"A date and time, the start of your shift, or just before your shift ends. The shift ones follow your Work Schedule, so move the shift and the reminder moves with it. Repeat it daily, on workdays or weekly, or just once." },
+      { stage:{ kind:"away" }, ring:"[data-awayitem]", side:"below", title:"While you were away",
+        text:"Reminders go off while the app is open. Any that came due while it was closed wait in this list when you come back, and the app icon shows how many. Open takes you to the project." },
+      { stage:{ kind:"remindsettings" }, ring:"[data-nudge]", side:"above", title:"Defaults and nudges",
+        text:"Tracking, in Time Settings, has a Reminders and nudges section: the default times, holding reminders until your shift starts, and nudges when you forget to clock in, leave a job running at the end of the shift, run one job long, or stay clocked in after the shift." }
+    ] },
   backup: { title:"Back up, save and start over", covers:["Backup & Saves"],
     steps:[
       { stage:{ kind:"backup", only:"auto" }, ring:'[data-anchor="saves-auto"]', side:"below", title:"Automatic backups",
@@ -2542,9 +2810,9 @@ var HELP_INDEX = [
       ["guide","collapse"],["guide","outline"],["guide","milestone"],["guide","finish"]] },
   { id:"day", topic:"My day: clock, breaks, disruptions", items:[["guide","clock"],["guide","breaks"],["guide","disrupt"],["guide","night"]] },
   { id:"time", topic:"Time Settings", items:[["picture","schedule"],["picture","paywork"],["picture","unpaid"],["picture","tracking"],
-      ["guide","setschedule"],["guide","setpay"],["guide","setunpaid"],["guide","night"]] },
+      ["guide","setschedule"],["guide","setpay"],["guide","setunpaid"],["guide","night"],["guide","reminders"]] },
   { id:"reports", topic:"Reports & records", items:[["picture","reports"],["picture","summary"],["picture","archive"]] },
-  { id:"data", topic:"Your data", items:[["guide","backup"]] },
+  { id:"data", topic:"Your data", items:[["guide","backup"],["guide","signin"]] },
   { id:"look", topic:"Look & add-ons", items:[["picture","themes"],["picture","layout"],["picture","extensions"]] },
   { id:"practice", topic:"Practise", flat:true, items:[["practice","gestures"]] }
 ];
@@ -2744,6 +3012,29 @@ function helpStageEl(stage, on){
   // The real module registry; a staged sheet only reads it.
   if(stage.kind==="extensions")
     return React.createElement(ExtensionsModal, { onClose:nop, onChange:nop });
+  // Remind me on a project with an end, and two reminders of its own.
+  if(stage.kind==="remind")
+    return React.createElement("div", { style:{ background:S.bg2||S.bg1, padding:"0.9rem", borderRadius:S.radius2 } },
+      React.createElement(RemindBlock, { hasDue:true, rule:null, onRule:nop, onReminders:nop,
+        reminders:[{ id:"hr1", label:"Call the supplier", when:"at", at:(function(){ var d=new Date(); d.setDate(d.getDate()+2); d.setHours(9,0,0,0); return d.getTime(); })(), repeat:"once" },
+                   { id:"hr2", label:"Check the seal stock", when:"shiftStart", repeat:"weekly" }] }));
+  if(stage.kind==="reminder")
+    return React.createElement(ReminderModal, { reminder:{ id:"hr2", label:"Check the seal stock", when:"shiftStart", repeat:"weekly" }, onSave:nop, onDelete:nop, onCancel:nop });
+  if(stage.kind==="remindsettings")
+    return React.createElement("div", { style:{ background:S.bg2||S.bg1, padding:"0.9rem", borderRadius:S.radius2 } },
+      React.createElement(RemindSettings, { value:null, onChange:nop,
+        sectionHead:{fontSize:"0.78rem",textTransform:"uppercase",letterSpacing:"0.08em",color:S.textDim,fontWeight:700,marginBottom:"0.35rem"},
+        note:{fontSize:"0.8rem",color:S.textDim,marginBottom:"0.7rem"} }));
+  if(stage.kind==="away"){
+    var a0=Date.now()-14*3600000;
+    return React.createElement(AwayModal, { onOpen:nop, onDone:nop, items:[
+      { key:"h1", title:"Line 4 Rebuild is due tomorrow", body:"Line 4 Rebuild", pid:101, at:a0 },
+      { key:"h2", title:"Call the supplier", body:"Line 4 Rebuild", pid:101, at:a0+2*3600000 },
+      { key:"h3", title:"Frame up is due now", body:"Install new workbench \u00b7 at the time", pid:103, at:a0+5*3600000 },
+      { key:"h4", title:"Check the seal stock", body:"Line 4 Rebuild", pid:101, at:a0+12*3600000 }] });
+  }
+  if(stage.kind==="account")
+    return React.createElement(AccountModal, { demo:stage.step||"email", onClose:nop });
   if(stage.kind==="reports")
     return React.createElement(ReportsModal, { logs:TEST_LOGS, projects:P, disruptions:TEST_DIST, breaks:TEST_BREAKS,
       laneMeta:TEST_META, laneOrder:TEST_ORDER, schedule:null, testMode:true, liveLogs:[], initialKind:"week", onClose:nop });
@@ -2764,7 +3055,9 @@ function helpStageEl(stage, on){
     return React.createElement("div", { style:{ background:S.bg1 } },
       React.createElement(HeaderTicker, { interrupting:false, activeProj:job, intElapsed:0,
         wsActive:getMeta(TEST_META, job.lane), elapsed:25*60000, onBreak:false, breakLabel:"", breakElapsed:0,
-        clocked:true, atWorkElapsed:3*3600000+20*60000, nowTick:Date.now(), bottom:false }),
+        clocked:true, atWorkElapsed:3*3600000+20*60000, nowTick:Date.now(), bottom:false,
+        cloud:React.createElement("span", { "data-anchor":"hdr-cloud", style:{flexShrink:0,width:"20px",height:"20px",display:"inline-flex"} },
+          React.createElement(CloudGlyph, { state:"synced", size:20 })) }),
       React.createElement("div", { style:{display:"flex",flexDirection:"row-reverse",alignItems:"stretch",background:S.bg1,borderBottom:"2px solid "+S.border,padding:"0.5rem 0.75rem",gap:"0.5rem"} },
         React.createElement("div", { style:{position:"relative",flex:"0 0 64px"} }, React.createElement(HeaderMenuButton, { open:false, onClick:nop })),
         React.createElement(ClockButton, { clocked:true, onClick:nop, sub:fmtDur(3*3600000+20*60000,true) }),
@@ -2828,10 +3121,10 @@ var HELP_CARD_W = 366, HELP_SHEET_W = 390, HELP_MARK = 22;
 var HELP_STAGE_FULL = { full:true };
 var HELP_STAGE_W = { paywork:400, unpaid:400, card:366, close:390, header:366, presets:300, headerfull:390, msline:366,
                      schedule:470, shiftask:390, backup:390, outline:390, msedit:400, msstep:390, reports:400,
-                     themes:400, layout:400, summary:400, archive:390, extensions:390, tracking:400, breaks:390, ticker:390 };
+                     themes:400, layout:400, summary:400, archive:390, extensions:390, tracking:400, breaks:390, ticker:390, account:390, remind:366, reminder:390, away:390, remindsettings:390 };
 // Kinds that stage a whole sheet: measured off the staged panel, not the content.
 var HELP_SHEETS = { paywork:true, unpaid:true, close:true, schedule:true, shiftask:true, backup:true, outline:true, msedit:true, msstep:true, reports:true,
-                    themes:true, layout:true, summary:true, archive:true, extensions:true, tracking:true, breaks:true };
+                    themes:true, layout:true, summary:true, archive:true, extensions:true, tracking:true, breaks:true, account:true, reminder:true, away:true };
 function HelpStage(props){
   // A module's stage never reads the core's tables - its kinds are its own and
   // could share a name with a core kind. Every module screen is a sheet
@@ -3429,10 +3722,13 @@ function ProjectForm(props){
   var endDate=endDateS[0]; var setEndDate=endDateS[1];
   var endTimeS = useState(function(){ return tsTimeStr(projEnd(project)); });
   var endTime=endTimeS[0]; var setEndTime=endTimeS[1];
+  // Reminders (11-12): the rule for its end date, and its own reminders.
+  var remindDueS = useState(project ? (project.remindDue||null) : null); var remindDue=remindDueS[0], setRemindDue=remindDueS[1];
+  var remindersS = useState(project ? (project.reminders||[]) : []); var reminders=remindersS[0], setReminders=remindersS[1];
   // The way back (10-27): an editor can carry a trail - for Edit Project /
   // Edit Task, where the record sits (Brent: option B, the trail IS the
   // location). Leaving by it with edits asks first.
-  var formSnap=JSON.stringify([name,lane,notes,parentId,kind,role,startMode,startDate,startTime,endDate,endTime]);
+  var formSnap=JSON.stringify([name,lane,notes,parentId,kind,role,startMode,startDate,startTime,endDate,endTime,remindDue,reminders]);
   var formSnap0=useRef(formSnap);
   var leavePFS=useState(null); var leavePF=leavePFS[0], setLeavePF=leavePFS[1];
   // A select hands back a string; project ids are numbers, and every child
@@ -3479,7 +3775,8 @@ function ProjectForm(props){
     // from finite clears one rather than leaving it behind to reappear later.
     var out={ name:name.trim(), notes:notes.trim(), kind:kind,
               startAt: startMode==="now" ? Date.now() : joinDateTime(startDate, startTime),
-              endAt: kind==="finite" ? joinDateTime(endDate, endTime) : null };
+              endAt: kind==="finite" ? joinDateTime(endDate, endTime) : null,
+              remindDue: remindDue||null, reminders: reminders };
     // With the placement controls hidden these keys are omitted entirely
     // rather than written back unchanged, so the panel cannot overwrite an
     // arrangement the outline is still holding.
@@ -3594,6 +3891,14 @@ function ProjectForm(props){
               : (pickedEnd!=null ? "Ends "+fmtDate(pickedEnd)+" at "+fmtTime(pickedEnd)
                                  : "Optional. Leave it empty if the end is not fixed yet.")))
       ),
+      React.createElement(RemindBlock, { hasDue:kind==="finite" && pickedEnd!=null, dueWord:"Before it ends",
+        noDueHint: kind==="finite" ? "Set an end date to be reminded before it ends." : null,
+        rule:remindDue, onRule:setRemindDue, reminders:reminders, onReminders:setReminders,
+        // The sub-sheets carry the whole way back: this record last, and
+        // every step before it through the same unsaved-edits question.
+        trail:(props.trail && props.trail.length) ? props.trail.map(function(it){ return { label:it.label, go:function(){
+            if(formSnap===formSnap0.current) it.go(); else setLeavePF({ go:it.go }); } }; })
+          .concat([{ label:props.trailHere||name||noun, go:null }]) : null }),
       React.createElement("div", null,
         React.createElement("label", { style:LABEL_STYLE }, "Notes"),
         React.createElement("textarea", { value:notes, onChange:function(e){ setNotes(e.target.value); }, placeholder:"Optional details", rows:2, style:Object.assign({},INPUT_STYLE,{resize:"vertical"}) })
@@ -4897,6 +5202,7 @@ function MilestoneStepModal(props){
   var tgtS=useState((step.targets||[]).map(function(t){ return t.id; })); var setTgt=tgtS[1]; var tgt=tgtS[0];
   var doneS=useState(step.doneAt||null); var setDone=doneS[1]; var done=doneS[0];
   var noteS=useState(step.note||""); var setNote=noteS[1]; var note=noteS[0];
+  var remindS=useState(step.remind||null); var remind=remindS[0], setRemind=remindS[1];
   // Holding the mark opens a sheet to set WHEN it was met. A mark made after
   // the fact would otherwise record the tap, not the moment, and turn an
   // on-time step amber for no reason.
@@ -4907,7 +5213,7 @@ function MilestoneStepModal(props){
   function submit(){
     if(!ok) return;
     onSave(Object.assign({}, step, { id:step.id||uid(), label:label.trim(), dueAt:dueAt,
-      targets:tgt.map(function(id){ return { kind:"project", id:id }; }), doneAt:done, note:note.trim() }));
+      targets:tgt.map(function(id){ return { kind:"project", id:id }; }), doneAt:done, note:note.trim(), remind:remind||null }));
   }
   // A hand mark, for expectations the app cannot see. Whichever comes first -
   // the mark or the last target closing - is the actual. It rides in the
@@ -4949,6 +5255,8 @@ function MilestoneStepModal(props){
           // that flex cannot shrink past, and the row ran off the sheet.
           React.createElement("input", { "data-msdate":true, type:"date", value:date, onChange:function(e){ setDate(e.target.value); }, style:Object.assign({},INPUT_STYLE,{flex:1.4,minWidth:0}) }),
           React.createElement("input", { "data-mstime":true, type:"time", value:time, onChange:function(e){ setTime(e.target.value); }, style:Object.assign({},INPUT_STYLE,{flex:1,minWidth:0}) }))),
+      React.createElement(RemindBlock, { hasDue:dueAt!==null && !done, dueWord:"Before it\u2019s due", own:false,
+        noDueHint: done ? "Met, so nothing to remind you about." : null, rule:remind, onRule:setRemind }),
       // The expectation: which records under this project should be closed
       // out by then. The step becomes actual when the last of them closes.
       records.length>0 && React.createElement("div", null,
@@ -4974,6 +5282,150 @@ function MilestoneStepModal(props){
     // A sibling of the step sheet, never inside it.
     when && React.createElement(MilestoneWhenModal, { when:when,
       onSave:function(ms){ setDone(ms); setWhen(null); }, onCancel:function(){ setWhen(null); } }));
+}
+// ---- Reminders in the editors (11-12, layout R3) ----
+// An on/off switch in the success colour (Brent's R3 mock).
+function OnSwitch(props){
+  var on=!!props.on;
+  return React.createElement("button", { "data-flat":true, role:"switch", "aria-checked":on?"true":"false",
+      "data-onswitch":props.name||true, onClick:function(){ haptic(8); props.onChange(!on); },
+      style:{flexShrink:0,width:"46px",height:"26px",borderRadius:"13px",position:"relative",cursor:"pointer",padding:0,
+             background:on?S.successBg:S.bg2, border:"1.5px solid "+(on?S.successText:S.border)} },
+    React.createElement("span", { style:{position:"absolute",top:"2.5px",left:on?"22px":"3px",width:"18px",height:"18px",
+      borderRadius:"50%",background:on?S.successText:S.textMuted,transition:"left 0.15s"} }));
+}
+// Tap-to-pick chips. single: exactly one stays picked.
+function ChipPick(props){
+  var opts=props.options, val=props.value||[], single=!!props.single;
+  return React.createElement("div", { "data-chips":props.name||true, style:{display:"flex",flexWrap:"wrap",gap:"0.4rem"} },
+    opts.map(function(o){
+      var k=o[0], on=val.indexOf(k)>=0;
+      return React.createElement("button", { key:k, "data-flat":true, "data-chip":k, "aria-pressed":on?"true":"false",
+        onClick:function(){ haptic(8); props.onChange(single ? [k] : (on ? val.filter(function(x){ return x!==k; }) : val.concat([k]))); },
+        style:{padding:"0.45rem 0.75rem",borderRadius:"999px",cursor:"pointer",fontFamily:S.fontBody,fontWeight:700,fontSize:"0.82rem",
+               background:on?S.infoBg:S.bg1, border:"1.5px solid "+(on?S.actionBdr:S.border), color:on?S.infoText:S.textDim} },
+        (on?"✓ ":"")+o[1]);
+    }));
+}
+// Timing for one record: follow the default, or pick its own chips.
+function RemindTimingModal(props){
+  var rule=props.rule||null;
+  var modeS=useState(rule && Array.isArray(rule.chips) ? "own" : "default"); var mode=modeS[0], setMode=modeS[1];
+  var chipsS=useState(rule && Array.isArray(rule.chips) ? rule.chips.slice() : REMIND_CFG.due.slice()); var chips=chipsS[0], setChips=chipsS[1];
+  function save(){ props.onSave(mode==="default" ? null : { chips:chips }); }
+  return React.createElement(Modal, { title:"Reminder timing", trail:props.trail, trailHere:"Timing", onClose:props.onCancel,
+      onSave:save, saveLabel:"Save", saveAnchor:"remind-timing-save" },
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.8rem"} },
+      React.createElement(Toggle, { name:"remindmode", keys:["default","own"], value:mode,
+        labelOf:function(k){ return k==="default" ? "My default" : "Just this one"; }, onChange:setMode }),
+      // One box, the same height either way, so nothing below it jumps.
+      React.createElement("div", { "data-remindtiming":mode, style:{minHeight:"7.6rem"} },
+        mode==="default"
+          ? React.createElement("div", { style:{fontSize:"0.88rem",color:S.textDim,lineHeight:1.45,fontFamily:S.fontBody} },
+              "Reminds you ", React.createElement("b", { style:{color:S.text} }, remindWords(REMIND_CFG.due)),
+              ". Change the default in Time Settings › Tracking.")
+          : React.createElement(ChipPick, { name:"remindown", options:REMIND_CHIPS, value:chips, onChange:setChips }))));
+}
+// One reminder of your own.
+function ReminderModal(props){
+  var r=props.reminder||{}, isNew=!r.id;
+  var labelS=useState(r.label||""); var label=labelS[0], setLabel=labelS[1];
+  var whenS=useState(r.when||"at"); var when=whenS[0], setWhen=whenS[1];
+  var base=r.at>0 ? r.at : (function(){ var d=new Date(); d.setDate(d.getDate()+1); d.setHours(9,0,0,0); return d.getTime(); })();
+  var dS=useState(toDateInput(base)); var d=dS[0], setD=dS[1];
+  var tS=useState(toTimeInput(base)); var t=tS[0], setT=tS[1];
+  var repS=useState(r.repeat||"once"); var rep=repS[0], setRep=repS[1];
+  var at=when==="at" ? joinDateTime(d, t) : null;
+  var ok=!!label.trim() && (when!=="at" || at!==null);
+  function save(){
+    if(!ok) return;
+    props.onSave(Object.assign({}, r, { id:r.id||uid(), label:label.trim(), when:when, at:when==="at" ? at : null,
+      repeat:rep, created:r.created||Date.now() }));
+  }
+  var hint={fontSize:"0.76rem",color:S.textMuted,lineHeight:1.4,fontFamily:S.fontBody};
+  return React.createElement(Modal, { title:isNew ? "New reminder" : "Reminder", trail:props.trail, trailHere:"Reminder", onClose:props.onCancel,
+      onSave:save, saveLabel:"Save", saveAnchor:"reminder-save" },
+    React.createElement("div", { style:{display:"flex",flexDirection:"column",gap:"0.85rem"} },
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "What"),
+        React.createElement("input", { "data-reminderlabel":true, value:label, placeholder:"What to remind you about",
+          onChange:function(e){ setLabel(e.target.value); }, style:INPUT_STYLE })),
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "When"),
+        React.createElement(Toggle, { name:"reminderwhen", keys:["at","shiftStart","shiftEnd"], value:when,
+          labelOf:function(k){ return k==="at" ? "Date & time" : k==="shiftStart" ? "Shift start" : "Shift end"; }, onChange:setWhen }),
+        // fixed height: the fields, or a line saying how the shift ones work
+        React.createElement("div", { style:{minHeight:"3.4rem",marginTop:"0.5rem"} },
+          when==="at"
+            ? React.createElement("div", { style:{display:"flex",gap:"0.5rem"} },
+                React.createElement("input", { "data-reminderdate":true, type:"date", value:d, onChange:function(e){ setD(e.target.value); }, style:Object.assign({},INPUT_STYLE,{flex:1.4,minWidth:0}) }),
+                React.createElement("input", { "data-remindertime":true, type:"time", value:t, onChange:function(e){ setT(e.target.value); }, style:Object.assign({},INPUT_STYLE,{flex:1,minWidth:0}) }))
+            : React.createElement("div", { style:hint },
+                when==="shiftStart" ? "At the start of your next shift. It follows your Work Schedule: move the shift and the reminder moves with it."
+                                    : REMIND_SHIFT_END_LEAD+" minutes before your shift ends. It follows your Work Schedule: move the shift and the reminder moves with it."))),
+      React.createElement("div", null,
+        React.createElement("label", { style:LABEL_STYLE }, "Repeat"),
+        React.createElement(ChipPick, { name:"reminderrepeat", single:true, value:[rep], onChange:function(v){ setRep(v[0]); },
+          options:[["once","Once"],["daily","Daily"],["workdays","Workdays"],["weekly","Weekly"]] }),
+        React.createElement("div", { style:Object.assign({},hint,{marginTop:"0.4rem"}) }, "Workdays are the days your Work Schedule has a shift.")),
+      !isNew && props.onDelete && React.createElement(HoldButton, { onHold:function(){ props.onDelete(r.id); }, holdMs:HOLD_DELETE_MS, fill:rgba(S.dangerText,0.38),
+        attrs:{ "data-reminderdelete":true, "data-holddelete":true },
+        style:{width:"100%",background:S.dangerBg,border:"1px solid "+S.dangerText,borderRadius:S.radius,padding:"0.7rem",color:S.dangerText,fontFamily:S.fontBody,fontWeight:600} },
+        "Delete reminder")));
+}
+// The Remind me block (R3): a switch for "before it's due", the timing in
+// words with Change, then the record's own reminders and + Add. dueWord says
+// what the date is ("Before it ends", "Before it's due"); own=false hides the
+// own-reminders part (milestone steps).
+function RemindBlock(props){
+  var rule=props.rule||null, hasDue=!!props.hasDue, own=props.own!==false;
+  var list=props.reminders||[];
+  var timingS=useState(false); var timing=timingS[0], setTiming=timingS[1];
+  var editS=useState(null); var edit=editS[0], setEdit=editS[1];
+  var chips=remindChipsOf(rule, REMIND_CFG), on=chips!==null;
+  var custom=!!(rule && Array.isArray(rule.chips));
+  var hint={fontSize:"0.76rem",color:S.textMuted,lineHeight:1.4,fontFamily:S.fontBody};
+  // The sub-sheets' trail: the last step (this record) just closes the
+  // sub-sheet; any earlier one closes it and then goes.
+  function subTrail(close){
+    if(!props.trail) return null;
+    var n=props.trail.length;
+    return props.trail.map(function(it,i){ return { label:it.label, go:i===n-1 ? close : function(){ close(); it.go(); } }; });
+  }
+  return React.createElement("div", { "data-remindblock":true },
+    React.createElement("label", { style:LABEL_STYLE }, "Remind me"),
+    hasDue && React.createElement("div", { "data-reminddue":on?"on":"off" },
+      React.createElement("div", { style:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:"0.6rem",padding:"0.15rem 0 0.35rem"} },
+        React.createElement("span", { style:{fontSize:"0.92rem",color:S.text,fontWeight:600,fontFamily:S.fontBody} }, props.dueWord||"Before it ends"),
+        React.createElement(OnSwitch, { name:"reminddue", on:on, onChange:function(v){ props.onRule(v ? (custom ? rule : null) : { off:true, chips:custom ? rule.chips : undefined }); } })),
+      // the words, at a fixed height whichever way the switch is
+      React.createElement("div", { style:Object.assign({},hint,{minHeight:"2.2rem",marginBottom:"0.5rem"}) },
+        on ? React.createElement(React.Fragment, null,
+               custom ? "Just this one: " : "Using your default: ",
+               React.createElement("b", { style:{color:S.text} }, remindWords(chips)), ". ",
+               React.createElement("button", { "data-flat":true, "data-remindchange":true, onClick:function(){ setTiming(true); },
+                 style:{background:"none",border:"none",padding:0,color:S.infoText,fontWeight:700,cursor:"pointer",fontFamily:S.fontBody,fontSize:"inherit"} }, "Change"))
+           : "No reminders before it ends.")),
+    !hasDue && props.noDueHint && React.createElement("div", { style:Object.assign({},hint,{marginBottom:"0.5rem"}) }, props.noDueHint),
+    own && list.map(function(r){
+      return React.createElement("button", { key:r.id, "data-flat":true, "data-reminderrow":r.id, onClick:function(){ setEdit(r); },
+        style:{display:"flex",alignItems:"center",gap:"0.6rem",width:"100%",textAlign:"left",background:S.bg1,border:"1.5px solid "+S.border,
+               borderRadius:S.radius3,padding:"0.6rem 0.75rem",marginBottom:"0.4rem",cursor:"pointer",fontFamily:S.fontBody} },
+        React.createElement("span", { style:{flex:1,minWidth:0} },
+          React.createElement("span", { style:{display:"block",fontWeight:700,fontSize:"0.88rem",color:S.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"} }, r.label),
+          React.createElement("span", { style:{display:"block",fontSize:"0.74rem",color:S.textDim} }, remindWhenWords(r)+" · "+remindRepeatWords(r.repeat))),
+        React.createElement("span", { style:{color:S.infoText,fontWeight:700,fontSize:"0.8rem"} }, "Edit"));
+    }),
+    own && React.createElement("button", { "data-flat":true, "data-reminderadd":true, onClick:function(){ setEdit({}); },
+      style:{width:"100%",background:"none",border:"1.5px dashed "+S.border,borderRadius:S.radius3,padding:"0.65rem",
+             color:S.infoText,fontWeight:700,fontSize:"0.88rem",cursor:"pointer",fontFamily:S.fontBody} }, "+ Add a reminder"),
+    timing && React.createElement(RemindTimingModal, { rule:rule, trail:subTrail(function(){ setTiming(false); }),
+      onSave:function(r){ props.onRule(r); setTiming(false); }, onCancel:function(){ setTiming(false); } }),
+    edit && React.createElement(ReminderModal, { reminder:edit, trail:subTrail(function(){ setEdit(null); }),
+      onSave:function(r){ var exists=list.some(function(x){ return x.id===r.id; });
+        props.onReminders(exists ? list.map(function(x){ return x.id===r.id ? r : x; }) : list.concat([r])); setEdit(null); },
+      onDelete:function(id){ props.onReminders(list.filter(function(x){ return x.id!==id; })); setEdit(null); },
+      onCancel:function(){ setEdit(null); } }));
 }
 // When was it met? Date and time, defaulting to the existing mark or now.
 function MilestoneWhenModal(props){
@@ -6337,6 +6789,202 @@ function evalNotifications(cfgAll, schedule, logs, nowMs, fired){
   return out;
 }
 
+// ---------------- Reminders & nudges (11-12) ----------------
+// No server yet, so nothing can wake a closed app: reminders fire while it is
+// open, and anything that came due while it was closed waits in "While you
+// were away" when it next opens, with the count on the home-screen icon.
+// Three sources:
+//   due   - a finite project's (or task's) end, and every milestone step's
+//           due time, reminded by chips: the default from Time Settings
+//           unless the record says otherwise (remindDue / step.remind:
+//           absent = default, {off:true}, or {chips:[...]}).
+//   own   - p.reminders: [{ id, label, when:"at"|"shiftStart"|"shiftEnd",
+//           at (ms, for "at"), repeat:"once"|"daily"|"workdays"|"weekly",
+//           created }]. Shift kinds follow the Work Schedule, so moving a
+//           shift moves the reminder.
+//   nudge - live checks against the clock (not clocked in, a job running
+//           past the shift, one job running long, still clocked in late).
+//           A nudge is only ever about now: one that stopped being true is
+//           dropped, never shown late.
+var REMIND_CHIPS = [["at","At the time"],["1h","1 hour before"],["shift","Start of that shift"],["1d","1 day before"],["1w","1 week before"]];
+var REMIND_CHIP_WORDS = { at:"at the time", "1h":"1 hour before", shift:"start of that shift", "1d":"1 day before", "1w":"1 week before" };
+var REMIND_LATE_MS = 3*60000;          // older than this when found = it came due while the app was closed
+var REMIND_LOOKBACK_MS = 7*86400000;   // the furthest back the catch-up looks
+var REMIND_SHIFT_END_LEAD = 30;        // "before shift ends" = this many minutes before
+function normalizeRemind(src){
+  var s=src||{}, n=s.nudges||{};
+  var keys=REMIND_CHIPS.map(function(c){ return c[0]; });
+  var due=Array.isArray(s.due) ? s.due.filter(function(k){ return keys.indexOf(k)>=0; }) : ["shift","1d"];
+  function num(v, d, lo, hi){ v=+v; return (v>=lo && v<=hi) ? v : d; }
+  function nd(o, on, extra){ o=o||{}; return Object.assign({ on: o.on==null ? on : !!o.on }, extra); }
+  return { due:due, hold:!!s.hold,
+    nudges:{ noIn:   nd(n.noIn, true, { mins:num(n.noIn&&n.noIn.mins, 15, 5, 120) }),
+             runEnd: nd(n.runEnd, true, {}),
+             long:   nd(n.long, false, { hrs:num(n.long&&n.long.hrs, 4, 1, 12) }),
+             lateOut:nd(n.lateOut, true, { hrs:num(n.lateOut&&n.lateOut.hrs, 1, 0.5, 6) }) } };
+}
+// Set from settings by applyTokens, so editors can show the default in words
+// without every caller passing settings down.
+var REMIND_CFG = normalizeRemind(null);
+var REMIND_SCHED = null;
+// The shift that starts on a calendar day, as start/end ms, or null.
+function shiftOnDay(schedule, day){
+  var d=startOfDay(new Date(day)), sp=schedule && shiftSpan(schedule[dayKeyOf(d)]);
+  if(!sp) return null;
+  var s=d.getTime()+sp.start*60000;
+  return { start:s, end:s+sp.len*60000 };
+}
+// Shifts that START between a and b, in order.
+function shiftsBetween(schedule, a, b){
+  var out=[], d=addDays(startOfDay(new Date(a)), -1), guard=0;
+  while(d.getTime()<=b && guard++<400){
+    var sh=shiftOnDay(schedule, d.getTime());
+    if(sh && sh.start>=a && sh.start<=b) out.push(sh);
+    d=addDays(d,1);
+  }
+  return out;
+}
+// The most recent shift that has started by t (yesterday's night shift counts).
+function shiftBefore(schedule, t, days){
+  var d=startOfDay(new Date(t)), best=null;
+  for(var i=0;i<(days||8);i++){
+    var sh=shiftOnDay(schedule, addDays(d,-i).getTime());
+    if(sh && sh.start<=t){ best=sh; break; }
+  }
+  return best;
+}
+function inShift(schedule, t){ var sh=shiftBefore(schedule, t, 2); return !!(sh && t<sh.end); }
+function nextShiftStart(schedule, t){ var s=shiftsBetween(schedule, t, t+9*86400000); return s.length ? s[0].start : null; }
+// When a chip fires for something due at T.
+function remindChipAt(chip, T, schedule){
+  if(chip==="at") return T;
+  if(chip==="1h") return T-3600000;
+  if(chip==="1d") return T-86400000;
+  if(chip==="1w") return T-7*86400000;
+  if(chip==="shift"){ var sh=shiftBefore(schedule, T, 8); return sh ? sh.start : null; }
+  return null;
+}
+// "Hold reminders until my shift": off-shift, it waits for the next start.
+function remindDeliverAt(at, schedule, hold){
+  if(!hold || !schedule || inShift(schedule, at)) return at;
+  var n=nextShiftStart(schedule, at);
+  return n==null ? at : n;
+}
+// The chips a record uses: null = off.
+function remindChipsOf(rule, cfg){
+  if(rule && rule.off) return null;
+  if(rule && Array.isArray(rule.chips)) return rule.chips;
+  return (cfg||REMIND_CFG).due;
+}
+// The record's setting in words, for the editor ("start of that shift and
+// 1 day before"). Empty chips read as "no times picked".
+function remindWords(chips){
+  if(!chips || !chips.length) return "no times picked";
+  var w=REMIND_CHIPS.filter(function(c){ return chips.indexOf(c[0])>=0; }).map(function(c){ return REMIND_CHIP_WORDS[c[0]]; });
+  return w.length<=1 ? w.join("") : w.slice(0,-1).join(", ")+" and "+w[w.length-1];
+}
+// An own reminder's occurrences between a and b.
+function ownOccurrences(r, schedule, a, b){
+  var out=[], rep=r.repeat||"once";
+  if(r.when==="at"){
+    if(!(r.at>0)) return out;
+    if(rep==="once"){ if(r.at>=a && r.at<=b) out.push(r.at); return out; }
+    var base=new Date(r.at), hh=base.getHours(), mm=base.getMinutes();
+    var d=startOfDay(new Date(Math.max(a, r.at))), guard=0;
+    d=addDays(d,-1);
+    while(d.getTime()<=b && guard++<400){
+      var t=new Date(d); t.setHours(hh, mm, 0, 0); var ms=t.getTime();
+      var ok = rep==="daily" || (rep==="weekly" && t.getDay()===base.getDay()) || (rep==="workdays" && !!shiftOnDay(schedule, ms));
+      if(ok && ms>=r.at && ms>=a && ms<=b) out.push(ms);
+      d=addDays(d,1);
+    }
+    return out;
+  }
+  if(r.when==="shiftStart" || r.when==="shiftEnd"){
+    var from=Math.max(a, r.created||0);
+    var shifts=shiftsBetween(schedule, (r.created||a)-86400000, b);
+    var pts=shifts.map(function(sh){ return r.when==="shiftStart" ? sh.start : sh.end-REMIND_SHIFT_END_LEAD*60000; })
+                  .filter(function(t){ return t>=(r.created||0); });
+    if(rep==="once") pts=pts.slice(0,1);
+    else if(rep==="weekly" && pts.length){ var wd=new Date(pts[0]).getDay(); pts=pts.filter(function(t){ return new Date(t).getDay()===wd; }); }
+    return pts.filter(function(t){ return t>=from && t<=b; });
+  }
+  return out;
+}
+function remindWhenWords(r){
+  if(r.when==="shiftStart") return "start of shift";
+  if(r.when==="shiftEnd") return REMIND_SHIFT_END_LEAD+" min before shift ends";
+  return r.at>0 ? fmtDate(r.at)+" "+fmtTime(r.at) : "no time set";
+}
+function remindRepeatWords(rep){ return { once:"once", daily:"every day", workdays:"workdays", weekly:"every week" }[rep||"once"]; }
+// Every reminder occurrence for the board between a and b. Closed records and
+// done steps remind nobody.
+function reminderOccurrences(projects, cfg, schedule, a, b){
+  var out=[];
+  cfg=cfg||normalizeRemind(null);
+  (projects||[]).forEach(function(p){
+    if(!p || isClosed(p)) return;
+    var end=projEnd(p);
+    if(projKind(p)==="finite" && end){
+      (remindChipsOf(p.remindDue, cfg)||[]).forEach(function(c){
+        var at=remindChipAt(c, end, schedule);
+        if(at!=null && at>=a && at<=b) out.push({ key:"due|"+p.id+"|"+c+"|"+end, at:at, pid:p.id,
+          title:p.name+(c==="at" ? " is due now" : " is due "+fmtDate(end)+" "+fmtTime(end)), body:"Reminder: "+REMIND_CHIP_WORDS[c]+"." });
+      });
+    }
+    (p.milestones||[]).forEach(function(st){
+      if(!st || st.doneAt || !(st.dueAt>0)) return;
+      (remindChipsOf(st.remind, cfg)||[]).forEach(function(c){
+        var at=remindChipAt(c, st.dueAt, schedule);
+        if(at!=null && at>=a && at<=b) out.push({ key:"ms|"+p.id+"|"+st.id+"|"+c+"|"+st.dueAt, at:at, pid:p.id,
+          title:st.label+(c==="at" ? " is due now" : " is due "+fmtDate(st.dueAt)+" "+fmtTime(st.dueAt)), body:p.name+" · "+REMIND_CHIP_WORDS[c]+"." });
+      });
+    });
+    (p.reminders||[]).forEach(function(r){
+      ownOccurrences(r, schedule, a, b).forEach(function(at){
+        out.push({ key:"rem|"+p.id+"|"+r.id+"|"+at, at:at, pid:p.id, title:r.label||"Reminder", body:p.name });
+      });
+    });
+  });
+  return out;
+}
+// What is due right now. Each occurrence is delivered at its time (held to
+// the next shift when asked); once delivered it is fired for good. Fresh ones
+// fire as a banner; ones found late came due while the app was closed and go
+// to the catch-up list instead. `since` is when the app last looked: only
+// what came due AFTER it counts, so a step entered with a date already past,
+// or a backup brought back, is not reported as missed. No `since` (the first
+// look on this device) reports nothing.
+function dueReminders(projects, cfg, schedule, now, fired, since){
+  fired=fired||{}; cfg=cfg||normalizeRemind(null);
+  var fresh=[], late=[];
+  reminderOccurrences(projects, cfg, schedule, now-REMIND_LOOKBACK_MS-9*86400000, now).forEach(function(o){
+    if(fired[o.key]) return;
+    var d=remindDeliverAt(o.at, schedule, cfg.hold);
+    if(d>now || d<now-REMIND_LOOKBACK_MS) return;
+    if(since!==undefined && !(since!==null && d>since)) return;
+    var it=Object.assign({}, o, { deliverAt:d });
+    if(now-d<=REMIND_LATE_MS) fresh.push(it); else late.push(it);
+  });
+  var by=function(x,y){ return x.deliverAt-y.deliverAt; };
+  return { fresh:fresh.sort(by), late:late.sort(by) };
+}
+// Nudges: about now only. st = { clocked, activeId, activeStart, activeName }.
+function dueNudges(st, cfg, schedule, now, fired){
+  var out=[], n=(cfg||normalizeRemind(null)).nudges; fired=fired||{};
+  function add(key, title, body){ if(!fired[key]) out.push({ key:key, title:title, body:body, nudge:true }); }
+  var sh=shiftBefore(schedule, now, 2);
+  if(n.noIn.on && sh && !st.clocked && now>=sh.start+n.noIn.mins*60000 && now<sh.end)
+    add("nudge|noin|"+sh.start, "Not clocked in", "Your shift started at "+fmtTime(sh.start)+".");
+  if(n.runEnd.on && sh && st.activeId!=null && now>=sh.end && now<sh.end+12*3600000)
+    add("nudge|runend|"+sh.end, "Still running: "+(st.activeName||"a job"), "Your shift ended at "+fmtTime(sh.end)+".");
+  if(n.long.on && st.activeId!=null && st.activeStart && now-st.activeStart>=n.long.hrs*3600000)
+    add("nudge|long|"+st.activeStart, (st.activeName||"A job")+" has run "+fmtDur(now-st.activeStart,true), "Still on it?");
+  if(n.lateOut.on && sh && st.clocked && now>=sh.end+n.lateOut.hrs*3600000 && now<sh.end+18*3600000)
+    add("nudge|late|"+sh.end, "Still clocked in", "Your shift ended at "+fmtTime(sh.end)+".");
+  return out;
+}
+
 // ---------------- Schedule measurement ----------------
 // Sum of the work schedule across every calendar day the range touches, net
 // of unpaid breaks. This is the denominator every rollup measures against.
@@ -7264,6 +7912,156 @@ function fmtBytes(n){
   if(n<1024*1024) return (n/1024).toFixed(n<10240?1:0)+" KB";
   return (n/1048576).toFixed(1)+" MB";
 }
+// ---- While you were away (11-12) ----
+// Reminders that came due while the app was closed, oldest first. Open goes
+// to the record (and clears that one); Done clears them all.
+function AwayModal(props){
+  var items=props.items||[];
+  // Done clears the list. Later - or a tap outside - only puts it away: it
+  // comes back the next time the app is opened.
+  return React.createElement(Modal, { title:"While you were away \u00b7 "+items.length, onClose:props.onLater||props.onDone, cancelLabel:"Later",
+      onSave:props.onDone, saveLabel:"Done", saveAnchor:"away-done" },
+    React.createElement("div", { "data-away":items.length },
+      items.slice().sort(function(a,b){ return a.at-b.at; }).map(function(it){
+        return React.createElement("div", { key:it.key, "data-awayitem":it.key,
+          style:{display:"flex",alignItems:"center",gap:"0.6rem",padding:"0.65rem 0.75rem",marginBottom:"0.45rem",
+                 background:S.warnBg,border:"1px solid "+S.warnText,borderRadius:S.radius3,fontFamily:S.fontBody} },
+          React.createElement("div", { style:{flex:1,minWidth:0} },
+            React.createElement("div", { style:{fontWeight:700,fontSize:"0.9rem",color:S.text} }, it.title),
+            React.createElement("div", { style:{fontSize:"0.76rem",color:S.textDim} }, (it.body ? it.body+" \u00b7 " : "")+"came due "+fmtDate(it.at)+" "+fmtTime(it.at))),
+          React.createElement("button", { "data-flat":true, "data-awayopen":it.key, onClick:function(){ props.onOpen(it); },
+            style:{background:"none",border:"none",color:S.infoText,fontWeight:700,fontSize:"0.85rem",cursor:"pointer",fontFamily:S.fontBody} }, "Open"));
+      }),
+      React.createElement("div", { style:{fontSize:"0.76rem",color:S.textMuted,lineHeight:1.4,marginTop:"0.4rem",fontFamily:S.fontBody} },
+        "Reminders reach you while the app is open. Ones that came due while it was closed wait here until you tap Done.")));
+}
+// ---- Account (10-28) ----
+// The menu row's word for the state, and the sheet's sentence for it.
+function accountWord(c){
+  var b=ttCloudBadgeOf(c);
+  if(b==="none") return "Not set up";
+  if(c.phase==="out") return "Signed out";
+  return { synced:"Signed in", syncing:"Syncing", trouble:"Can’t connect", offline:"Offline" }[b];
+}
+function accountSentence(c){
+  var b=ttCloudBadgeOf(c);
+  if(b==="offline" && c.phase==="in") return "This device is offline. Everything is safe here; the app checks in again when the connection comes back.";
+  if(b==="trouble") return "Can’t reach the server right now. Everything is safe on this device, and the app keeps trying.";
+  if(b==="syncing") return "Checking in with the server…";
+  if(b==="synced") return c.okAt ? "Signed in. Last checked in with the server at "+fmtTime(c.okAt)+"." : "Signed in.";
+  return "";
+}
+// The sheet: email, then the code from the email, then signed in. One sheet,
+// three steps; the trail names the step. demo (the manual) draws a step with
+// nothing live behind it.
+function AccountModal(props){
+  var c=props.cloud||ttCloud.get(), demo=props.demo||null;
+  var stepS=useState(demo || (c.phase==="in" ? "in" : "email")); var step=stepS[0], setStep=stepS[1];
+  var mailS=useState(demo ? "you@example.com" : (c.email||"")); var mail=mailS[0], setMail=mailS[1];
+  var codeS=useState(demo==="code" ? "481" : ""); var code=codeS[0], setCode=codeS[1];
+  var busyS=useState(false); var busy=busyS[0], setBusy=busyS[1];
+  var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
+  var waitS=useState(0); var wait=waitS[0], setWait=waitS[1];     // seconds until a new code may be sent
+  var focusS=useState(false); var focused=focusS[0], setFocused=focusS[1];
+  var codeRef=useRef(null);
+  // signed in elsewhere in the app (or signed out) moves the sheet with it
+  useEffect(function(){ if(demo) return; if(c.phase==="in" && step!=="in") setStep("in"); if(c.phase!=="in" && step==="in") setStep("email"); }, [c.phase]);
+  useEffect(function(){
+    if(wait<=0) return;
+    var t=setTimeout(function(){ setWait(function(w){ return w-1; }); }, 1000);
+    return function(){ clearTimeout(t); };
+  }, [wait]);
+  useEffect(function(){ if(step==="code" && codeRef.current && !demo){ try{ codeRef.current.focus(); }catch(e){} } }, [step]);
+  function send(){
+    if(busy || demo) return;
+    setBusy(true); setMsg("");
+    ttCloud.sendCode(mail).then(function(r){
+      setBusy(false);
+      if(r.ok){ setCode(""); setStep("code"); setWait(TT_CODE_RESEND_S); haptic(10); }
+      else setMsg(r.msg);
+    });
+  }
+  function verify(v){
+    var digits=String(v!=null ? v : code).replace(/\D/g,"");
+    if(busy || demo) return;
+    if(digits.length<6){ setMsg("Enter the whole code from the email."); return; }
+    setBusy(true); setMsg("");
+    ttCloud.verify(mail, digits).then(function(r){
+      setBusy(false);
+      if(r.ok){ haptic([10,40,10]); setStep("in"); }
+      else { setMsg(r.msg); setCode(""); }
+    });
+  }
+  var P=function(t, extra){ return React.createElement("p", { style:Object.assign({ margin:"0 0 0.9rem", color:S.textDim, fontSize:"0.92rem", lineHeight:1.45, fontFamily:S.fontBody }, extra||{}) }, t); };
+  // One fixed-height line for errors and notes, so nothing below it jumps.
+  var note=function(text, col){ return React.createElement("div", { "data-acctmsg":text?true:undefined,
+      style:{ minHeight:"2.7rem", marginTop:"0.6rem", color:col||S.dangerText, fontSize:"0.85rem", lineHeight:1.4, fontFamily:S.fontBody } }, text||""); };
+  var trail=props.trail;
+  var linkBtn=function(key, label, onClick, off){ return React.createElement("button", { "data-flat":true, "data-acct":key, onClick:off?undefined:onClick,
+      style:{ background:"none", border:"none", padding:"0.35rem 0", color:off?S.textDim:S.infoText, fontWeight:700, fontSize:"0.88rem",
+              fontFamily:S.fontBody, cursor:off?"default":"pointer" } }, label); };
+
+  if(step==="in"){
+    var badge=ttCloudBadgeOf(c);
+    return React.createElement(Modal, { title:"Account", onClose:props.onClose, cancelLabel:"Close", trail:trail },
+      React.createElement("div", { "data-anchor":"acct-who", style:{ display:"flex", alignItems:"center", gap:"0.75rem", padding:"0.8rem 0.9rem",
+          background:S.bg1, border:"1px solid "+S.border, borderRadius:S.radius, marginBottom:"0.8rem" } },
+        React.createElement(CloudBadge, { state:demo ? "synced" : badge, okAt:demo ? 0 : c.okAt, size:30 }),
+        React.createElement("div", { style:{ minWidth:0 } },
+          React.createElement("div", { "data-acctemail":true, style:{ fontWeight:700, color:S.text, fontSize:"0.98rem", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" } }, demo ? "you@example.com" : c.email),
+          React.createElement("div", { style:{ color:cloudCol(demo ? "synced" : badge), fontSize:"0.8rem", fontWeight:600, marginTop:"0.1rem" } },
+            (demo ? "Signed in" : CLOUD_WORDS[badge])+" · Sandbox server"))),
+      React.createElement("div", { "data-acctstate":true, style:{ minHeight:"2.9rem" } }, P(demo ? "Signed in. Last checked in with the server a moment ago." : accountSentence(c))),
+      P("Organizations and shared projects will appear here as they’re built. For now, signing in changes nothing on your board."),
+      React.createElement("button", { "data-acct":"signout", "data-anchor":"acct-signout", onClick:function(){ if(demo) return; haptic(10); ttCloud.signOut(); setMail(ttCloud.get().email||""); setStep("email"); },
+        style:{ width:"100%", background:S.dangerBg, border:"1px solid "+S.dangerText, borderRadius:S.radius, padding:"0.75rem",
+                color:S.dangerText, fontFamily:S.fontBody, fontWeight:700, fontSize:"0.98rem", cursor:"pointer" } }, "Sign out"),
+      P("Signing out leaves your board on this device untouched.", { margin:"0.6rem 0 0", fontSize:"0.82rem" }));
+  }
+
+  if(step==="code"){
+    var digits=String(code).replace(/\D/g,"").slice(0,6);
+    var boxes=[0,1,2,3,4,5].map(function(i){
+      var cur=focused && (i===Math.min(digits.length,5));
+      return React.createElement("div", { key:i, style:{ flex:"1 1 0", maxWidth:"3rem", height:"3.4rem", display:"flex", alignItems:"center", justifyContent:"center",
+          background:INPUT_STYLE.background, border:"2px solid "+(cur ? S.actionBdr : S.border), borderRadius:S.radius3,
+          fontFamily:S.fontMono, fontSize:"1.6rem", fontWeight:500, color:S.text, boxShadow:cur ? "0 0 0 3px "+rgba(S.actionBdr,0.25) : "none" } }, digits[i]||"");
+    });
+    return React.createElement(Modal, { title:"Account", trailHere:"Code", onClose:props.onClose,
+        trail:trail ? trail.concat([{ label:"Account", go:function(){ setStep("email"); setMsg(""); } }]) : null,
+        onSave:function(){ verify(); }, saveLabel:busy ? "Checking…" : "Sign in", saveAnchor:"acct-signin" },
+      P("Enter the code from the email sent to "+mail+". Check spam if it isn’t there in a minute."),
+      // Six boxes, one real field laid over them: the field takes typing,
+      // pasting and the phone's "From Mail" suggestion; the boxes show it.
+      React.createElement("div", { "data-anchor":"acct-code", style:{ position:"relative", display:"flex", gap:"0.45rem", justifyContent:"center", direction:"ltr" } },
+        boxes,
+        React.createElement("input", { ref:codeRef, "data-acctcode":true, type:"text", inputMode:"numeric", autoComplete:"one-time-code", maxLength:6,
+          value:digits, "aria-label":"Code from the email",
+          onFocus:function(){ setFocused(true); }, onBlur:function(){ setFocused(false); },
+          onChange:function(e){ var v=String(e.target.value).replace(/\D/g,"").slice(0,6); setCode(v); if(msg) setMsg(""); if(v.length===6) verify(v); },
+          style:{ position:"absolute", inset:0, width:"100%", height:"100%", opacity:0.01, color:"transparent", caretColor:"transparent",
+                  background:"transparent", border:"none", outline:"none", fontSize:"16px", padding:0 } })),
+      React.createElement("div", { style:{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:"0.5rem" } },
+        linkBtn("change", "Use a different email", function(){ setStep("email"); setMsg(""); }),
+        wait>0 ? React.createElement(Mono, { "data-acctwait":true, style:{ color:S.textDim, fontSize:"0.85rem" } }, "Send again in "+Math.floor(wait/60)+":"+pad(wait%60))
+               : linkBtn("resend", "Send a new code", send, busy)),
+      note(msg));
+  }
+
+  // email
+  var signedOut=c.phase==="out";
+  return React.createElement(Modal, { title:"Account", onClose:props.onClose, trail:trail,
+      onSave:send, saveLabel:busy ? "Sending…" : "Send code", saveAnchor:"acct-send" },
+    P(signedOut ? (c.note || "Signed out. Your account is still there: sign in again with a new code.")
+                : "Sign in with your email. We’ll send you a code to type in here, so there’s no password to remember."),
+    React.createElement("input", { "data-anchor":"acct-email", "data-acctemail":true, type:"email", inputMode:"email", autoComplete:"email",
+      autoCapitalize:"none", autoCorrect:"off", spellCheck:false, placeholder:"you@example.com", value:mail,
+      onChange:function(e){ setMail(e.target.value); if(msg) setMsg(""); },
+      onKeyDown:function(e){ if(e.key==="Enter") send(); },
+      style:Object.assign({}, INPUT_STYLE) }),
+    note(msg),
+    P("Signing in doesn’t send your board anywhere. It stays on this device; sharing comes later.", { margin:"0.2rem 0 0", fontSize:"0.82rem" }));
+}
 function ExtensionsModal(props){
   var tickS=useState(0); var setTick=tickS[1]; var tick=tickS[0];
   var confirmS=useState(null); var setConfirm=confirmS[1]; var confirm=confirmS[0];
@@ -7757,8 +8555,46 @@ function TrackingModal(props){
             "Allow")
         )
       );
-    })()
+    })(),
+    // ---- reminders & nudges (11-12) ----
+    React.createElement(RemindSettings, { value:settings.remind, sectionHead:sectionHead, note:note,
+      onChange:function(v){ set("remind", v); } })
   );
+}
+
+// Reminders & nudges, the section in Tracking (Time Settings). Its own
+// component so the manual can stage it.
+function RemindSettings(props){
+  var sectionHead=props.sectionHead, note=props.note;
+  var rc=normalizeRemind(props.value);
+  function put(patch){ props.onChange(Object.assign({}, rc, patch)); }
+  function putN(k, fields){ var n=Object.assign({}, rc.nudges); n[k]=Object.assign({}, n[k], fields); put({ nudges:n }); }
+  var row={display:"flex",alignItems:"center",justifyContent:"space-between",gap:"0.6rem",padding:"0.55rem 0",borderBottom:"1px solid "+S.border};
+  var txt=function(t, on){ return React.createElement("span", { style:{flex:1,fontSize:"0.88rem",color:on===false?S.textMuted:S.text,fontFamily:S.fontBody} }, t); };
+  function nudge(k, label, numKey, opts, unit){
+    var on=rc.nudges[k].on;
+    return React.createElement("div", { key:k, "data-nudge":k, style:{borderBottom:"1px solid "+S.border,padding:"0.5rem 0"} },
+      React.createElement("div", { style:{display:"flex",alignItems:"center",gap:"0.6rem"} },
+        txt(label, on), React.createElement(OnSwitch, { name:"nudge-"+k, on:on, onChange:function(v){ putN(k,{on:v}); } })),
+      // the amount stays drawn either way (dimmed when off), so nothing jumps
+      numKey && React.createElement("div", { style:{marginTop:"0.4rem",opacity:on?1:0.45,pointerEvents:on?"auto":"none"} },
+        React.createElement(ChipPick, { name:"nudge-"+k+"-n", single:true, value:[String(rc.nudges[k][numKey])],
+          options:opts.map(function(v){ return [String(v), v+unit]; }),
+          onChange:function(v){ var f={}; f[numKey]=parseFloat(v[0]); putN(k,f); } })));
+  }
+  return React.createElement("div", { "data-remindsettings":true, style:{marginBottom:"0.4rem",marginTop:"0.6rem"} },
+    React.createElement("div", { style:sectionHead }, "Reminders & nudges"),
+    React.createElement("div", { style:note },
+      "Reminders reach you while the app is open. Any that come due while it is closed wait in While you were away when you open it, and the home-screen icon shows how many."),
+    React.createElement("div", { style:{fontSize:"0.78rem",color:S.textDim,fontWeight:700,margin:"0.6rem 0 0.4rem",fontFamily:S.fontBody} }, "Due dates, by default"),
+    React.createElement(ChipPick, { name:"reminddefault", options:REMIND_CHIPS, value:rc.due, onChange:function(v){ put({ due:v }); } }),
+    React.createElement("div", { style:Object.assign({}, row, {marginTop:"0.4rem"}) },
+      txt("Hold reminders until my shift"), React.createElement(OnSwitch, { name:"remindhold", on:rc.hold, onChange:function(v){ put({ hold:v }); } })),
+    React.createElement("div", { style:{fontSize:"0.78rem",color:S.textDim,fontWeight:700,margin:"0.7rem 0 0.1rem",fontFamily:S.fontBody} }, "Nudges"),
+    nudge("noIn", "Shift started, not clocked in", "mins", [5,15,30], " min"),
+    nudge("runEnd", "Job still running at end of shift", null),
+    nudge("long", "One job running longer than", "hrs", [2,3,4,6,8], "h"),
+    nudge("lateOut", "Still clocked in after shift by", "hrs", [0.5,1,2], "h"));
 }
 
 // ---- THEMES MODAL -----------------------------------------------------------
@@ -10806,7 +11642,7 @@ function TTErrorBoundary(props){ return props.children; }
 // APP_VERSION is the public number. The build stamp stays where it has always
 // been, in the boot div, because that is the thing that proves which deploy
 // landed; this is the thing a person reads.
-var APP_VERSION = "1.3B";   // "Baker": the release getting the app ready for the database (Brent, 10-27)
+var APP_VERSION = "1.4";   // sign-in + reminders & nudges (Brent, 11-13). 1.3B "Baker" was the one before.
 var SPLASH_SHOW_MS = 2500;   // fully opaque
 var SPLASH_FADE_MS = 320;    // then fades out over this
 function SplashScreen(props){
@@ -11048,6 +11884,19 @@ function TTBoard(){
   var showReportsS=useState(false); var setShowReports=showReportsS[1]; var showReports=showReportsS[0];
   var showBackupS=useState(false); var setShowBackup=showBackupS[1]; var showBackup=showBackupS[0];
   var showExtensionsS=useState(false); var setShowExtensions=showExtensionsS[1]; var showExtensions=showExtensionsS[0];
+  // The account (10-28): sign-in state from the one controller, and its sheet.
+  var showAccountS=useState(false); var setShowAccount=showAccountS[1]; var showAccount=showAccountS[0];
+  var cloudS=useState(ttCloud.get()); var cloud=cloudS[0], setCloud=cloudS[1];
+  useEffect(function(){
+    var off=ttCloud.subscribe(setCloud);
+    ttCloud.check();
+    var poke=function(){ ttCloud.poke(); };
+    var vis=function(){ if(!document.hidden) ttCloud.poke(); };
+    window.addEventListener("online", poke); window.addEventListener("offline", poke);
+    document.addEventListener("visibilitychange", vis);
+    return function(){ off(); window.removeEventListener("online", poke); window.removeEventListener("offline", poke);
+      document.removeEventListener("visibilitychange", vis); };
+  }, []);
   // Whichever module screen is open, as { id, screen }. Null with no modules.
   var modScreenS=useState(null); var setModScreen=modScreenS[1]; var modScreen=modScreenS[0];
   // Enablement lives in storage, not in React state, so a toggle in Extensions
@@ -11232,6 +12081,71 @@ function TTBoard(){
     var last=due[due.length-1];
     setNotifToast({ title:last.title, body:last.body, at:now });
   },[nowTick]);
+  // Reminders & nudges (11-12). Checked every 20 seconds and the moment the
+  // app comes back into view. Fresh ones fire now (banner + toast); ones
+  // found late came due while the app was closed and wait in "While you were
+  // away", whose count rides on the home-screen icon.
+  var awayS=useState(function(){ var a=load("tt_remind_away",[]); return Array.isArray(a)?a:[]; });
+  var away=awayS[0], setAway=awayS[1];
+  var showAwayS=useState(false); var showAway=showAwayS[0], setShowAway=showAwayS[1];
+  var remindLast=useRef(0);
+  function checkReminders(force){
+    var now=Date.now();
+    // The practice board is a sandbox: it never reminds anyone.
+    if(testMode) return;
+    if(!force && now-remindLast.current<20000) return;
+    remindLast.current=now;
+    var cfg=normalizeRemind(settings.remind), sch=settings.workSchedule;
+    var fired=load("tt_remind_fired",{});
+    // Only what came due since the last look. The first look after the
+    // update has none, so it opens quietly rather than on a backlog.
+    var since=load("tt_remind_last",null);
+    save("tt_remind_last", now);
+    var r=dueReminders(projects, cfg, sch, now, fired, since);
+    var ap=activeId!=null ? projects.find(function(p){ return p.id===activeId; }) : null;
+    var nudges=dueNudges({ clocked:!!atWorkStart, activeId:activeId, activeStart:activeStart, activeName:ap&&ap.name }, cfg, sch, now, fired);
+    var fresh=r.fresh.concat(nudges);
+    if(!fresh.length && !r.late.length) return;
+    var cutoff=now-9*86400000, pruned={};
+    Object.keys(fired).forEach(function(k){ if(fired[k]>cutoff) pruned[k]=fired[k]; });
+    fresh.concat(r.late).forEach(function(d){ pruned[d.key]=now; });
+    save("tt_remind_fired", pruned);
+    fresh.forEach(function(d){
+      try{ if(typeof Notification!=="undefined" && Notification.permission==="granted") new Notification(d.title, { body:d.body }); }catch(e){}
+    });
+    if(fresh.length){ haptic([30,60,30]); var last=fresh[fresh.length-1]; setNotifToast({ title:last.title, body:last.body, at:now }); }
+    if(r.late.length){
+      setAway(function(prev){
+        var have={}; prev.forEach(function(x){ have[x.key]=1; });
+        var next=prev.concat(r.late.filter(function(x){ return !have[x.key]; }).map(function(x){
+          return { key:x.key, title:x.title, body:x.body, pid:x.pid, at:x.deliverAt }; }));
+        save("tt_remind_away", next);
+        return next;
+      });
+      setShowAway(true);
+    }
+  }
+  useEffect(function(){ checkReminders(false); },[nowTick]);
+  useEffect(function(){
+    var vis=function(){ if(!document.hidden){ checkReminders(true); if(away.length && !testMode) setShowAway(true); } };
+    document.addEventListener("visibilitychange", vis);
+    return function(){ document.removeEventListener("visibilitychange", vis); };
+  });
+  // Once, a moment after opening: anything due, and any list left for Later.
+  useEffect(function(){
+    var t=setTimeout(function(){ checkReminders(true); if(load("tt_remind_away",[]).length && !load("tt_testmode",false)) setShowAway(true); }, 1500);
+    return function(){ clearTimeout(t); };
+  },[]);
+  // the count on the home-screen icon
+  useEffect(function(){
+    try{
+      if(away.length && navigator.setAppBadge) navigator.setAppBadge(away.length);
+      else if(!away.length && navigator.clearAppBadge) navigator.clearAppBadge();
+    }catch(e){}
+  },[away.length]);
+  function awayDone(key){
+    setAway(function(prev){ var next=key ? prev.filter(function(x){ return x.key!==key; }) : []; save("tt_remind_away", next); return next; });
+  }
   // toast auto-dismiss
   useEffect(function(){
     if(!notifToast) return;
@@ -11262,7 +12176,7 @@ function TTBoard(){
     setNavFrom(null); setShowArchive(false);
     setShowAdd(null); setEditProj(null); setStagesProj(null); setShowDisrupt(false);
     setShowBreak(false); setShowDay(false); setShowNewLane(false);
-    setShowReports(false); setShowBackup(false); setShowExtensions(false); setModScreen(null);
+    setShowReports(false); setShowBackup(false); setShowExtensions(false); setShowAccount(false); setModScreen(null);
     setConfirmDelete(null); setShowTestConfirm(false); setShowGuides(false); setStartAsk(null);
     setMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowThemes(false); setShowLayout(false); setShowSchedule(false); setShowTracking(false); setMenuGroup(null); setShowOutline(false); setEditLane(null); setMsProj(null); setMsLane(null); setMsBoard(false); setStagesDone(null);
     try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){}
@@ -11828,7 +12742,12 @@ function TTBoard(){
     statusTag:statusTag, breakLimitMs:breakLimitMs, mirror:isLeft,
     onStatusTap:onBreak ? function(){ endBreak(); } : function(){ closeAllPopups(); setShowBreak(true); },
     // A break with its own length already counts its overage in the clock.
-    overNote:(overStyle==="header" && overLiveMs>0 && breakLimitMs==null) ? "+"+fmtDur(overLiveMs,true)+" over" : null });
+    overNote:(overStyle==="header" && overLiveMs>0 && breakLimitMs==null) ? "+"+fmtDur(overLiveMs,true)+" over" : null,
+    cloud:React.createElement("button", { "data-flat":true, "data-anchor":"hdr-cloud", "data-cloud":ttCloudBadgeOf(cloud),
+        "aria-label":"Account: "+CLOUD_WORDS[ttCloudBadgeOf(cloud)],
+        onClick:function(){ haptic(8); closeAllPopups(); setShowAccount(true); ttCloud.poke(); },
+        style:{flexShrink:0,width:"20px",height:"20px",padding:0,margin:0,background:"none",border:"none",cursor:"pointer",display:"inline-flex"} },
+      React.createElement(CloudBadge, { state:ttCloudBadgeOf(cloud), okAt:cloud.okAt, size:20 })) });
 
   return (
     React.createElement("div", { dir:isLeft?"rtl":"ltr", style:{minHeight:"100vh",background:S.bg0,color:S.text,fontFamily:S.fontBody,paddingBottom:rootPadBottom,paddingLeft:FW,paddingRight:FW} },
@@ -11858,6 +12777,21 @@ function TTBoard(){
         "@keyframes ttBarPulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } } "+
         "[data-barpulse='1']{ animation: ttBarPulse 2.4s ease-in-out infinite; } "+
         "@media (prefers-reduced-motion: reduce){ [data-barpulse='1']{ animation:none; } } "+
+        // The account badge (10-28). Only the mark inside the cloud moves.
+        "[data-cloudmark]{ transform-box:view-box; } "+
+        "@keyframes ttCloudQ { 0%{ transform:scale(.8); opacity:0; } 4%{ transform:scale(.81); opacity:1; } 34%{ transform:scale(1); opacity:1; } 64%{ transform:scale(.8); opacity:1; } 90%{ transform:scale(.8); opacity:1; } 96%,100%{ transform:scale(.8); opacity:0; } } "+
+        "[data-cloudmark='q']{ transform-origin:14px 14.9px; animation:ttCloudQ 10s ease-in-out infinite; } "+
+        "@keyframes ttCloudChk { 0%{ stroke-dashoffset:1; opacity:1; } 5%{ stroke-dashoffset:0; opacity:1; } 90%{ stroke-dashoffset:0; opacity:1; } 100%{ stroke-dashoffset:0; opacity:0; } } "+
+        "[data-cloudmark='chk']{ stroke-dasharray:1; animation:ttCloudChk 13.4s ease-out 1 both; } "+
+        "@keyframes ttCloudOut { from{ opacity:1; } to{ opacity:0; } } "+
+        "[data-cloudmark='chkout']{ stroke-dasharray:1; stroke-dashoffset:0; animation:ttCloudOut .5s ease 1 both; } "+
+        "@keyframes ttCloudSpin { to{ transform:rotate(360deg); } } "+
+        "[data-cloudmark='spin']{ transform-origin:14px 16.5px; animation:ttCloudSpin 1.4s linear infinite; } "+
+        "@keyframes ttCloudNudge { 0%,55%,100%{ transform:rotate(0); } 62%{ transform:rotate(-16deg); } 69%{ transform:rotate(14deg); } 76%{ transform:rotate(-9deg); } 83%{ transform:rotate(5deg); } 90%{ transform:rotate(0); } } "+
+        "[data-cloudmark='nudge']{ transform-origin:14px 19.5px; animation:ttCloudNudge 2s ease-in-out 3; } "+
+        "@keyframes ttCloudZ { 0%{ opacity:0; transform:translate(0,1.5px); } 20%,70%{ opacity:1; } 100%{ opacity:1; transform:translate(0,0); } } "+
+        "[data-cloudmark='z1'],[data-cloudmark='z2']{ animation:ttCloudZ 2.8s ease-in-out 3 both; } [data-cloudmark='z2']{ animation-delay:.9s; } "+
+        "@media (prefers-reduced-motion: reduce){ [data-cloudmark]{ animation:none !important; opacity:1 !important; transform:none !important; stroke-dashoffset:0 !important; } } "+
         // iOS renders a time input's value inside shadow parts with their own
         // UA background and color. Make every part transparent and force it to
         // carry the input's color; -webkit-text-fill-color outranks UA color.
@@ -12001,6 +12935,16 @@ function TTBoard(){
                   })
                 );
               }),
+              // Account (10-28): last of the settings rows, where phones put it.
+              // Its icon is the live badge; the word beside it says the state.
+              React.createElement("button", { "data-flat":true, "data-menuaccount":ttCloudBadgeOf(cloud),
+                onClick:function(){ closeAllPopups(); setShowAccount(true); navOpen("account","menu"); ttCloud.poke(); },
+                style:{display:"flex",alignItems:"center",gap:"0.5rem",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid "+S.border,padding:"0.8rem 1rem",color:S.text,cursor:"pointer",fontFamily:S.fontBody,fontWeight:600,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
+                React.createElement(CloudBadge, { state:ttCloudBadgeOf(cloud), okAt:cloud.okAt, size:MENU_ICON }),
+                React.createElement("span", { style:{flex:1} }, "Account"),
+                React.createElement("span", { style:{fontSize:"0.8rem",fontWeight:600,color:S.textDim} }, accountWord(cloud)),
+                React.createElement("span", { style:{fontSize:"0.9rem",color:S.textDim} }, "\u203A")
+              ),
               // Work status + break (clock in/out live in header)
               clocked && React.createElement("div", null,
                 React.createElement("div", { style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:"0.75rem",padding:"0.7rem 1rem",borderBottom:"1px solid "+S.border,background:wsBg,whiteSpace:"nowrap"} },
@@ -12187,7 +13131,12 @@ function TTBoard(){
         React.createElement("div", { style:{color:S.text,fontWeight:700,fontSize:"0.86rem",fontFamily:S.fontBody} }, notifToast.title),
         React.createElement("div", { style:{color:S.textDim,fontSize:"0.78rem",marginTop:"0.15rem",fontFamily:S.fontBody} }, notifToast.body)
       ),
+      showAway && away.length>0 && React.createElement(AwayModal, { items:away,
+        onOpen:function(it){ var p=projects.find(function(x){ return x.id===it.pid; }); awayDone(it.key); setShowAway(false); if(p) setEditProj(p); },
+        onDone:function(){ awayDone(null); setShowAway(false); }, onLater:function(){ setShowAway(false); } }),
       showBackup && React.createElement(BackupModal, { trail:trailFor("backup"), clocked:!!atWorkStart, onClose:function(){ setShowBackup(false); } }),
+      showAccount && React.createElement(AccountModal, { trail:trailFor("account"), cloud:cloud,
+        onClose:function(){ setShowAccount(false); } }),
       showExtensions && React.createElement(ExtensionsModal, { trail:trailFor("extensions"),
         onChange:function(){ setModTick(function(x){ return x+1; }); },
         onClose:function(){ setShowExtensions(false); } }),

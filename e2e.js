@@ -1965,6 +1965,206 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     await pB3.close();
   }
 
+  // ---- account, 10-28: the badge, the menu row, email-code sign-in ----
+  // The sandbox server is never reached: every request to it is answered
+  // here, the way Supabase answers. Code 123456 is right, anything else wrong.
+  {
+    const SB='https://giqeknvzfeznxouxegxk.supabase.co/**';
+    const mockSB=async(pg, opt)=>{ opt=opt||{};
+      pg.__sb={ otp:0, verify:0, touch:0, logout:0 };
+      await pg.route(SB, async (route)=>{
+        const u=route.request().url(); let body={}; try{ body=route.request().postDataJSON()||{}; }catch(e){}
+        const json=(st,b)=>route.fulfill({ status:st, contentType:'application/json', body:b==null?'':JSON.stringify(b) });
+        if(opt.down) return json(503, { message:'down' });
+        if(u.endsWith('/auth/v1/otp')){ pg.__sb.otp++; return json(200, {}); }
+        if(u.endsWith('/auth/v1/verify')){ pg.__sb.verify++; return body.token==='123456'
+          ? json(200, { access_token:'A', refresh_token:'R', expires_in:3600, user:{ id:'u-1', email:body.email } })
+          : json(403, { error_code:'otp_expired', msg:'Token has expired or is invalid' }); }
+        if(u.endsWith('/rest/v1/rpc/touch_active')){ pg.__sb.touch++; return route.fulfill({ status:204, body:'' }); }
+        if(u.indexOf('/auth/v1/logout')>=0){ pg.__sb.logout++; return route.fulfill({ status:204, body:'' }); }
+        return json(404, {});
+      });
+    };
+    const fresh=async(hand, pos, seed)=>{
+      const ctx=await b.newContext({viewport:{width:390,height:844}});
+      const pg=await ctx.newPage(); pg.__errs=0; pg.on('pageerror',()=>{ pg.__errs++; });
+      await mockSB(pg, seed&&seed.mock);
+      await pg.addInitScript((a)=>{ localStorage.setItem('tt_settings', JSON.stringify({layout:'comfortable',tracking:'timer',theme:'neon-dream',schemes:{},fonts:{},mode:'dark',handedness:a.hand,headerPos:a.pos}));
+        if(a.sess) localStorage.setItem('ttacct_session', JSON.stringify(a.sess));
+        if(a.email) localStorage.setItem('ttacct_email', a.email); }, { hand, pos, sess:seed&&seed.sess, email:seed&&seed.email });
+      await pg.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(pg); await pg.waitForTimeout(500);
+      return pg;
+    };
+    const cloudOf=async(pg)=>pg.locator('[data-anchor="hdr-cloud"]').getAttribute('data-cloud');
+    const barBox=async(pg)=>pg.evaluate(()=>{ const c=document.querySelector('[data-anchor="hdr-cloud"]'); const bar=c.parentElement; const r=c.getBoundingClientRect(), br=bar.getBoundingClientRect();
+      return { left:r.left-br.left, right:br.right-r.right, w:r.width, h:r.height, first:bar.firstElementChild===c, last:bar.lastElementChild===c }; });
+
+    // a fresh device
+    const pA=await fresh('right','top');
+    t("account: a fresh device shows ? in the top bar", (await cloudOf(pA))==="none" && (await pA.locator('[data-anchor="hdr-cloud"] [data-cloudmark="q"]').count())===1);
+    let bx=await barBox(pA);
+    t("account: right hand, the badge is the last thing on the line, 20px square", bx.last && bx.w===20 && bx.h===20 && bx.right<20);
+    t("account: and nothing is sent to the server without an account", pA.__sb.touch===0 && pA.__sb.otp===0);
+    await pA.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await pA.waitForTimeout(400);
+    const rowTxt=await pA.locator('[data-menuaccount]').innerText();
+    t("account: the menu's Account row says Not set up", /Account/.test(rowTxt) && /Not set up/.test(rowTxt) && (await pA.locator('[data-menuaccount]').getAttribute('data-menuaccount'))==="none");
+    await pA.locator('[data-menuaccount]').click(); await pA.waitForTimeout(400);
+    t("account: the row opens the sheet with the trail Board > Menu", (await pA.locator('[data-modal-panel] [data-trail="Board > Menu"]').count())===1 && (await pA.locator('[data-anchor="acct-email"]').count())===1);
+    await pA.locator('[data-anchor="acct-email"]').fill('not an email');
+    await pA.locator('[data-anchor="acct-send"]').click(); await pA.waitForTimeout(300);
+    t("account: a bad address is caught before anything is sent", pA.__sb.otp===0 && /doesn.t look right/.test(await pA.locator('[data-modal-panel]').innerText()));
+    await pA.locator('[data-anchor="acct-email"]').fill('Brent@Example.com');
+    await pA.locator('[data-anchor="acct-send"]').click(); await pA.waitForTimeout(500);
+    t("account: Send code asks the server once and moves to the code", pA.__sb.otp===1 && (await pA.locator('[data-acctcode]').count())===1);
+    t("account: the code step's trail has Account to step back", (await pA.locator('[data-modal-panel] [data-trail="Board > Menu > Account"]').count())===1);
+    t("account: a new code has to wait a minute", (await pA.locator('[data-acctwait]').count())===1);
+    await pA.locator('[data-acctcode]').fill('654321'); await pA.waitForTimeout(500);
+    t("account: six digits sign in by themselves - a wrong code says so", pA.__sb.verify===1 && /wrong or has expired/.test(await pA.locator('[data-modal-panel]').innerText()));
+    const h1=await pA.locator('[data-modal-panel]').evaluate(e=>e.getBoundingClientRect().height);
+    await pA.locator('[data-acctcode]').fill('123456'); await pA.waitForTimeout(900);
+    t("account: the right code signs in", (await pA.locator('[data-acct="signout"]').count())===1 && /brent@example\.com/.test(await pA.locator('[data-modal-panel]').innerText()));
+    t("account: and checks in with the server", pA.__sb.touch>=1);
+    t("account: the top bar now shows the tick", (await cloudOf(pA))==="synced");
+    const keys=await pA.evaluate(()=>Object.keys(localStorage));
+    t("account: the sign-in is kept outside the tt_ keys a backup carries", keys.indexOf('ttacct_session')>=0 && !keys.some(k=>/^tt_.*(acct|session_tok)/.test(k)));
+    t("account: no page errors so far", pA.__errs===0);
+    await pA.locator('[data-acct="signout"]').click(); await pA.waitForTimeout(500);
+    t("account: Sign out goes back to the email, filled in", (await pA.locator('[data-anchor="acct-email"]').inputValue())==="brent@example.com");
+    t("account: and the cloud sleeps (Zz), not ?", (await cloudOf(pA))==="offline" && pA.__sb.logout===1);
+    await pA.close();
+
+    // signed in already, left hand: the badge leads the line and the tick draws
+    const pB=await fresh('left','top', { sess:{ access_token:'A', refresh_token:'R', expires_at:Date.now()+3600e3, email:'brent@example.com' }, email:'brent@example.com' });
+    await pB.waitForTimeout(400);
+    bx=await barBox(pB);
+    t("account: left hand, the badge is the first thing on the line", bx.first && bx.left<20);
+    t("account: an app opened signed in checks in and draws the tick", pB.__sb.touch>=1 && (await cloudOf(pB))==="synced" && (await pB.locator('[data-anchor="hdr-cloud"] [data-cloudmark="chk"]').count())===1);
+    await pB.locator('[data-anchor="hdr-cloud"]').click(); await pB.waitForTimeout(400);
+    t("account: tapping the badge opens the account", (await pB.locator('[data-acct="signout"]').count())===1);
+    t("account: no page errors (left hand)", pB.__errs===0);
+    await pB.close();
+
+    // the header at the bottom, and a server that is down
+    const pC=await fresh('right','bottom', { sess:{ access_token:'A', refresh_token:'R', expires_at:Date.now()+3600e3, email:'b@x.co' }, email:'b@x.co', mock:{ down:true } });
+    await pC.waitForTimeout(400);
+    bx=await barBox(pC);
+    t("account: header at the bottom, the badge still ends the line", bx.last && bx.w===20);
+    t("account: a server that is down shows the waggling !", (await cloudOf(pC))==="trouble" && (await pC.locator('[data-cloudmark="nudge"]').count())>=1);
+    // offline
+    await pC.context().setOffline(true); await pC.waitForTimeout(400);
+    t("account: no internet shows Zz", (await cloudOf(pC))==="offline" && (await pC.locator('[data-cloudmark="z1"]').count())>=1);
+    t("account: no page errors (bottom, down, offline)", pC.__errs===0);
+    await pC.close();
+
+    // a long job name: shortens, keeps the time, never runs under the tag
+    const pD=await fresh('right','top');
+    await pD.evaluate(()=>{ localStorage.setItem('tt_projects', JSON.stringify([{id:1,name:"Line 4 Hydraulic Press Rebuild and Recommission",lane:"Daily Activity",notes:"",order:0,parentId:null,role:"project",kind:"ongoing",stages:[]}]));
+      localStorage.setItem('tt_laneorder', JSON.stringify(['Daily Activity'])); });
+    await pD.reload(); await dropSplash(pD); await pD.waitForTimeout(500);
+    await pD.locator('[data-anchor="hdr-clock"]').click(); await pD.waitForTimeout(400);
+    for(let i=0;i<2;i++){ if(await pD.locator('[data-shiftchoice]').count()){ await pD.locator('[data-shiftchoice]').first().click(); await pD.waitForTimeout(400); } }
+    await pD.locator('[data-surface="lane"] button').filter({hasText:/^Start$/}).first().click(); await pD.waitForTimeout(400);
+    for(let i=0;i<2;i++){ if(await pD.locator('[data-shiftchoice]').count()){ await pD.locator('[data-shiftchoice]').first().click(); await pD.waitForTimeout(400); } }
+    const g=await pD.evaluate(()=>{ const n=document.querySelector('[data-hdrjob]'), tag=document.querySelector('[data-breaktag]'), c=document.querySelector('[data-anchor="hdr-cloud"]');
+      const time=n && n.nextElementSibling; const R=(e)=>e.getBoundingClientRect();
+      return n&&tag&&time ? { nameRight:R(n).right, timeLeft:R(time).left, timeRight:R(time).right, tagLeft:R(tag).left, tagRight:R(tag).right, cloudLeft:R(c).left, clipped:n.scrollWidth>n.clientWidth, vw:innerWidth } : null; });
+    t("account: a long job name is shortened, not run under the Break tag", !!g && g.clipped && g.nameRight<=g.timeLeft && g.timeRight<=g.tagLeft && g.tagRight<=g.cloudLeft && g.cloudLeft<g.vw);
+    t("account: no page errors (long name)", pD.__errs===0);
+    await pD.close();
+  }
+
+  // ---- reminders & nudges, 11-12 ----
+  {
+    const now=Date.now(), H=3600e3, D=86400e3;
+    const proj={ id:1, name:"Line 4 Rebuild", lane:"Daily Activity", notes:"", order:0, parentId:null, role:"project", kind:"finite",
+      startAt:now-5*D, endAt:now+10*D, stages:[], milestones:[],
+      reminders:[{ id:"r1", label:"Call the supplier", when:"at", at:now-2*H, repeat:"once", created:now-3*D }] };
+    const mkR=async(seed)=>{
+      const ctx=await b.newContext({viewport:{width:390,height:900}});
+      const pg=await ctx.newPage(); pg.__errs=0; pg.on('pageerror',()=>{ pg.__errs++; });
+      await pg.addInitScript((a)=>{ window.__badge=[];
+        navigator.setAppBadge=function(n){ window.__badge.push(n); return Promise.resolve(); };
+        navigator.clearAppBadge=function(){ window.__badge.push(0); return Promise.resolve(); };
+        if(sessionStorage.getItem('seeded')) return; sessionStorage.setItem('seeded','1');
+        localStorage.setItem('tt_settings', JSON.stringify({layout:'comfortable',tracking:'timer',theme:'neon-dream',schemes:{},fonts:{},mode:'dark',handedness:'right',headerPos:'top'}));
+        localStorage.setItem('tt_projects', JSON.stringify(a.projects)); localStorage.setItem('tt_laneorder', JSON.stringify(['Daily Activity']));
+        if(!a.firstRun) localStorage.setItem('tt_remind_last', String(Date.now()-3*3600e3)); }, seed);
+      await pg.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(pg); await pg.waitForTimeout(2200);
+      return pg;
+    };
+    const top=(pg)=>pg.locator('[data-modal-panel]').last();
+    const pR=await mkR({ projects:[proj] });
+    t("reminders: one that came due while the app was closed waits in While you were away", (await pR.locator('[data-away="1"]').count())===1 && /Call the supplier/.test(await top(pR).innerText()));
+    t("reminders: and the app icon shows the count", (await pR.evaluate(()=>window.__badge)).indexOf(1)>=0);
+    const fired=await pR.evaluate(()=>JSON.parse(localStorage.getItem('tt_remind_fired')||'{}'));
+    t("reminders: it is marked as delivered, so it never comes twice", Object.keys(fired).some(k=>k.indexOf('rem|1|r1|')===0));
+    await pR.locator('[data-modal-panel]').last().locator('button').filter({hasText:/^Later$/}).click(); await pR.waitForTimeout(400);
+    t("reminders: Later puts the list away but keeps it, badge and all", (await pR.locator('[data-away]').count())===0 &&
+      (await pR.evaluate(()=>JSON.parse(localStorage.getItem('tt_remind_away')).length))===1 && (await pR.evaluate(()=>window.__badge)).slice(-1)[0]===1);
+    await pR.reload(); await pR.waitForTimeout(2200);
+    t("reminders: and it is back the next time the app opens", (await pR.locator('[data-away="1"]').count())===1);
+    await pR.locator('[data-awayopen]').first().click(); await pR.waitForTimeout(600);
+    t("reminders: Open goes to the project", /Edit Project/.test(await top(pR).innerText()) && (await pR.locator('[data-remindblock]').count())===1);
+    t("reminders: the away list empties and the badge clears", (await pR.locator('[data-away]').count())===0 && (await pR.evaluate(()=>window.__badge)).slice(-1)[0]===0);
+    // R3 in Edit Project
+    t("reminders: a project with an end has Before it ends, on, using the default", (await pR.locator('[data-reminddue="on"]').count())===1 && /Using your default/.test(await top(pR).innerText()));
+    const hOn=await pR.evaluate(()=>document.querySelector('[data-remindblock]').getBoundingClientRect().height);
+    await pR.locator('[data-onswitch="reminddue"]').click(); await pR.waitForTimeout(250);
+    const hOff=await pR.evaluate(()=>document.querySelector('[data-remindblock]').getBoundingClientRect().height);
+    t("reminders: switching it off keeps the block the same height", (await pR.locator('[data-reminddue="off"]').count())===1 && Math.abs(hOn-hOff)<1);
+    await pR.locator('[data-onswitch="reminddue"]').click(); await pR.waitForTimeout(250);
+    await pR.locator('[data-remindchange]').click(); await pR.waitForTimeout(450);
+    t("reminders: Change opens the timing sheet, trail ending at the project", /Reminder timing/.test(await top(pR).innerText()) && (await top(pR).locator('[data-trail]').count())===1);
+    await top(pR).getByText('Just this one',{exact:true}).click();
+    await pR.waitForTimeout(300);
+    for(const c of ['shift','1d']) await top(pR).locator('[data-chips="remindown"] [data-chip="'+c+'"]').click();
+    await top(pR).locator('[data-chips="remindown"] [data-chip="1h"]').click();
+    await pR.locator('[data-anchor="remind-timing-save"]').click(); await pR.waitForTimeout(400);
+    t("reminders: Just this one shows in words", /Just this one/.test(await top(pR).innerText()) && /1 hour before/.test(await top(pR).innerText()));
+    await pR.locator('[data-reminderadd]').click(); await pR.waitForTimeout(450);
+    await pR.locator('[data-reminderlabel]').fill('Order seals');
+    await top(pR).getByText('Shift start',{exact:true}).click(); await pR.waitForTimeout(200);
+    await top(pR).locator('[data-chip="weekly"]').click();
+    await pR.locator('[data-anchor="reminder-save"]').click(); await pR.waitForTimeout(400);
+    t("reminders: + Add a reminder adds a row", (await pR.locator('[data-reminderrow]').count())===2 && /Order seals/.test(await top(pR).innerText()));
+    await top(pR).locator('button').filter({hasText:/^Save$/}).last().click(); await pR.waitForTimeout(600);
+    const saved=await pR.evaluate(()=>JSON.parse(localStorage.getItem('tt_projects')).find(x=>x.id===1));
+    t("reminders: Save keeps the timing and both reminders", saved && saved.remindDue && JSON.stringify(saved.remindDue.chips)==='["1h"]' &&
+      saved.reminders.length===2 && saved.reminders.some(r=>r.label==='Order seals' && r.when==='shiftStart' && r.repeat==='weekly'));
+    // Time Settings
+    await pR.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await pR.waitForTimeout(300);
+    await pR.locator('[data-menugroup="time"]').click(); await pR.waitForTimeout(300);
+    await pR.locator('[data-groupitem]').filter({hasText:/^Tracking$/}).click(); await pR.waitForTimeout(500);
+    t("reminders: Tracking has the Reminders & nudges section with four nudges", (await pR.locator('[data-remindsettings]').count())===1 && (await pR.locator('[data-nudge]').count())===4);
+    await pR.locator('[data-remindsettings]').scrollIntoViewIfNeeded(); await pR.waitForTimeout(800);   // a tap straight after a scroll is the scroll's
+    await pR.locator('[data-onswitch="remindhold"]').click(); await pR.locator('[data-onswitch="nudge-long"]').click();
+    await pR.locator('[data-chips="nudge-long-n"] [data-chip="2"]').click();
+    await pR.locator('[data-chips="reminddefault"] [data-chip="1w"]').click(); await pR.waitForTimeout(300);
+    const rs=await pR.evaluate(()=>JSON.parse(localStorage.getItem('tt_settings')).remind);
+    t("reminders: the settings save as you change them", rs && rs.hold===true && rs.nudges.long.on===true && rs.nudges.long.hrs===2 && rs.due.indexOf('1w')>=0);
+    t("reminders: no page errors", pR.__errs===0);
+    await pR.context().close();
+    // the first run after the update opens quietly, without a backlog
+    const pF=await mkR({ projects:[proj], firstRun:true });
+    t("reminders: the first run after the update opens quietly and starts counting from now", (await pF.locator('[data-away]').count())===0 &&
+      (await pF.evaluate(()=>+localStorage.getItem('tt_remind_last')))>Date.now()-60e3);
+    // a step added with a date already past is not 'missed'
+    await pF.evaluate(()=>{ const P=JSON.parse(localStorage.getItem('tt_projects')); P[0].milestones=[{id:"late1",label:"Logged after",dueAt:Date.now()-5*3600e3,targets:[],doneAt:null}];
+      localStorage.setItem('tt_projects', JSON.stringify(P)); });
+    await pF.reload(); await pF.waitForTimeout(2400);
+    t("reminders: a step entered with a date already past is not reported as missed", (await pF.locator('[data-away]').count())===0 && pF.__errs===0);
+    await pF.context().close();
+    // the practice board never reminds
+    const pT=await mkR({ projects:[proj] });
+    await pT.evaluate(()=>{ localStorage.setItem('tt_testmode','true'); }); await pT.reload(); await pT.waitForTimeout(2600);
+    t("reminders: the practice board never reminds", (await pT.locator('[data-away]').count())===0 && pT.__errs===0);
+    await pT.context().close();
+    // closed records stay quiet
+    const pQ=await mkR({ projects:[Object.assign({}, proj, { closedAt:now-D })] });
+    t("reminders: a closed project's reminders stay quiet", (await pQ.locator('[data-away]').count())===0 && pQ.__errs===0);
+    await pQ.context().close();
+  }
+
   await b.close();
   let bad=0; ok.forEach(([l,p])=>{ if(!p){ bad++; console.log("   x "+l); } });
   console.log("e2e        : "+(ok.length-bad)+"/"+ok.length+" passed"+(bad?"  FAILED":""));

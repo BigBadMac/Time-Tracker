@@ -9,6 +9,10 @@ shift.js       46 checks                    (work days, shifts, overtime)
 lifecycle.js  646 checks                    (projects, nesting, archive, scheduling, breaks)
 e2e.js        768 checks                    (Playwright, the real board in a browser)
 ```
+At "11-12 reminders" (and again at "11-13 v1.4"): tt-tests 1899, boot 424, shift 46, lifecycle 646,
+account 67, reminders 83, e2e 841/841 (all green; the help walk p23 and the
+breaks/trail blocks can flake on a tap eaten by the scroll guard - rerun). db/run.sh needs the local Postgres rebuilt after a
+container reset (see "Container resets"); the schema did not change.
 
 **Delivery rule (Brent, 10-27):** when Brent asks for files to push, send
 the full set as ONE zip **and** the built `index.html` on its own beside it,
@@ -19,14 +23,177 @@ so he can open and check the build before pushing.
 before (pushed). First paint is identical to 1.2 apart from the splash's
 version number.
 
-## START HERE - 1.3 (breaks) is built. Next: the database.
+## START HERE - 1.4 DELIVERED 11-13 (stamp "11-13 v1.4"): sign-in + reminders. NEXT: sync.
 
-The breaks package (Numbers testers' top ask) shipped as 1.3 - see Recent
-work. Next development phase is the **database integration** (hosted
-Supabase, free plan, for the sandbox), but table design is PAUSED on Brent's
-answers to the five organization / share-link questions (see "Multi-user
-hurdles"). Brent also has to create the Supabase project and send the
-Project URL and publishable key (never the secret key or DB password).
+Brent said push (11-13). APP_VERSION = "1.4". Zip time-tracker-v1.4.zip + index.html
+sent; full release notes in RELEASE-NOTES-1.4.md for Brent to trim. Next big
+piece: sync (both ways, conflicts), then sharing (icons/pane/links/picker) and
+the web report (H3 + W1), all designed above.
+
+(Previous heading: 1.4 = sign-in (10-28) + reminders (11-12), both BUILT.)
+
+VERSION (Brent, 11-12): REVERSED the 10-28 "2.0" call - sign-in ships as
+a 1.x release; 2.0 waits for sync + sharing actually working. Current is
+1.3B. NEXT IS 1.4 (Brent, 11-12). Set APP_VERSION = "1.4" (and the About
+notes) when he says he is pushing.
+
+Built 10-28 (stamp "10-28 account sign-in", version still 1.3B): email-code
+sign-in against the sandbox, the account badge, the Account menu row and
+sheet, and the long-job-name fix in the top bar. See Recent work. Brent's
+check on the phone: Account (last menu row) or the cloud at the end of the
+top bar -> email -> code from the email -> signed in, tick in the top bar.
+Then verify server-side with query_logs (auth_logs) and
+`select id,last_active_at from profiles` - touch_active creates his profile
+row. If the code email shows a LINK instead of a code, the Magic Link
+template was not saved with {{ .Token }}. If his project's OTP length is not
+6 (Supabase setting), the sheet's six boxes need changing.
+
+Email sending: Brent's iCloud SMTP (smtp.mail.me.com:587, app-specific
+password, sender = the iCloud address itself - a different From address is
+refused "5.7.0 From address is not one of your addresses"). Auth rate limit
+was raised to 30 emails/hour when SMTP went in. Move to a hiattstudios.com
+sender (Resend) before real users.
+
+## Reminders & nudges - BUILT (11-12, stamp "11-12 reminders"), in 1.4 with sign-in
+
+No server (no sync yet): reminders fire while the app is open (checked every
+20 s, on returning to the app, and 1.5 s after opening). Anything that came
+due while closed (found more than 3 min late, up to 7 days back) goes to
+"While you were away" (oldest first, Open on each). **Done** clears the
+list; **Later** or a tap outside only puts it away - it comes back the next
+time the app opens (a stray tap must never wipe missed reminders). The
+home-screen icon shows the count (setAppBadge / clearAppBadge). Server push
+= later, with sync.
+- Edit Project, layout R3: Remind me / Before it ends switch (finite projects
+  with an end; otherwise a hint), the default in words + Change ->
+  RemindTimingModal (My default | Just this one, chips: at the time, 1 hour
+  before, start of that shift, 1 day before, 1 week before); then own
+  reminders and "+ Add a reminder" -> ReminderModal (what; Date & time |
+  Shift start | Shift end = 30 min before end; repeat once/daily/workdays/
+  weekly; hold-to-delete). Milestone steps: the switch only ("Before it's due").
+- Stored on the record: `remindDue` (null = default, {off:true}, {chips:[..]}),
+  `reminders` [{id,label,when,at,repeat,created}]; on a step: `remind`.
+- Time Settings > **Tracking** holds the "Reminders & nudges" section
+  (settings.remind: due chips, hold, nudges noIn/runEnd/long/lateOut).
+  Defaults: shift + 1 day before; nudges on except "one job running long".
+- Engine (pure, before "Schedule measurement"): normalizeRemind, shift
+  helpers (night shifts handled), remindChipAt, remindDeliverAt (hold),
+  reminderOccurrences (skips closed records, met steps, switched off),
+  dueReminders {fresh, late}, dueNudges. Fired keys in `tt_remind_fired`
+  (pruned to 9 days), the away list in `tt_remind_away`; both cleared with
+  the projects on start-over.
+- The practice board (tt_testmode) never reminds. ONLY WHAT CAME DUE SINCE
+  THE LAST LOOK counts: `tt_remind_last` holds when the checker last ran, and
+  dueReminders(.., since) skips anything due at or before it. So a step
+  entered with a date already past, or a backup brought back, is never
+  "missed"; the first look on a device (no tt_remind_last) reports nothing,
+  which is also the quiet upgrade. (A first try marked the backlog seen on
+  first run only - it reported every past-dated step added later, and the
+  away sheet covered e2e's milestone pan. Don't go back to that.)
+- Manual: guide `reminders` (six steps; stages remind / reminder / away /
+  remindsettings), listed under Time Settings. The settings section is its
+  own component, `RemindSettings` (TrackingModal draws it), so the manual can
+  stage it. GOTCHA: a short staged SHEET sits a fraction of a pixel off and
+  breaks e2e's steady-box check (box top 536 vs 537) - the away stage carries
+  four items so it fills the stage like the others.
+- Tests: reminders.js (83 checks: engine, sheets, manual; 16/16 engine
+  mutants killed) and an e2e block (20). Run:
+  `TZ=America/Los_Angeles node reminders.js /tmp/app_only.js`
+- Mocks: design/notif.py, design/form*.js.
+
+## Web project report (with sync) - DESIGN SETTLED 11-13 (H3 setup, W1 page)
+Brent (11-13): audience SELECTABLE; LIVE, always up to date (no snapshots);
+HOW and WHO sees hours SELECTABLE. Audiences: just me / people on the
+project / everyone in my org (signed in) / anyone with the link (no
+account). Hours levels: none / totals / by task / by task and person, set
+per audience. Mock: design/webreport.html (interactive; "View as" switch).
+Setup options R1 presets, R2 two questions, R3 audience x hours table,
+R4 one link per audience. Page layouts W1 dashboard, W2 document (print/PDF).
+Brent asked for an R3+R4 hybrid (11-13): signed-in audiences are table rows
+(nothing to send), outsiders get named links each with its own hours, end
+date, opens count and Revoke. Mocked as H1 one table with links as rows,
+H2 table + link cards, H3 one-line rows opening their own sheet (S3 style).
+Mock: design/webreport2.html.
+DECIDED (11-13): **H3**. Web report sheet = publish switch, then "Signed-in
+people" rows (Just me / People on the project / Everyone in my org, each
+showing its hours level) and "Links · no account needed" rows (name, hours,
+end date), "+ Add a link". Each row opens its own sheet: on/off (signed-in),
+hours chips (none/totals/by task/by task and person), and for links: the
+address + Copy, Ends, opened count, HOLD to revoke (others keep working).
+Revoked link page: "This link no longer works. Ask the owner for a new one."
+PAGE DECIDED (11-13): **W1 dashboard** - header (name, org, owner, dates,
+"Live · synced N min ago"), period switch (this week / all time / pay
+period), tiles (progress by milestones, ends, next due, hours if allowed),
+then Milestones and Hours panels side by side (hours by task, by person when
+granted; "Hours aren't shared on this page" when none); stacks to one column
+on a phone. Add a Print / Save as PDF that prints a plain document version
+(the W2 look) - suggested, Brent took W1 without objecting to it.
+Server shape: an RPC returning one aggregated report for one project,
+gated by the link/role, hours cut to the level granted. Covers shared
+projects only (personal jobs never leave the phone).
+
+## Sharing icons - DESIGN SETTLED (10-28/29), not built yet
+
+Brent's picks, in order: family "people + arrow" (not fence/globe/linked
+heads); arrow style 2 = ONE arrow, heads both ends, SHADING from the left
+party's colour to the right's; left = you / your group, FULL size; right =
+the other party, ~0.8 size, same baseline; one standard slot 28 high x 44
+wide, icon CENTRED in it (option 2); "them" in the theme's action (syncing)
+blue - orange rejected; GREEN MARKS THE OWNER (concept 1): your project ->
+you green, them blue; someone else's -> they green, you blue. Six meanings:
+A on your own (one person, always yours), B internal (the trio), C one to
+one, D group to one, E you into a group, F group to group. Small groups
+beside an arrow are the real trio scaled (.66, lighter line) - a "heads over
+one curve" version read as a frowning face. Generators: design/gen2-6.py
+(SVG paths). Colours = S.successText / S.actionText. Note: in Frosted dark
+the green and teal-blue sit close; watch it. OPEN: placement (after the
+name in a fixed slot before Start was the mock), whether tasks/nested items
+carry it, and whether one task can be shared differently from its project.
+PLACEMENT SETTLED (10-29): cards - P2, a fixed slot just before Start (icon
+20 high, slot 44:28); lanes - LC, the lane header's icon sits in the SAME
+COLUMN as the cards' slot (one column to scan; tasks, being indented, land
+slightly left of it). Shown on the mock and not objected to: an icon shows
+only where sharing DIFFERS from what contains it (lane > project > task);
+unshared records show nothing (the lone-person icon is for the account /
+sharing settings, not every card). Mocks: design/place*.js inject into the
+real build. Build this with the sync layer.
+SHARING PANE (Brent, 10-29): tapping any sharing icon opens it. Layout S3:
+a summary (big icon + who it's shared with + owner/org), then rows that each
+open their own sheet with the trail: People, Invite someone, Share links,
+Waiting for you, Who sees hours, and "Make it just mine again". Make a share
+link = three groups (what they get / rules for the link / their access),
+every rule optional. Shared-with-you view: owner, your access, who else,
+Ask for more access, Leave. Rings follow the icons (green = owner's side).
+LANE SHARING = everything in the lane, shared the same way; projects added
+to the lane later join it. (DB shares projects, not lanes: needs a lane
+record server-side or the app applies the lane's share to each project.)
+PEOPLE PICKER (mocked 10-29, design/picker.py): Invite -> "Someone in your
+group" / "Anyone, with a share link"; picker = org switcher, search, recent
+then everyone, NAMES ONLY; above ~200 members search-only (no browsing);
+tap -> role (+ which part for lead/assignee) -> Add; foot: "Not in <org>
+yet?" -> the org's join code (admins make codes). Needs a server function
+returning names in orgs you belong to. Directory sync / departments / admin
+rules = ENTERPRISE, later (ask Boeing IT first).
+RULE CHANGED (Brent, 10-29: "U1"): EVERY lane, project and task shows its
+OWN sharing icon, even when it matches what contains it - nothing is ever
+blank. Unshared items show the single person (A). Supersedes the "only
+where it differs" note above. Mock: design/place3.js (U1).
+
+## The sandbox database is LIVE (10-28).
+
+Supabase project "Time-Tracker Sandbox" (id giqeknvzfeznxouxegxk, us-east-2,
+free plan) holds schema DRAFT 2 (db/01_schema.sql), loaded by Brent pasting
+into the SQL Editor. The Supabase connector READS fine (list_tables,
+get_advisors, execute_sql) and, since Brent set the write tools to Always
+allow (10-28), apply_migration WORKS - apply schema changes directly, keep
+db/01_schema.sql matching, and re-run get_advisors after each. (Before that
+setting, every apply_migration came back "cancelled".) Tighten the
+permission again before a production database. Sign-in: EMAIL CODE (10-28). Checked after load: 11 tables
+all RLS, 21 policies, 17 public + 13 private functions, anon calls nothing,
+join_by_link uncallable. Advisors: security = only the 17 intended RPCs
+(expected); performance = only "unused index" (empty DB). Next: sandbox copy
+of the app, sign-in method (email code vs Apple), sync layer. NEVER ask for
+or accept the secret key / DB password; never run 00_local_shim on Supabase.
 
 ## START HERE - modules bring their own help: DONE (10-20). Brent picks next.
 
@@ -150,10 +317,11 @@ node tt-tests.js time-tracker.jsx
 node boot.js /tmp/app_only.js
 node shift.js /tmp/app_only.js
 node lifecycle.js /tmp/app_only.js
+node account.js /tmp/app_only.js
 node e2e.js index.html          # ~8 minutes now, run it in the background
 ```
 
-All five must pass before anything is changed. If they don't, the attachments
+All six must pass before anything is changed. If they don't, the attachments
 are out of sync with each other — fix that first.
 
 **`HANDOVER.md` and `MODULES.md` are also mirrored in the claude.ai Project
@@ -193,6 +361,7 @@ a wall clock and a stale comparison will differ on that alone.
 | `shift.js` | Work-day resolution, overnight shifts, overtime. |
 | `lifecycle.js` | Project types, closing out, nesting, the archive, scheduled starts. |
 | `e2e.js` | Playwright. The real board in a real browser: gestures, geometry, flows. |
+| `account.js` | The account layer against a fake Supabase: sign-in, the badge's five states, the sheet, backups never carrying tokens. |
 | `MODULES.md` | Module platform contract and Tool Tracker. |
 
 ## Architecture in one paragraph
@@ -556,6 +725,59 @@ which is what makes Backup & Restore whole.
 
 ## Recent work, newest first
 
+- **Account sign-in, the cloud badge (10-28).** Brent chose: email code
+  (not Apple); the Account row LAST in the menu (option B) plus a badge at
+  the outer end of the top bar (C) that opens the same sheet; the badge is
+  the cloud (A) with five marks, all line art on the 28 grid, theme colours:
+  - `?` grey = ACCOUNT NOT SET (no account ever set up on this device).
+    Fades in, grows (scale .8->1) and shrinks over six seconds, holds,
+    fades out: a 10s loop, always (Brent: "not obvious enough" otherwise).
+  - tick green = signed in, last check-in worked. Draws itself in when a
+    check-in succeeds, holds ~12s ("fade after 10 to 15 seconds"), fades to
+    the plain green cloud. If the state changes while it shows, it fades
+    out (0.5s) before the next mark.
+  - two arcs blue = syncing (turn while busy).
+  - `!` yellow = connection trouble: online, server not answering (5xx, no
+    answer, e.g. the free project PAUSED). Waggles 3x, then holds (Brent
+    chose the waggle over a fade: "better attention getting"). Retries
+    every minute.
+  - `Zz` red = OFFLINE = account set up but not connected: no internet, OR
+    SIGNED OUT (Brent: "If signed out... zzz"). Solid line, not dashed
+    (Brent disliked the dashed cloud). Zz drift up 3x, then hold.
+  - Reduce Motion stops all of it. Badge is a fixed 20px box (steady-box).
+  - Placement: last on the ticker line right-handed, first (before the
+    Break/End tag) left-handed; also at the bottom header.
+  - Code: `ttCloudMake(env)` (one controller `ttCloud`; env injects fetch,
+    store, clock, online, timers for tests), `ttCloudBadgeOf(state)`,
+    `CloudGlyph`, `CloudBadge`, `AccountModal` (steps email -> code -> in;
+    `demo` draws a step for the manual), `accountWord`, CSS keyframes
+    ttCloudQ/Chk/Out/Spin/Nudge/Z in App's style block. Supabase Auth REST
+    straight over fetch - no supabase-js: /auth/v1/otp (create_user),
+    /auth/v1/verify (type email), /auth/v1/token?grant_type=refresh_token,
+    /auth/v1/logout?scope=local, /rest/v1/rpc/touch_active.
+  - Session in `ttacct_session`, email in `ttacct_email` - NOT tt_ keys, so
+    a backup file never carries tokens (tested). The email outliving sign
+    out is what makes Zz rather than ? after signing out.
+  - Checks in on open, when back online, when the app comes back into view
+    after 2+ minutes, and every minute while in trouble. A sign-in the
+    server refuses (400/401/403 on refresh) signs out with a sentence.
+  - Signing in sends NOTHING from the board. The sheet says so.
+  - Help: guide `signin` (covers "Account", in "Your data"); the header
+    picture has a part for the badge. Paint diff vs 1.3B: the CSS and the
+    badge in the ticker, nothing else.
+  - Also fixed: a long job name in the top bar ran UNDER the Break tag and
+    pushed the time off; it now ends in an ellipsis (`data-hdrjob`).
+  - GOTCHA: a new help stage that is a whole sheet must be listed in
+    HELP_SHEETS (and HELP_STAGE_W), or the manual measures it zero tall and
+    draws a blank picture. account.js now checks the Account entry.
+  - e2e help walk (p23) is flaky in this container on 1.3B too (different
+    step each time, ~1 run in 3); rerun. Full run 10-28: 806/806.
+  - Tests: account.js 67 (mutation-checked: 14 mutations, all caught after
+    tightening the left-hand placement test); e2e block "account, 10-28"
+    (fresh device, bad email, wrong/right code, tick, sign out -> Zz, left
+    hand, bottom header, server down -> !, offline -> Zz, long name). The
+    e2e mocks every supabase.co request; nothing reaches the real server.
+
 - **Version 1.3B "Baker" (10-27).** Brent: "Since this is getting ready for
   the database release, can we make this release version 1.3B, as in
   Baker?" `APP_VERSION = "1.3B"`; the splash reads v1.3B. Paint diff: the
@@ -573,7 +795,7 @@ which is what makes Backup & Restore whole.
   (auth.users, auth.uid(), anon/authenticated); `db/00_local_shim.sql`
   stands in for Supabase's auth LOCALLY ONLY (never run it on Supabase);
   `db/02_tests.sql` runs as each person in turn; `db/run.sh` rebuilds a
-  fresh local database and runs them (74/74). Needs the local Postgres 16:
+  fresh local database and runs them (79/79). Needs the local Postgres 16:
   `su pg -c "/usr/lib/postgresql/16/bin/pg_ctl -D /home/pg/data -o '-k /tmp
   -p 54329' -l /home/pg/log.txt start"`.
   - Tables: profiles (last_active_at), orgs (join_code_hash), org_members
@@ -604,6 +826,19 @@ which is what makes Backup & Restore whole.
   - Mutation-checked: 15 rules removed one at a time, each caught.
     GOTCHA found doing it: in psql, `:F` inside a string concat drops its
     quotes - refusal tests "passed" on a syntax error. Use quote_literal().
+  - 10-28 (after the 1.3B push): functions revoked from anon and PUBLIC
+    (Supabase grants new functions to both by default); test 75/75. The
+    pushed 1.3B db/ is one step behind - load THIS 01_schema.sql.
+  - 10-28 DRAFT 2 (live on Supabase): permission helpers (hash_code,
+    access_ok, my_membership, is_org_*, project_org, is_top_admin,
+    in_branch, can_read/write/see_hours/answer, join_by_link) moved to
+    schema `private` (not exposed by the API; authenticated has usage +
+    execute so policies work); policies use `(select auth.uid())`; an index
+    on every foreign key. db/03_sandbox_reset.sql drops everything - EMPTY
+    SANDBOX ONLY. Tests 79/79 (helpers not in public, not callable signed
+    out, join_by_link uncallable; profiles of non-project-mates hidden).
+    Mutation note: weakening profiles_read's inner auth.uid() is masked by
+    the joined tables' own RLS (equivalent mutant - defence in depth).
   - Not yet: personal (no-org) projects beyond the owner; server-sent
     notifications; the "top admin away" hand-over rule (last_active_at is
     recorded); closing/deleting records; module switch per board; the

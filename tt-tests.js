@@ -1169,10 +1169,10 @@ test("every Delete that opens something is held, not tapped", () => {
   // tap on the way to Save cannot start a delete. The milestone step's Delete
   // had no confirmation at all, so there the hold IS the guard.
   has(/var HOLD_DELETE_MS = 1500;/, "the delete hold is a couple of seconds");
-  eq(count(/"data-holddelete":true/g), 5,
-    "five destructive entry points hold: project form, lane editor, milestone step, tutorial reset, board reset");
+  eq(count(/"data-holddelete":true/g), 6,
+    "six destructive entry points hold: project form, lane editor, milestone step, a reminder (11-12), tutorial reset, board reset");
   ["onHold:onDelete, holdMs:HOLD_DELETE_MS", "onHold:function(){ setConfirm(true); }, holdMs:HOLD_DELETE_MS",
-   "onHold:function(){ onDelete(step.id); }, holdMs:HOLD_DELETE_MS"].forEach((frag) => {
+   "onHold:function(){ onDelete(step.id); }, holdMs:HOLD_DELETE_MS", "onHold:function(){ props.onDelete(r.id); }, holdMs:HOLD_DELETE_MS"].forEach((frag) => {
     ok(s.indexOf(frag) >= 0, "held: " + frag.slice(7, 40));
   });
   // No Delete entry point is a plain tap any more.
