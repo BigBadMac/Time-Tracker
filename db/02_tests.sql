@@ -274,6 +274,3 @@ select tests.ok(not exists(select 1 from pg_proc p join pg_namespace n on n.oid 
 select tests.refused('select private.join_by_link(null::public.share_links, ' || quote_literal(:F) || ')', 'join_by_link stays uncallable');
 reset role;
 
-\o
-select count(*) filter (where ok) || '/' || count(*) || ' passed' as rls from tests.results;
-select n, label from tests.results where not ok order by n;

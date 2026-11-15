@@ -18,7 +18,7 @@
 </head>
 <body>
 <pre id="err"></pre>
-<div id="root"><div id="boot">Time Tracker build 11-13 v1.4<br>
+<div id="root"><div id="boot">Time Tracker build 11-14 v1.5<br>
 HTML loaded &#10003; &mdash; starting scripts&hellip;<br>
 <span style="font-size:11px;opacity:.7">If this message never goes away, the scripts below it failed to run.<br>
 If you cannot see this message at all, the file itself is not being displayed.</span></div></div>
@@ -17312,9 +17312,12 @@ var ttDb = {
   backend: ttDbBackend,
   // Raw strings: for the few keys stored as plain text rather than JSON.
   getRaw: function(k){ try{ var b=ttDbBackend(); return b ? b.getItem(k) : null; }catch(e){ return null; } },
-  setRaw: function(k, v){ try{ var b=ttDbBackend(); if(!b) return false; b.setItem(k, v); return true; }catch(e){ return false; } },
-  remove: function(k){ try{ var b=ttDbBackend(); if(b) b.removeItem(k); }catch(e){} }
+  setRaw: function(k, v){ try{ var b=ttDbBackend(); if(!b) return false; b.setItem(k, v); if(TT_DB_NOTE) TT_DB_NOTE(k); return true; }catch(e){ return false; } },
+  remove: function(k){ try{ var b=ttDbBackend(); if(b) b.removeItem(k); if(TT_DB_NOTE) TT_DB_NOTE(k); }catch(e){} }
 };
+// Personal sync listens here: every write through the doorway names its key,
+// and the sync layer decides whether that key travels (11-13).
+var TT_DB_NOTE = null;
 // JSON reads and writes. A missing, empty or corrupt value reads as the
 // default; a failed write (quota, private mode) is swallowed, as it always was.
 function load(key, def){ try{ var v=ttDb.getRaw(key); return v?JSON.parse(v):def; }catch(e){ return def; } }
@@ -17413,12 +17416,13 @@ function ttCloudMake(env){
   function keep(s){ sess=s; if(s) store.set(TT_ACCT_SESSION, JSON.stringify(s)); else store.remove(TT_ACCT_SESSION); }
   // A request to the server. Resolves {status, body} for any HTTP answer and
   // {status:0} when the request never got an answer (offline, blocked, DNS).
-  function call(path, body, token){
+  function call(path, body, token, method){
     var f=F(); if(!f) return Promise.resolve({ status:0, body:null });
     var h={ "apikey":TT_CLOUD_KEY, "Content-Type":"application/json" };
     if(token) h["Authorization"]="Bearer "+token;
-    var p;
-    try{ p=f(TT_CLOUD_URL+path, { method:"POST", headers:h, body:JSON.stringify(body||{}) }); }
+    var p, opt={ method:method||"POST", headers:h };
+    if(opt.method!=="GET") opt.body=JSON.stringify(body||{});
+    try{ p=f(TT_CLOUD_URL+path, opt); }
     catch(e){ return Promise.resolve({ status:0, body:null }); }
     return Promise.resolve(p).then(function(r){
       return Promise.resolve(r.text ? r.text() : "").then(function(t){ var b=null; try{ b=t?JSON.parse(t):null; }catch(e){} return { status:r.status, body:b }; },
@@ -17515,6 +17519,37 @@ function ttCloudMake(env){
       if(tok) call("/auth/v1/logout?scope=local", {}, tok);   // best effort: the device forgets either way
       return Promise.resolve(true);
     },
+    // A request as the signed-in person, for the sync layer. Refreshes the
+    // sign-in first if it is about to lapse, and once more on a 401. A
+    // refresh the server refuses signs out, as check() does.
+    request:function(method, path, body){
+      if(st.phase!=="in" || !sess) return Promise.resolve({ status:401, body:null });
+      function renew(){
+        return call("/auth/v1/token?grant_type=refresh_token", { refresh_token:sess.refresh_token }).then(function(r){
+          if(r.status>=200 && r.status<300 && r.body && r.body.access_token){ keep(sessionFrom(r.body, st.email)); return true; }
+          if(r.status===400 || r.status===401 || r.status===403){ keep(null); emit({ phase:"out", net:"idle", note:"Your sign-in ran out. Sign in again with a new code." }); }
+          return false;
+        });
+      }
+      var go=function(){ return call(path, body, sess.access_token, method); };
+      var soon=sess.expires_at && sess.expires_at-now() < 60000;
+      return (soon ? renew() : Promise.resolve(true)).then(function(ok){
+        if(!ok || !sess) return { status:401, body:null };
+        return go().then(function(r){
+          if(r.status!==401) return r;
+          return renew().then(function(ok2){ return ok2 && sess ? go() : r; });
+        });
+      });
+    },
+    // The sync layer reports here, so the one badge tells the whole story.
+    activity:function(net){
+      if(st.phase!=="in") return;
+      if(net==="ok") emit({ net:"ok", okAt:now(), online:true, note:"" });
+      else if(net==="busy") emit({ net:"busy", online:true });
+      else if(net==="offline") emit({ online:false });
+      else emit({ net:"trouble", online:isOnline() });
+    },
+    user:function(){ return sess && sess.user_id || st.user || null; },
     // The world changed: back online, back in view. Check in when it has been
     // a while, or straight away when the last try failed.
     poke:function(){
@@ -17527,6 +17562,449 @@ function ttCloudMake(env){
   return api;
 }
 var ttCloud = ttCloudMake(null);
+
+// ---------------- Personal sync (opt-in, 11-13) ----------------
+// "Sync my own jobs and hours" (Brent, 11-13: opt-in, off by default) puts a
+// person's own board on every device they sign in on. Only they can read it;
+// the server table is personal_items (db/04_personal.sql).
+//
+// What travels: the board (projects, logs, disruptions, breaks, lanes), the
+// Work Schedule and every other setting EXCEPT the look, the running clock,
+// module data, and which reminders and break notices have already gone off
+// (so a reminder never sounds on both devices). What stays per device
+// (Brent, 11-13): the look - theme, colours, fonts, layout, light or dark,
+// left or right hand, header position - plus folded cards and lanes, the
+// practice board and the "while you were away" list.
+//
+// How: each record is a set of fields, and each field remembers WHEN it last
+// changed on this device (ttsync_meta: [time, hash] per field). A write
+// through the doorway marks its key; a moment later the key is rescanned and
+// any field whose hash moved gets the time of that write. Changed records
+// queue for the server; the server merges field by field, later edit wins
+// (personal_push), and the device pulls everything changed since it last
+// looked, merging the same way. Ties go to the server's copy so every device
+// ends up the same. A deletion is a time too.
+//
+// ttsync_* keys are NOT tt_*: a backup or a reset never carries them.
+var TT_SYNC_STATE = "ttsync_state", TT_SYNC_META = "ttsync_meta";
+var TT_SYNC_COLLS = { tt_projects:"projects", tt_logs:"logs", tt_disruptions:"disruptions", tt_breaks:"breaks" };
+var TT_SYNC_LOOK = ["layout","colorScheme","theme","schemes","fonts","mode","handedness","headerPos"];
+var TT_SYNC_OBJ = ["tt_settings","tt_lanemeta","tt_modules","tt_session","tt_breaknags","tt_remind_fired","tt_notif_fired"];
+var TT_SYNC_VAL = ["tt_laneorder","tt_distpresets"];
+var TT_SYNC_BATCH = 500;                 // the server takes at most this many per push
+var TT_SYNC_OVERLAP_MS = 30000;          // pull a little earlier than the cursor: late commits
+var TT_SYNC_SETTLE_MS = 400;             // a burst of writes is one change
+var TT_SYNC_PUSH_MS = 2000;              // and goes up this long after the last one
+var TT_SYNC_PULL_MS = 60000;             // while open, look for other devices' changes this often
+function ttSyncKind(k){
+  if(!k || typeof k!=="string") return null;
+  if(TT_SYNC_COLLS[k]) return "coll";
+  if(TT_SYNC_OBJ.indexOf(k)>=0) return "obj";
+  if(TT_SYNC_VAL.indexOf(k)>=0) return "val";
+  if(k.indexOf("tt_mod_")===0 && /^tt_mod_[a-z][a-z0-9-]{1,23}_[a-z0-9_-]{1,40}$/.test(k)) return "val";   // tt_mod_<module id>_<key>
+  return null;
+}
+function ttSyncCollKey(coll){ for(var k in TT_SYNC_COLLS) if(TT_SYNC_COLLS[k]===coll) return k; return null; }
+// Short and stable: FNV-1a, 32 bits, base 36.
+function ttHash(str){
+  var h=0x811c9dc5;
+  for(var i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h, 0x01000193)>>>0; }
+  return h.toString(36);
+}
+function ttFieldHash(v){ return ttHash(JSON.stringify(v===undefined ? null : v)); }
+// Shared projects live in the shared tables, never in personal sync (11-14,
+// ahead of sharing): a project carrying a shareId - and every task under it -
+// is left alone here, both ways. Nothing carries one yet; this is so a device
+// on this version behaves once a later one starts sharing.
+function ttSyncSharedIds(list){
+  var out={}, byId={};
+  (Array.isArray(list) ? list : []).forEach(function(r){ if(r && r.id!=null) byId[String(r.id)]=r; });
+  Object.keys(byId).forEach(function(id){
+    var r=byId[id], seen={};
+    while(r && !seen[String(r.id)]){
+      seen[String(r.id)]=true;
+      if(r.shareId){ out[id]=true; break; }
+      r=r.parentId!=null ? byId[String(r.parentId)] : null;
+    }
+  });
+  return out;
+}
+// A stored value as records: { itemKey: fields }. itemKey is "coll|id" for a
+// collection's record and "keys|tt_x" for a whole key.
+function ttSyncItemsOf(key, value){
+  var kind=ttSyncKind(key), out={};
+  if(kind==="coll"){
+    var shared=key==="tt_projects" ? ttSyncSharedIds(value) : {};
+    (Array.isArray(value) ? value : []).forEach(function(r){
+      if(!r || typeof r!=="object" || r.id==null || shared[String(r.id)]) return;
+      var f=Object.assign({}, r); delete f.updatedAt;
+      out[TT_SYNC_COLLS[key]+"|"+String(r.id)]=f;
+    });
+  } else if(kind==="obj"){
+    if(value && typeof value==="object" && !Array.isArray(value)){
+      var f=Object.assign({}, value);
+      if(key==="tt_settings") TT_SYNC_LOOK.forEach(function(x){ delete f[x]; });
+      out["keys|"+key]=f;
+    }
+  } else if(kind==="val"){
+    if(value!==undefined && value!==null) out["keys|"+key]={ v:value };
+  }
+  return out;
+}
+function ttSyncKeyOfItem(itemKey){
+  var cut=itemKey.indexOf("|"), coll=itemKey.slice(0,cut), id=itemKey.slice(cut+1);
+  if(coll==="keys") return ttSyncKind(id) && !TT_SYNC_COLLS[id] ? id : null;
+  return ttSyncCollKey(coll);
+}
+// Merge one server row into this device's copy of a record. Pure.
+//   local: fields or null; meta: { f:{field:[ts,hash]}, del } or null
+//   row:   { fields, field_ts, del_ts }
+// Returns { fields, meta, alive, changed }.
+function ttSyncMerge(local, meta, row){
+  var f=Object.assign({}, local||{}), m={ f:Object.assign({}, meta&&meta.f||{}), del:meta&&meta.del||null }, changed=false;
+  var rts=row.field_ts||{}, rf=row.fields||{};
+  // Nothing here (never had it, or it was deleted): the server's row is the
+  // whole record, so take all of it - not just the fields that are newer.
+  if(!local){
+    f=Object.assign({}, rf);
+    Object.keys(rts).forEach(function(k){ m.f[k]=[+rts[k], Object.prototype.hasOwnProperty.call(rf, k) ? ttFieldHash(rf[k]) : ""]; });
+    Object.keys(rf).forEach(function(k){ if(!m.f[k]) m.f[k]=[0, ttFieldHash(rf[k])]; });
+    changed=true;
+  } else
+  Object.keys(rts).forEach(function(k){
+    var t=+rts[k], mine=m.f[k], t0=mine ? mine[0] : -1;
+    var has=Object.prototype.hasOwnProperty.call(rf, k), h=has ? ttFieldHash(rf[k]) : "";
+    if(t>t0 || (t===t0 && (!mine || mine[1]!==h))){
+      if(has) f[k]=rf[k]; else delete f[k];
+      m.f[k]=[t, h];
+      changed=true;
+    }
+  });
+  var d=Math.max(m.del||0, +row.del_ts||0)||null;
+  var latest=0; Object.keys(m.f).forEach(function(k){ if(m.f[k][0]>latest) latest=m.f[k][0]; });
+  if(d && latest>d) d=null;
+  if(d!==(m.del||null)) changed=true;
+  m.del=d;
+  return { fields:f, meta:m, alive:!d, changed:changed };
+}
+// The controller. env (tests swap any of it):
+//   cloud: { request(method, path, body), activity(net), user(), get() }
+//   store: { get(k), set(k, v), remove(k) } raw strings, written WITHOUT the doorway's note
+//   now(), setTimeout, clearTimeout, onApplied(keys), snapshot(why) -> Promise
+function ttSyncMake(env){
+  env=env||{};
+  var cloud=env.cloud;
+  var store=env.store || { get:function(k){ var b=ttDbBackend(); return b ? b.getItem(k) : null; },
+                           set:function(k, v){ var b=ttDbBackend(); if(b) b.setItem(k, v); },
+                           remove:function(k){ var b=ttDbBackend(); if(b) b.removeItem(k); } };
+  function now(){ return env.now ? env.now() : Date.now(); }
+  var later=env.setTimeout || (typeof setTimeout!=="undefined" ? setTimeout : function(){ return 0; });
+  var cancel=env.clearTimeout || (typeof clearTimeout!=="undefined" ? clearTimeout : function(){});
+  function allKeys(){
+    if(store.keys) return store.keys();
+    var b=ttDbBackend(), out=[]; try{ for(var i=0;i<b.length;i++) out.push(b.key(i)); }catch(e){} return out;
+  }
+  function readJ(k, d){ try{ var v=store.get(k); return v!=null ? JSON.parse(v) : d; }catch(e){ return d; } }
+  function writeJ(k, v){ try{ store.set(k, JSON.stringify(v)); }catch(e){} }
+  var state=Object.assign({ on:false, user:null, cursor:null, out:{} }, readJ(TT_SYNC_STATE, {}));
+  if(!state.out || typeof state.out!=="object") state.out={};
+  var meta=readJ(TT_SYNC_META, {}); if(!meta || typeof meta!=="object") meta={};
+  var pending={}, settleT=null, pushT=null, pullT=null, running=null, again=false, ver=0, applying=false;
+  var subs=[];
+  function keepState(){ writeJ(TT_SYNC_STATE, state); }
+  function keepMeta(){ writeJ(TT_SYNC_META, meta); }
+  function tell(){ subs.slice().forEach(function(fn){ try{ fn(api.status()); }catch(e){} }); }
+
+  // ---- this device's side: what changed, and when ----
+  function rescan(key, at){
+    var kind=ttSyncKind(key); if(!kind) return 0;
+    if(key==="tt_session" && readJ("tt_testmode", false)) return 0;   // a practice-board clock never travels
+    var items=ttSyncItemsOf(key, readJ(key, null)), n=0;
+    var prefix=(kind==="coll" ? TT_SYNC_COLLS[key] : "keys")+"|";
+    Object.keys(items).forEach(function(ik){
+      var f=items[ik], m=meta[ik] || { f:{}, del:null }, moved=false;
+      Object.keys(f).forEach(function(k){
+        var h=ttFieldHash(f[k]);
+        if(!m.f[k] || m.f[k][1]!==h){ m.f[k]=[at, h]; moved=true; }
+      });
+      Object.keys(m.f).forEach(function(k){
+        if(!Object.prototype.hasOwnProperty.call(f, k) && m.f[k][1]!==""){ m.f[k]=[at, ""]; moved=true; }
+      });
+      if(m.del){ m.del=null; moved=true; Object.keys(m.f).forEach(function(k){ if(m.f[k][0]<=at) m.f[k]=[at, m.f[k][1]]; }); }
+      if(moved){ meta[ik]=m; state.out[ik]=++ver; n++; }
+    });
+    Object.keys(meta).forEach(function(ik){
+      if(ik.indexOf(prefix)!==0 || items[ik] || meta[ik].del) return;
+      if(kind!=="coll" && ik!=="keys|"+key) return;
+      meta[ik].del=at; state.out[ik]=++ver; n++;
+    });
+    return n;
+  }
+  function settle(){
+    settleT=null;
+    var keys=Object.keys(pending); if(!keys.length) return;
+    var n=0; keys.forEach(function(k){ n+=rescan(k, pending[k]); });
+    pending={};
+    if(n){ keepMeta(); keepState(); if(state.on) schedulePush(); }
+  }
+  function note(key){
+    if(applying || !state.on || !ttSyncKind(key)) return;   // off: no work, no storage, for anyone who never turns it on
+    if(!pending[key]) pending[key]=now();
+    if(!settleT) settleT=later(settle, TT_SYNC_SETTLE_MS);
+  }
+  function schedulePush(){ if(pushT) cancel(pushT); pushT=later(function(){ pushT=null; api.sync(); }, TT_SYNC_PUSH_MS); }
+
+  // ---- the server's side ----
+  function payloadOf(ik){
+    var m=meta[ik]; if(!m) return null;
+    var cut=ik.indexOf("|"), key=ttSyncKeyOfItem(ik); if(!key) return null;
+    var items=ttSyncItemsOf(key, readJ(key, null)), f=items[ik]||{}, ts={};
+    if(!m.del) Object.keys(m.f).forEach(function(k){ ts[k]=m.f[k][0]; });   // a deletion carries only its time
+    return { coll:ik.slice(0,cut), item_id:ik.slice(cut+1), fields:m.del ? {} : f, field_ts:ts, del_ts:m.del||null };
+  }
+  function ok(r){ return r && r.status>=200 && r.status<300; }
+  function push(){
+    var keys=Object.keys(state.out); if(!keys.length) return Promise.resolve(true);
+    var batch=keys.slice(0, TT_SYNC_BATCH), seen={};
+    var items=batch.map(function(ik){ seen[ik]=state.out[ik]; return payloadOf(ik); }).filter(Boolean);
+    if(!items.length){ batch.forEach(function(ik){ delete state.out[ik]; }); keepState(); return push(); }
+    return cloud.request("POST", "/rest/v1/rpc/personal_push", { items:items }).then(function(r){
+      if(!ok(r)) return r;
+      batch.forEach(function(ik){ if(state.out[ik]===seen[ik]) delete state.out[ik]; });
+      keepState();
+      return push();
+    });
+  }
+  // Apply server rows to this device. Returns the storage keys it changed.
+  function applyRows(rows){
+    var byKey={}, touched={};
+    rows.forEach(function(row){
+      var ik=row.coll+"|"+row.item_id, key=ttSyncKeyOfItem(ik);
+      if(!key) return;                          // never a key this app doesn't sync
+      if(key==="tt_session" && readJ("tt_testmode", false)) return;   // nor the clock under a practice board
+      (byKey[key]=byKey[key]||[]).push({ ik:ik, row:row });
+    });
+    var sharedNow=byKey.tt_projects ? ttSyncSharedIds(readJ("tt_projects", [])) : {};
+    if(byKey.tt_projects) byKey.tt_projects=byKey.tt_projects.filter(function(x){ return !sharedNow[x.row.item_id]; });
+    applying=true;
+    try{
+      Object.keys(byKey).forEach(function(key){
+        var kind=ttSyncKind(key), value=readJ(key, null), items=ttSyncItemsOf(key, value), dirty=false;
+        byKey[key].forEach(function(x){
+          if(state.out[x.ik]) {
+            // this device has its own change waiting: merge the server's in, keep ours queued
+          }
+          var res=ttSyncMerge(items[x.ik]||null, meta[x.ik]||null, x.row);
+          if(!res.changed) return;
+          meta[x.ik]=res.meta; dirty=true;
+          if(res.alive) items[x.ik]=res.fields; else delete items[x.ik];
+        });
+        if(!dirty) return;
+        if(kind==="coll"){
+          var list=Array.isArray(value) ? value : [], pos={}, outList=[];
+          var keepShared=key==="tt_projects" ? ttSyncSharedIds(list) : {};
+          list.forEach(function(r){ if(r && r.id!=null){ var ik=TT_SYNC_COLLS[key]+"|"+String(r.id); pos[ik]=true;
+            if(keepShared[String(r.id)]) outList.push(r);   // a shared project stays exactly as it is
+            else if(items[ik]) outList.push(Object.assign({}, items[ik], r.updatedAt!=null ? { updatedAt:r.updatedAt } : {})); }
+            else outList.push(r); });
+          Object.keys(items).forEach(function(ik){ if(!pos[ik]) outList.push(items[ik]); });
+          writeJ(key, outList);
+        } else {
+          var it=items["keys|"+key];
+          if(!it) store.remove(key);
+          else if(kind==="val") writeJ(key, it.v);
+          else {
+            var full=Object.assign({}, it);
+            if(key==="tt_settings" && value && typeof value==="object") TT_SYNC_LOOK.forEach(function(x){ if(x in value) full[x]=value[x]; else delete full[x]; });
+            writeJ(key, full);
+          }
+        }
+        touched[key]=true;
+      });
+    } finally { applying=false; }
+    keepMeta();
+    return Object.keys(touched);
+  }
+  function iso(ms){ return new Date(ms).toISOString(); }
+  // Everything changed since `since` (ms; null = all), a page at a time.
+  function fetchAll(since, onlyAlive){
+    var rows=[], off=0, max=null;
+    function page(){
+      var q="/rest/v1/personal_items?select=coll,item_id,fields,field_ts,del_ts,updated_at"+
+            (since!=null ? "&updated_at=gte."+encodeURIComponent(iso(since)) : "")+
+            (onlyAlive ? "&del_ts=is.null" : "")+
+            "&order=updated_at.asc,coll.asc,item_id.asc&limit="+TT_SYNC_BATCH+"&offset="+off;
+      return cloud.request("GET", q).then(function(r){
+        if(!ok(r) || !Array.isArray(r.body)) return { ok:false, r:r };
+        r.body.forEach(function(x){ rows.push(x); var t=Date.parse(x.updated_at); if(!isNaN(t) && (max===null || t>max)) max=t; });
+        if(r.body.length<TT_SYNC_BATCH) return { ok:true, rows:rows, max:max };
+        off+=TT_SYNC_BATCH; return page();
+      });
+    }
+    return page();
+  }
+  function pull(){
+    var since=state.cursor!=null ? state.cursor-TT_SYNC_OVERLAP_MS : null;
+    return fetchAll(since, false).then(function(res){
+      if(!res.ok) return res.r;
+      var keys=applyRows(res.rows);
+      if(res.max!==null && (state.cursor===null || res.max>state.cursor)) state.cursor=res.max;
+      keepState();
+      if(keys.length && env.onApplied) env.onApplied(keys);
+      return true;
+    });
+  }
+  function failed(r){
+    if(cloud && cloud.activity) cloud.activity(r && r.status===0 ? "offline" : "trouble");
+    return false;
+  }
+  function stampAll(at, mode){
+    // Every synced key as it stands, every field stamped `at` (or, to combine,
+    // the record's own last change, so the newer side wins field by field).
+    meta={};
+    var keys=allKeys().filter(ttSyncKind);
+    state.out={};
+    keys.forEach(function(k){
+      var items=ttSyncItemsOf(k, readJ(k, null)), val=readJ(k, null);
+      Object.keys(items).forEach(function(ik){
+        var t=at;
+        if(mode==="combine"){
+          t=1;
+          if(TT_SYNC_COLLS[k] && Array.isArray(val)){ var id=ik.slice(ik.indexOf("|")+1);
+            val.forEach(function(r){ if(r && String(r.id)===id && r.updatedAt) t=r.updatedAt; }); }
+        }
+        var m={ f:{}, del:null }; Object.keys(items[ik]).forEach(function(f){ m.f[f]=[t, ttFieldHash(items[ik][f])]; });
+        meta[ik]=m; state.out[ik]=++ver;
+      });
+    });
+  }
+
+  var api={
+    note:note,
+    status:function(){ return { on:!!state.on, user:state.user, waiting:Object.keys(state.out).length, cursor:state.cursor, busy:!!running }; },
+    subscribe:function(fn){ subs.push(fn); return function(){ subs=subs.filter(function(x){ return x!==fn; }); }; },
+    // On start: catch anything written while the app was closed (a restore,
+    // a reset, a load - those write storage directly), stamped now.
+    boot:function(){
+      if(!state.on) return 0;
+      var n=0, at=now();
+      allKeys().forEach(function(k){ if(ttSyncKind(k)) n+=rescan(k, at); });
+      Object.keys(meta).forEach(function(ik){ var k=ttSyncKeyOfItem(ik); if(k && store.get(k)==null && !meta[ik].del){ meta[ik].del=at; state.out[ik]=++ver; n++; } });
+      if(n){ keepMeta(); keepState(); }
+      if(state.on && cloud && state.user && cloud.user() && cloud.user()!==state.user){ state.on=false; keepState(); }
+      return n;
+    },
+    // Does the account already hold a board? -> { ok, has }
+    probe:function(){
+      return cloud.request("GET", "/rest/v1/personal_items?select=item_id&del_ts=is.null&limit=1").then(function(r){
+        if(!ok(r) || !Array.isArray(r.body)) return { ok:false, status:r.status };
+        return { ok:true, has:r.body.length>0 };
+      });
+    },
+    // What the account holds -> { ok, projects, logs, last (ms or null) }
+    summary:function(){
+      return cloud.request("POST", "/rest/v1/rpc/personal_summary", {}).then(function(r){
+        if(!ok(r) || !r.body) return { ok:false, status:r.status };
+        var b=r.body, t=b.last ? Date.parse(b.last) : NaN;
+        return { ok:true, projects:+b.projects||0, logs:+b.logs||0, last:isNaN(t) ? null : t };
+      });
+    },
+    // The same, for this device.
+    localSummary:function(){
+      var ps=readJ("tt_projects", []), ls=readJ("tt_logs", []), last=null;
+      ["tt_projects","tt_logs","tt_disruptions","tt_breaks"].forEach(function(k){
+        var a=readJ(k, []); if(Array.isArray(a)) a.forEach(function(r){ if(r && r.updatedAt && (last===null || r.updatedAt>last)) last=r.updatedAt; }); });
+      return { projects:Array.isArray(ps) ? ps.filter(function(r){ return r && r.id!=null; }).length : 0,
+               logs:Array.isArray(ls) ? ls.filter(function(r){ return r && r.id!=null; }).length : 0, last:last };
+    },
+    // Turn sync on. mode: "device" (this board replaces the account's - also
+    // the first device, when the account is empty), "account" (this device
+    // takes the account's board), "combine" (both kept, newer wins per field).
+    link:function(mode){
+      if(running) return running.then(function(){ return api.link(mode); });
+      var at=now(), user=cloud.user();
+      if(!user) return Promise.resolve({ ok:false, msg:"Sign in first." });
+      if(cloud.activity) cloud.activity("busy");
+      var snap=(mode==="device") ? Promise.resolve() : Promise.resolve(env.snapshot ? env.snapshot("before-sync") : null).catch(function(){});
+      running=snap.then(function(){
+        if(mode==="account"){
+          return fetchAll(null, true).then(function(res){
+            if(!res.ok) return res.r;
+            applying=true;
+            try{ Object.keys(TT_SYNC_COLLS).concat(TT_SYNC_OBJ, TT_SYNC_VAL).forEach(function(k){
+                   if(k==="tt_projects"){ var cur=readJ(k, []), sh=ttSyncSharedIds(cur), keepP=(Array.isArray(cur)?cur:[]).filter(function(r){ return r && sh[String(r.id)]; });
+                     if(keepP.length) writeJ(k, keepP); else store.remove(k); return; }   // shared projects stay
+                   if(k==="tt_settings"){ var s=readJ(k, null); if(s){ var keep={}; TT_SYNC_LOOK.forEach(function(x){ if(x in s) keep[x]=s[x]; }); writeJ(k, keep); } } else store.remove(k); });
+                 allKeys().filter(function(k){ return k && k.indexOf("tt_mod_")===0; }).forEach(function(k){ store.remove(k); }); }
+            finally{ applying=false; }
+            meta={}; state.out={};
+            applyRows(res.rows);
+            state.cursor=res.max; return true;
+          });
+        }
+        if(mode==="device"){
+          // after anything the account already holds, whatever this device's clock says
+          return cloud.request("POST", "/rest/v1/rpc/personal_clock", {}).then(function(c){
+            if(!ok(c)) return c;
+            at=Math.max(at, (+c.body||0)+1);
+            stampAll(at+1, mode);
+          var all=Object.keys(state.out), first=all.slice(0, TT_SYNC_BATCH), seen={};
+          var items=first.map(function(ik){ seen[ik]=state.out[ik]; return payloadOf(ik); }).filter(Boolean);
+          return cloud.request("POST", "/rest/v1/rpc/personal_replace", { items:items, at_ms:at }).then(function(r){
+            if(!ok(r)) return r;
+            first.forEach(function(ik){ if(state.out[ik]===seen[ik]) delete state.out[ik]; });
+            return push().then(function(p){ return p===true ? pull() : p; });
+          });
+          });
+        }
+        stampAll(0, mode);
+        return push().then(function(p){ return p===true ? fetchAll(null, false).then(function(res){
+          if(!res.ok) return res.r;
+          applyRows(res.rows); state.cursor=res.max; return true; }) : p; });
+      }).then(function(r){
+        running=null;
+        if(r!==true){ failed(r); keepState(); tell(); return { ok:false, msg:r && r.status===0 ? "Can’t reach the server. Check your connection and try again." : "The server didn’t take it. Try again in a minute." }; }
+        state.on=true; state.user=user; keepState(); keepMeta();
+        if(cloud.activity) cloud.activity("ok");
+        tell(); api.startPulling();
+        return { ok:true };
+      }, function(){ running=null; failed({ status:0 }); tell(); return { ok:false, msg:"Something went wrong. Try again." }; });
+      return running;
+    },
+    off:function(){ state.on=false; keepState(); if(pullT){ cancel(pullT); pullT=null; } tell(); },
+    // One round: anything waiting goes up, then everything new comes down.
+    sync:function(){
+      if(!state.on || !cloud || cloud.get().phase!=="in") return Promise.resolve(false);
+      if(cloud.user() && state.user && cloud.user()!==state.user){ api.off(); return Promise.resolve(false); }
+      if(running){ again=true; return running; }
+      if(settleT){ cancel(settleT); settle(); }
+      if(cloud.activity) cloud.activity("busy");
+      running=push().then(function(p){ return p===true ? pull() : p; }).then(function(r){
+        running=null;
+        if(r!==true) return failed(r);
+        if(cloud.activity) cloud.activity("ok");
+        tell();
+        if(again){ again=false; return api.sync(); }
+        return true;
+      }, function(){ running=null; return failed({ status:0 }); });
+      return running;
+    },
+    startPulling:function(){
+      if(pullT) cancel(pullT);
+      if(!state.on) return;
+      pullT=later(function(){ pullT=null; var vis=true; try{ vis=typeof document==="undefined" || !document.hidden; }catch(e){}
+        (vis ? api.sync() : Promise.resolve()).then(function(){ api.startPulling(); }); }, TT_SYNC_PULL_MS);
+    },
+    // for tests
+    _meta:function(){ return meta; }, _state:function(){ return state; }, _settle:function(){ if(settleT){ cancel(settleT); } settle(); },
+    _apply:applyRows, _rescan:rescan
+  };
+  return api;
+}
+var TT_SYNC_APPLIED = null;   // the App sets this, to put another device's changes on screen
+var ttSync = ttSyncMake({ cloud:ttCloud, onApplied:function(keys){ if(TT_SYNC_APPLIED) TT_SYNC_APPLIED(keys); },
+  snapshot:function(why){ try{ return snapTake(why); }catch(e){ return Promise.resolve(); } } });
+TT_DB_NOTE = function(k){ ttSync.note(k); };
 
 // ---------------- Backup & restore ----------------
 // Every app key is tt_-prefixed, so a backup is simply every tt_* key with its
@@ -17632,7 +18110,7 @@ function snapIdsFor(why, at, weekStart){
   var d=new Date(at), day=isoDate(d);
   if(why==="manual") return [{ id:"save-"+at, kind:"manual" }];
   var out=[{ id:"latest", kind:"latest" }];
-  if(why==="before-reset" || why==="before-load") out.push({ id:"daily-"+day+"-"+at, kind:"daily" });
+  if(why==="before-reset" || why==="before-load" || why==="before-sync") out.push({ id:"daily-"+day+"-"+at, kind:"daily" });
   else {
     out.push({ id:"daily-"+day, kind:"daily" });
     out.push({ id:"weekly-"+isoDate(periodRange("week",0,d,weekStart||"mon").startDate), kind:"weekly" });
@@ -17752,6 +18230,19 @@ function snapApplyLoad(data, storage, opts){
     if(k==="tt_logs" || k==="tt_disruptions" || k==="tt_breaks") v=snapCloseOpen(v);
     storage.setItem(k, v);
   });
+}
+// Settings as stored, with every shape normalized. Start-up and sync both
+// read them this way.
+function settingsFromStore(){
+  var st = load("tt_settings",settingsFactory());
+  // Settings saved before the schedule existed get the default merged in, so
+  // every consumer can rely on the shape being present.
+  // Every saved schedule shape - missing entirely, or from before unpaid
+  // breaks existed - is normalized to the full current shape.
+  st.workSchedule = normalizeSchedule(st.workSchedule);
+  st.notifs = normalizeNotifs(st.notifs);
+  if(!st.timeInc) st.timeInc = "standard";
+  return st;
 }
 function settingsFactory(){
   return { layout:"comfortable", tracking:"timer", colorScheme:"bright-pastels", theme:"neon-dream", schemes:{}, fonts:{}, mode:"dark", handedness:"right", headerPos:"top" };
@@ -19894,9 +20385,24 @@ var HELP_GUIDES = {
       { stage:{ kind:"account", step:"code" }, ring:'[data-anchor="acct-code"]', side:"below", title:"The code from the email",
         text:"A short code arrives by email. Type it in, or tap the suggestion above the keyboard. There is no password to remember. No email? Look in spam, or send a new code after a minute." },
       { stage:{ kind:"account", step:"in" }, ring:'[data-anchor="acct-who"]', side:"below", title:"Signed in",
-        text:"The sheet shows who you are signed in as and whether the app can reach the server. Signing in sends nothing from your board yet; sharing comes later." },
+        text:"The sheet shows who you are signed in as and whether the app can reach the server. Signing in sends nothing from your board; syncing it to your other devices is its own switch." },
       { stage:{ kind:"account", step:"in" }, ring:'[data-anchor="acct-signout"]', side:"above", title:"Sign out",
         text:"Signs this device out and leaves the board here untouched. The cloud then sleeps until you sign in again." }
+    ] },
+  sync: { title:"Sync your board between devices", covers:["Sync"],
+    steps:[
+      { stage:{ kind:"account", step:"in" }, ring:'[data-anchor="acct-sync"]', side:"below", title:"Sync this board",
+        text:"Signed in, open Account and tap Sync this board. It is off until you turn it on, and only you can see your board on the server." },
+      { stage:{ kind:"sync" }, ring:'[data-anchor="sync-switch"]', side:"below", title:"Turn it on",
+        text:"The switch puts your board on every device you sign in on. Changes go up a moment after you make them and come down on your other devices within a minute. Offline, they wait and go when you are back." },
+      { stage:{ kind:"sync" }, ring:'[data-anchor="sync-lists"]', side:"above", title:"What travels",
+        text:"Projects, time, breaks, reminders, your Work Schedule, settings and the running clock travel. The look stays on each device: theme, colours, fonts, light or dark, left or right hand, and folded cards." },
+      { stage:{ kind:"firstlink" }, ring:'[data-linkboards]', side:"below", title:"When both devices have a board",
+        text:"Turning sync on where the account already holds a board asks which to keep. Both boards are counted so you can see which is which." },
+      { stage:{ kind:"firstlink" }, ring:'[data-anchor="link-go"]', side:"above", title:"Choose, then hold",
+        text:"Use the account’s board, use this device’s board, or combine both. The box says exactly what will happen. Replacing a board takes a hold, and a Before sync copy goes into Backups first." },
+      { stage:{ kind:"sync" }, ring:'[data-anchor="sync-now"]', side:"above", title:"Sync now",
+        text:"Sync now sends and fetches straight away. The cloud in the top bar turns while it works and shows the green check when everything matches. Turning sync off keeps everything on this device." }
     ] },
   reminders: { title:"Reminders & nudges", covers:["Reminders & nudges"],
     steps:[
@@ -20033,7 +20539,7 @@ var HELP_INDEX = [
   { id:"time", topic:"Time Settings", items:[["picture","schedule"],["picture","paywork"],["picture","unpaid"],["picture","tracking"],
       ["guide","setschedule"],["guide","setpay"],["guide","setunpaid"],["guide","night"],["guide","reminders"]] },
   { id:"reports", topic:"Reports & records", items:[["picture","reports"],["picture","summary"],["picture","archive"]] },
-  { id:"data", topic:"Your data", items:[["guide","backup"],["guide","signin"]] },
+  { id:"data", topic:"Your data", items:[["guide","backup"],["guide","signin"],["guide","sync"]] },
   { id:"look", topic:"Look & add-ons", items:[["picture","themes"],["picture","layout"],["picture","extensions"]] },
   { id:"practice", topic:"Practise", flat:true, items:[["practice","gestures"]] }
 ];
@@ -20256,6 +20762,11 @@ function helpStageEl(stage, on){
   }
   if(stage.kind==="account")
     return React.createElement(AccountModal, { demo:stage.step||"email", onClose:nop });
+  if(stage.kind==="sync")
+    return React.createElement(SyncModal, { demo:true, cloud:{ phase:"in", net:"ok", online:true, okAt:Date.now()-120000, email:"you@example.com" }, onClose:nop, trail:[{ label:"Account", back:true, go:nop }] });
+  if(stage.kind==="firstlink")
+    return React.createElement(FirstLinkModal, { demo:true, here:{ projects:9, logs:412, last:Date.now()-3600000 }, there:{ projects:12, logs:538, last:Date.now()-5*3600000 },
+      onCancel:nop, onDone:nop, trail:[{ label:"Account", back:true, go:nop }, { label:"Sync", back:true, go:nop }] });
   if(stage.kind==="reports")
     return React.createElement(ReportsModal, { logs:TEST_LOGS, projects:P, disruptions:TEST_DIST, breaks:TEST_BREAKS,
       laneMeta:TEST_META, laneOrder:TEST_ORDER, schedule:null, testMode:true, liveLogs:[], initialKind:"week", onClose:nop });
@@ -20342,10 +20853,10 @@ var HELP_CARD_W = 366, HELP_SHEET_W = 390, HELP_MARK = 22;
 var HELP_STAGE_FULL = { full:true };
 var HELP_STAGE_W = { paywork:400, unpaid:400, card:366, close:390, header:366, presets:300, headerfull:390, msline:366,
                      schedule:470, shiftask:390, backup:390, outline:390, msedit:400, msstep:390, reports:400,
-                     themes:400, layout:400, summary:400, archive:390, extensions:390, tracking:400, breaks:390, ticker:390, account:390, remind:366, reminder:390, away:390, remindsettings:390 };
+                     themes:400, layout:400, summary:400, archive:390, extensions:390, tracking:400, breaks:390, ticker:390, account:390, remind:366, reminder:390, away:390, remindsettings:390, sync:390, firstlink:390 };
 // Kinds that stage a whole sheet: measured off the staged panel, not the content.
 var HELP_SHEETS = { paywork:true, unpaid:true, close:true, schedule:true, shiftask:true, backup:true, outline:true, msedit:true, msstep:true, reports:true,
-                    themes:true, layout:true, summary:true, archive:true, extensions:true, tracking:true, breaks:true, account:true, reminder:true, away:true };
+                    themes:true, layout:true, summary:true, archive:true, extensions:true, tracking:true, breaks:true, account:true, reminder:true, away:true, sync:true, firstlink:true };
 function HelpStage(props){
   // A module's stage never reads the core's tables - its kinds are its own and
   // could share a name with a core kind. Every module screen is a sheet
@@ -24735,7 +25246,7 @@ function snapWhen(at){
     return d.toLocaleDateString([], {weekday:"short",month:"short",day:"numeric"})+" · "+
            d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}); }catch(e){ return ""; }
 }
-var SNAP_WHY = { clockout:"At clock-out", open:"When the app opened", "before-reset":"Before reset",
+var SNAP_WHY = { clockout:"At clock-out", open:"When the app opened", "before-reset":"Before reset", "before-sync":"Before sync",
                  "before-load":"Before load", manual:"" };
 function snapWhat(r){
   var s=r.summary||{}, h=Math.round((s.loggedMs||0)/3600000);
@@ -25177,6 +25688,9 @@ function accountSentence(c){
 // nothing live behind it.
 function AccountModal(props){
   var c=props.cloud||ttCloud.get(), demo=props.demo||null;
+  var syncOpenS=useState(false); var syncOpen=syncOpenS[0], setSyncOpen=syncOpenS[1];
+  var syncStS=useState(ttSync.status()); var syncSt=demo ? { on:true } : syncStS[0];
+  useEffect(function(){ return ttSync.subscribe(syncStS[1]); }, []);
   var stepS=useState(demo || (c.phase==="in" ? "in" : "email")); var step=stepS[0], setStep=stepS[1];
   var mailS=useState(demo ? "you@example.com" : (c.email||"")); var mail=mailS[0], setMail=mailS[1];
   var codeS=useState(demo==="code" ? "481" : ""); var code=codeS[0], setCode=codeS[1];
@@ -25233,7 +25747,19 @@ function AccountModal(props){
           React.createElement("div", { style:{ color:cloudCol(demo ? "synced" : badge), fontSize:"0.8rem", fontWeight:600, marginTop:"0.1rem" } },
             (demo ? "Signed in" : CLOUD_WORDS[badge])+" · Sandbox server"))),
       React.createElement("div", { "data-acctstate":true, style:{ minHeight:"2.9rem" } }, P(demo ? "Signed in. Last checked in with the server a moment ago." : accountSentence(c))),
-      P("Organizations and shared projects will appear here as they’re built. For now, signing in changes nothing on your board."),
+      React.createElement("button", { "data-acctsync":syncSt.on?"on":"off", "data-anchor":"acct-sync", "data-flat":true,
+          onClick:function(){ if(demo) return; haptic(8); setSyncOpen(true); },
+          style:{ display:"flex", alignItems:"center", gap:"0.6rem", width:"100%", background:"none", border:"none",
+                  borderTop:"1px solid "+S.border, borderBottom:"1px solid "+S.border, padding:"0.85rem 0.2rem", marginBottom:"0.8rem",
+                  cursor:"pointer", fontFamily:S.fontBody, textAlign:"left" } },
+        React.createElement("span", { style:{ fontWeight:700, color:S.text, fontSize:"0.98rem" } }, "Sync this board"),
+        React.createElement("span", { style:{ marginLeft:"auto", fontWeight:700, fontSize:"0.88rem", color:syncSt.on ? S.successText : S.textDim } }, syncSt.on ? "On" : "Off"),
+        React.createElement("span", { style:{ color:S.textDim } }, "›")),
+      P("Your board on every device you sign in on, if you want it. Shared projects with other people come later."),
+      syncOpen && React.createElement(SyncModal, { cloud:c, trail:(trail||[]).concat([{ label:"Account", back:true, go:function(){ setSyncOpen(false); } }]),
+        onClose:function(){ setSyncOpen(false); },
+        // the board on this device was replaced or combined: start fresh from it
+        onReload:function(){ setTimeout(function(){ try{ window.location.reload(); }catch(e){} }, 250); } }),
       React.createElement("button", { "data-acct":"signout", "data-anchor":"acct-signout", onClick:function(){ if(demo) return; haptic(10); ttCloud.signOut(); setMail(ttCloud.get().email||""); setStep("email"); },
         style:{ width:"100%", background:S.dangerBg, border:"1px solid "+S.dangerText, borderRadius:S.radius, padding:"0.75rem",
                 color:S.dangerText, fontFamily:S.fontBody, fontWeight:700, fontSize:"0.98rem", cursor:"pointer" } }, "Sign out"),
@@ -25281,8 +25807,128 @@ function AccountModal(props){
       onKeyDown:function(e){ if(e.key==="Enter") send(); },
       style:Object.assign({}, INPUT_STYLE) }),
     note(msg),
-    P("Signing in doesn’t send your board anywhere. It stays on this device; sharing comes later.", { margin:"0.2rem 0 0", fontSize:"0.82rem" }));
+    P("Signing in doesn’t send your board anywhere. Syncing it to your other devices is a separate switch, off until you turn it on.", { margin:"0.2rem 0 0", fontSize:"0.82rem" }));
 }
+// ---- Sync (11-13, layout C): its own sheet from Account, and the question
+// asked when switching on finds the account already holds a board (layout 3).
+var SYNC_TRAVELS = ["Projects, tasks and lanes", "Time, breaks and disruptions", "Reminders", "Work Schedule and settings", "The running clock"];
+var SYNC_STAYS = ["The look: theme, colours, fonts", "Light or dark, left or right hand", "Folded cards and lanes", "The practice board"];
+function syncWords(st, c){
+  if(!st.on) return { text:"Off. Your board stays on this device only.", col:S.textDim };
+  var b=ttCloudBadgeOf(c);
+  if(c.phase!=="in") return { text:"Signed out. Changes wait here until you sign in again.", col:S.warnText };
+  if(b==="offline") return { text:"Offline. Changes wait here and go up when you’re back online.", col:S.warnText };
+  if(b==="trouble") return { text:"Can’t reach the server. Changes wait here until it answers.", col:S.warnText };
+  if(b==="syncing" || st.busy) return { text:"Syncing…", col:S.textDim };
+  if(st.waiting>0) return { text:st.waiting===1 ? "One change waiting to go up." : st.waiting+" changes waiting to go up.", col:S.textDim };
+  return { text:"Up to date"+(c.okAt ? " · last synced "+fmtTime(c.okAt) : "")+".", col:S.successText };
+}
+function SyncModal(props){
+  var c=props.cloud||ttCloud.get(), demo=props.demo||null;
+  var stS=useState(ttSync.status()); var st=demo ? { on:true, waiting:0 } : stS[0];
+  useEffect(function(){ if(demo) return; return ttSync.subscribe(stS[1]); }, []);
+  var busyS=useState(false); var busy=busyS[0], setBusy=busyS[1];
+  var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
+  var askS=useState(null); var ask=askS[0], setAsk=askS[1];   // { here, there } when the account already has a board
+  function turnOn(){
+    if(busy || demo) return;
+    setBusy(true); setMsg("");
+    ttSync.probe().then(function(p){
+      if(!p.ok){ setBusy(false); setMsg(p.status===0 ? "Can’t reach the server. Check your connection and try again." : "The server didn’t answer properly. Try again in a minute."); return; }
+      if(!p.has) return ttSync.link("device").then(function(r){ setBusy(false); if(!r.ok) setMsg(r.msg); else haptic([10,40,10]); });
+      return ttSync.summary().then(function(sum){
+        setBusy(false);
+        setAsk({ here:ttSync.localSummary(), there:sum.ok ? sum : null });
+      });
+    });
+  }
+  var words=busy ? { text:"Checking your account…", col:S.textDim } : syncWords(st, c);
+  var LI=function(t){ return React.createElement("li", { key:t }, t); };
+  var col=function(head, list){ return React.createElement("div", null,
+    React.createElement("div", { style:{ fontSize:"0.68rem", letterSpacing:"0.08em", textTransform:"uppercase", color:S.textDim, fontWeight:700, marginBottom:"0.2rem" } }, head),
+    React.createElement("ul", { style:{ margin:0, paddingLeft:"1rem", color:S.textDim, fontSize:"0.8rem", lineHeight:1.5 } }, list.map(LI))); };
+  return React.createElement(Modal, { title:"Sync", onClose:props.onClose, cancelLabel:"Close", trail:props.trail },
+    React.createElement("div", { "data-syncrow":st.on?"on":"off", "data-anchor":"sync-switch",
+        style:{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:"0.7rem", padding:"0.8rem 0.1rem",
+                borderTop:"1px solid "+S.border, borderBottom:"1px solid "+S.border } },
+      React.createElement("div", { style:{ minWidth:0 } },
+        React.createElement("div", { style:{ fontWeight:700, color:S.text, fontSize:"0.98rem" } }, "Sync my own jobs and hours"),
+        React.createElement("div", { "data-syncstate":true, style:{ fontSize:"0.8rem", color:words.col, marginTop:"0.15rem", minHeight:"2.3em", lineHeight:1.35 } }, words.text)),
+      React.createElement(OnSwitch, { name:"sync", on:st.on, onChange:function(v){ if(demo) return; if(v) turnOn(); else { ttSync.off(); setMsg(""); } } })),
+    React.createElement("button", { "data-syncnow":true, "data-anchor":"sync-now", disabled:!st.on || busy,
+        onClick:function(){ if(demo) return; haptic(8); ttSync.sync(); },
+        style:{ width:"100%", marginTop:"0.8rem", background:S.infoBg, border:"2px solid "+S.actionBdr, borderRadius:S.radius, padding:"0.7rem",
+                color:S.actionBdrText||S.actionBdr, fontFamily:S.fontBody, fontWeight:700, fontSize:"0.95rem", cursor:"pointer", opacity:(!st.on||busy)?0.4:1 } }, "Sync now"),
+    React.createElement("div", { "data-syncmsg":msg?true:undefined, style:{ minHeight:"2.6rem", marginTop:"0.5rem", color:S.dangerText, fontSize:"0.85rem", lineHeight:1.4 } }, msg),
+    React.createElement("div", { "data-anchor":"sync-lists", style:{ fontSize:"0.72rem", letterSpacing:"0.09em", textTransform:"uppercase", color:S.textDim, fontWeight:700, margin:"0.2rem 0 0.4rem" } }, "What travels and what doesn’t"),
+    React.createElement("div", { "data-synclists":true, style:{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"0.7rem" } },
+      col("Travels", SYNC_TRAVELS), col("Stays on this device", SYNC_STAYS)),
+    React.createElement("p", { style:{ margin:"0.9rem 0 0", color:S.textDim, fontSize:"0.8rem", lineHeight:1.45 } },
+      "Only you can see your board on the server. Turning sync off keeps everything on this device; your other devices keep theirs."),
+    ask && React.createElement(FirstLinkModal, { here:ask.here, there:ask.there,
+      trail:(props.trail||[]).concat([{ label:"Sync", back:true, go:function(){ setAsk(null); } }]),
+      onCancel:function(){ setAsk(null); }, onDone:function(mode){ setAsk(null); if(mode!=="device" && props.onReload) props.onReload(); } }));
+}
+// "Your account already has a board": the two boards' numbers, the three
+// choices, and what the picked one will do, in words, with these numbers.
+// Replacing either board is held; combining is a tap.
+function syncCount(n, one, many){ return n===1 ? "1 "+one : (n||0)+" "+many; }
+function syncWhen(ms){ if(!ms) return "No changes yet"; return (sameWorkDay(ms, todayStr()) ? "Changed today " : "Changed "+fmtDate(ms)+" ")+fmtTime(ms); }
+function syncConsequence(mode, here, there){
+  var h=syncCount(here.projects,"project","projects")+" and "+syncCount(here.logs,"time entry","time entries");
+  var t=there ? "the account’s "+syncCount(there.projects,"project","projects")+" and "+syncCount(there.logs,"time entry","time entries") : "the account’s board";
+  if(mode==="account") return "This device’s "+h+" are replaced by "+t+". A Before sync copy goes into Backups first, so you can bring them back.";
+  if(mode==="device") return "The account’s board, and your other devices with it, become this device’s "+h+". The other devices change the next time they sync.";
+  return "Everything from both is kept on every device. Where both have the same project, the newer change to each detail wins. A project made separately on each will show up twice; tidy those by hand.";
+}
+function FirstLinkModal(props){
+  var here=props.here||{ projects:0, logs:0 }, there=props.there, demo=props.demo||null;
+  var pickS=useState("account"); var pick=pickS[0], setPick=pickS[1];
+  var busyS=useState(false); var busy=busyS[0], setBusy=busyS[1];
+  var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
+  function go(){
+    if(busy || demo) return;
+    setBusy(true); setMsg("");
+    ttSync.link(pick).then(function(r){
+      setBusy(false);
+      if(!r.ok){ setMsg(r.msg); return; }
+      haptic([10,40,10]); props.onDone(pick);
+    });
+  }
+  var box=function(head, x){ return React.createElement("div", { style:{ border:"1px solid "+S.border, borderRadius:S.radius, padding:"0.55rem 0.65rem", background:S.bg1, fontSize:"0.8rem", color:S.textDim, lineHeight:1.5 } },
+    React.createElement("div", { style:{ fontWeight:700, color:S.text, fontSize:"0.86rem" } }, head),
+    x ? [syncCount(x.projects,"project","projects"), syncCount(x.logs,"time entry","time entries"), syncWhen(x.last)].map(function(t,i){ return React.createElement("div", { key:i }, t); })
+      : React.createElement("div", null, "Couldn’t count it just now")); };
+  var CH=[["account","Use the account’s board"],["device","Use this device’s board"],["combine","Combine both"]];
+  var held=pick!=="combine";
+  var label=busy ? "Working…" : pick==="account" ? "Hold to use the account’s board" : pick==="device" ? "Hold to use this device’s board" : "Combine both";
+  var btnStyle={ width:"100%", marginTop:"0.7rem", borderRadius:S.radius, padding:"0.75rem", fontFamily:S.fontBody, fontWeight:700, fontSize:"0.95rem",
+    background:held ? S.dangerBg : S.infoBg, border:(held?"1px solid ":"2px solid ")+(held ? S.dangerText : S.actionBdr), color:held ? S.dangerText : S.actionText };
+  return React.createElement(Modal, { title:"Which board?", onClose:props.onCancel, cancelLabel:"Cancel", trail:props.trail },
+    React.createElement("p", { style:{ margin:"0 0 0.7rem", color:S.textDim, fontSize:"0.92rem", lineHeight:1.45 } },
+      "Your account already has a board. Which one should this device use?"),
+    React.createElement("div", { "data-linkboards":true, style:{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"0.5rem", marginBottom:"0.7rem" } },
+      box("This device", here), box("Your account", there)),
+    CH.map(function(c){ var on=pick===c[0];
+      return React.createElement("button", { key:c[0], "data-linkpick":c[0], "aria-pressed":on?"true":"false", "data-flat":true,
+          onClick:function(){ if(busy) return; haptic(6); setPick(c[0]); setMsg(""); },
+          style:{ display:"flex", alignItems:"center", gap:"0.6rem", width:"100%", marginBottom:"0.45rem", padding:"0.6rem 0.7rem", cursor:"pointer",
+                  borderRadius:S.radius, border:(on?"2px solid ":"1.5px solid ")+(on?S.actionBdr:S.border), background:on?S.infoBg:S.bg1,
+                  fontFamily:S.fontBody, fontWeight:700, fontSize:"0.92rem", color:S.text, textAlign:"left" } },
+        React.createElement("span", { style:{ width:"16px", height:"16px", borderRadius:"50%", flexShrink:0, border:"2px solid "+(on?S.actionBdr:S.textDim),
+            boxShadow:on?"inset 0 0 0 3px "+S.infoBg+", inset 0 0 0 8px "+S.actionBdr:"none" } }),
+        c[1],
+        c[0]==="account" && React.createElement("span", { style:{ marginLeft:"auto", fontSize:"0.66rem", fontWeight:800, border:"1.5px solid "+S.successText,
+            color:S.successText, borderRadius:"99px", padding:"0.05rem 0.45rem" } }, "Suggested")); }),
+    React.createElement("div", { "data-linkwhat":pick, style:{ minHeight:"8.6em", borderRadius:S.radius, padding:"0.6rem 0.7rem", fontSize:"0.84rem", lineHeight:1.45,
+        color:S.text, background:held ? S.warnBg : S.bg1, border:"1px solid "+(held ? S.warnText : S.border) } },
+      syncConsequence(pick, here, there)),
+    held ? React.createElement(HoldButton, { onHold:go, holdMs:HOLD_DELETE_MS, disabled:busy, fill:S.dangerText,
+             attrs:{ "data-linkgo":pick, "data-holdreplace":true, "data-anchor":"link-go" }, style:btnStyle }, label)
+         : React.createElement("button", { "data-linkgo":pick, "data-anchor":"link-go", disabled:busy, onClick:function(){ haptic(8); go(); }, style:Object.assign({ cursor:"pointer" }, btnStyle) }, label),
+    React.createElement("div", { "data-linkmsg":msg?true:undefined, style:{ minHeight:"2.4rem", marginTop:"0.5rem", color:S.dangerText, fontSize:"0.85rem", lineHeight:1.4 } }, msg));
+}
+
 function ExtensionsModal(props){
   var tickS=useState(0); var setTick=tickS[1]; var tick=tickS[0];
   var confirmS=useState(null); var setConfirm=confirmS[1]; var confirm=confirmS[0];
@@ -28863,7 +29509,7 @@ function TTErrorBoundary(props){ return props.children; }
 // APP_VERSION is the public number. The build stamp stays where it has always
 // been, in the boot div, because that is the thing that proves which deploy
 // landed; this is the thing a person reads.
-var APP_VERSION = "1.4";   // sign-in + reminders & nudges (Brent, 11-13). 1.3B "Baker" was the one before.
+var APP_VERSION = "1.5";   // personal sync between your own devices (Brent, 11-14). 1.4 = sign-in + reminders.
 var SPLASH_SHOW_MS = 2500;   // fully opaque
 var SPLASH_FADE_MS = 320;    // then fades out over this
 function SplashScreen(props){
@@ -29118,6 +29764,40 @@ function TTBoard(){
     return function(){ off(); window.removeEventListener("online", poke); window.removeEventListener("offline", poke);
       document.removeEventListener("visibilitychange", vis); };
   }, []);
+  // Personal sync (11-13). Another device's changes land in storage; this
+  // puts them on screen. The practice board is never touched: its stores are
+  // separate, and the running clock only follows while on the real board.
+  var syncS=useState(ttSync.status()); var syncSt=syncS[0], setSyncSt=syncS[1];
+  var testModeRef=useRef(testMode); testModeRef.current=testMode;
+  useEffect(function(){
+    TT_SYNC_APPLIED=function(keys){
+      keys.forEach(function(k){
+        if(k==="tt_projects") setRealProjects(load("tt_projects", []));
+        else if(k==="tt_logs") setRealLogs(load("tt_logs", []));
+        else if(k==="tt_disruptions") setRealDist(load("tt_disruptions", []));
+        else if(k==="tt_breaks") setRealBreaks(load("tt_breaks", []));
+        else if(k==="tt_laneorder") setRealLaneOrder(load("tt_laneorder", DEFAULT_ORDER));
+        else if(k==="tt_lanemeta") setRealLaneMeta(load("tt_lanemeta", DEFAULT_META));
+        else if(k==="tt_distpresets") setDistPresets(load("tt_distpresets", DEFAULT_DIST_PRESETS));
+        else if(k==="tt_settings") setSettings(settingsFromStore());
+        else if(k==="tt_breaknags") setBreakQuiet(load("tt_breaknags", {}));
+        else if(k==="tt_modules" || k.indexOf("tt_mod_")===0) setModTick(function(n){ return n+1; });
+        else if(k==="tt_session" && !testModeRef.current){
+          var x=load("tt_session", {});
+          setActiveId(x.activeId!=null ? x.activeId : null); setActiveStart(x.activeStart||null);
+          setAtWorkStart(x.atWorkStart||null); setBreakStart(x.breakStart||null); setBreakLabel(x.breakLabel||"");
+          setInterrupting(!!x.interrupting); setIntStart(x.intStart||null);
+          setWorkDay(typeof x.workDay==="string" ? x.workDay : null, x.workDayOt);
+        }
+      });
+    };
+    var off=ttSync.subscribe(setSyncSt);
+    ttSync.boot(); setSyncSt(ttSync.status());
+    var offC=ttCloud.subscribe(function(c){ if(c.phase==="in" && c.net==="ok" && ttSync.status().on && !ttSync.status().busy && Date.now()-lastSyncRef.current>5000){ lastSyncRef.current=Date.now(); ttSync.sync(); } });
+    if(ttSync.status().on){ ttSync.sync(); ttSync.startPulling(); }
+    return function(){ TT_SYNC_APPLIED=null; off(); offC(); };
+  }, []);
+  var lastSyncRef=useRef(0);
   // Whichever module screen is open, as { id, screen }. Null with no modules.
   var modScreenS=useState(null); var setModScreen=modScreenS[1]; var modScreen=modScreenS[0];
   // Enablement lives in storage, not in React state, so a toggle in Extensions
@@ -29140,17 +29820,7 @@ function TTBoard(){
   var showOutlineS=useState(false); var setShowOutline=showOutlineS[1]; var showOutline=showOutlineS[0];
   var reportsKindS=useState("week"); var setReportsKind=reportsKindS[1]; var reportsKind=reportsKindS[0];
   var showArchiveS=useState(false); var setShowArchive=showArchiveS[1]; var showArchive=showArchiveS[0];
-  var settingsS=useState(function(){
-    var st = load("tt_settings",settingsFactory());
-    // Settings saved before the schedule existed get the default merged in, so
-    // every consumer can rely on the shape being present.
-    // Every saved schedule shape - missing entirely, or from before unpaid
-    // breaks existed - is normalized to the full current shape.
-    st.workSchedule = normalizeSchedule(st.workSchedule);
-    st.notifs = normalizeNotifs(st.notifs);
-    if(!st.timeInc) st.timeInc = "standard";
-    return st;
-  });
+  var settingsS=useState(settingsFromStore);
   var setSettings=settingsS[1]; var settings=settingsS[0];
   // Must run before ANY colour is derived below - S and C are module-level, so
   // deriving first would paint the previous render's palette. The 1s tick used

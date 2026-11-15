@@ -353,3 +353,13 @@ The core has moved on underneath the platform. Modules see these through `TT`:
   screen and all three of its sheets do; e2e walks it.
 - **Modules bring their own help** (the `help` field, above). A module with a
   menu row and no help fails the e2e coverage check once it is switched on.
+
+## Personal sync (11-13)
+
+When a person turns on "Sync my own jobs and hours", every module storage key
+(`tt_mod_<id>_<key>`) travels to their other devices with the rest of the
+board. A module key syncs as ONE value: the later edit of the whole key wins
+(the board's own records merge field by field; module values do not). A module
+that wants finer merging should keep many small keys rather than one big one.
+Nothing changes for a module while sync is off.
+

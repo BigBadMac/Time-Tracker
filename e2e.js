@@ -2073,6 +2073,166 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     await pD.close();
   }
 
+  // ---- personal sync, 11-13: two devices, one account, a stand-in server ----
+  {
+    function PServer(){
+  const rows = new Map(); let clock = Date.now(); let up = true; const log = [];
+  function merge(old, it){
+    const f = Object.assign({}, old ? old.fields : {}), ts = Object.assign({}, old ? old.field_ts : {});
+    for (const k of Object.keys(it.field_ts || {})) {
+      const t1 = +it.field_ts[k];
+      if (ts[k] == null || t1 > +ts[k]) { ts[k] = t1; if (k in (it.fields || {})) f[k] = it.fields[k]; else delete f[k]; }
+    }
+    let del = Math.max(old && old.del_ts || 0, +it.del_ts || 0) || null;
+    const latest = Math.max(0, ...Object.values(ts).map(Number));
+    if (del && latest > del) del = null;
+    return { fields: f, field_ts: ts, del_ts: del };
+  }
+  function pushOne(user, it){
+    const key = user + "|" + it.coll + "|" + it.item_id, old = rows.get(key), m = merge(old, it);
+    if (!old || JSON.stringify([old.fields, old.field_ts, old.del_ts]) !== JSON.stringify([m.fields, m.field_ts, m.del_ts])) {
+      rows.set(key, Object.assign({ user, coll: it.coll, item_id: it.item_id }, m, { updated_at: clock })); return 1;
+    }
+    return 0;
+  }
+  const api = {
+    rows, log, setUp(v){ up = v; }, tick(ms){ clock += ms || 1; },
+    handle(user, method, path, body){
+      log.push(method + " " + path.split("?")[0]);
+      if (!up) return { status: 0, body: null };
+      if (!user) return { status: 401, body: null };
+      api.tick(1);
+      if (method === "POST" && path === "/rest/v1/rpc/personal_push") {
+        if (!Array.isArray(body.items) || body.items.length > 500) return { status: 400, body: { message: "too many" } };
+        let n = 0; body.items.forEach((it) => { n += pushOne(user, it); }); return { status: 200, body: n };
+      }
+      if (method === "POST" && path === "/rest/v1/rpc/personal_replace") {
+        for (const [k, r] of rows) if (r.user === user && (r.del_ts == null || r.del_ts < body.at_ms)) rows.set(k, Object.assign({}, r, { del_ts: Math.max(r.del_ts || 0, body.at_ms), updated_at: clock }));
+        let n = 0; body.items.forEach((it) => { n += pushOne(user, it); }); return { status: 200, body: n };
+      }
+      if (method === "POST" && path === "/rest/v1/rpc/personal_summary") {
+        const mine = [...rows.values()].filter((r) => r.user === user);
+        const last = mine.reduce((m, r) => Math.max(m, r.updated_at), 0);
+        return { status: 200, body: { projects: mine.filter((r) => r.coll === "projects" && r.del_ts == null).length,
+          logs: mine.filter((r) => r.coll === "logs" && r.del_ts == null).length, last: last ? new Date(last).toISOString() : null } };
+      }
+      if (method === "POST" && path === "/rest/v1/rpc/personal_clock") {
+        let mx = 0; for (const r of rows.values()) if (r.user === user) mx = Math.max(mx, r.del_ts || 0, ...Object.values(r.field_ts).map(Number));
+        return { status: 200, body: mx };
+      }
+      if (method === "GET" && path.indexOf("/rest/v1/personal_items?") === 0) {
+        const q = new URLSearchParams(path.split("?")[1]);
+        let list = [...rows.values()].filter((r) => r.user === user);
+        const gte = q.get("updated_at"); if (gte) { const ms = Date.parse(gte.replace(/^gte\./, "")); list = list.filter((r) => r.updated_at >= ms); }
+        if (q.get("del_ts") === "is.null") list = list.filter((r) => r.del_ts == null);
+        list.sort((a, b) => a.updated_at - b.updated_at || (a.coll < b.coll ? -1 : a.coll > b.coll ? 1 : 0) || (a.item_id < b.item_id ? -1 : a.item_id > b.item_id ? 1 : 0));
+        const off = +(q.get("offset") || 0), lim = +(q.get("limit") || 1000);
+        list = list.slice(off, off + lim).map((r) => ({ coll: r.coll, item_id: r.item_id, fields: r.fields, field_ts: r.field_ts, del_ts: r.del_ts, updated_at: new Date(r.updated_at).toISOString() }));
+        return { status: 200, body: list };
+      }
+      return { status: 404, body: null };
+    }
+  };
+  return api;
+}
+
+    const SV=PServer();
+    // Served over http, as the real site is: Chromium can drop a file:// page's
+    // storage when it reloads, which the hold-and-reload step depends on.
+    const WEB=require('http').createServer((q,r)=>{ r.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}); r.end(fs.readFileSync('/tmp/e2e.html')); });
+    await new Promise((res)=>WEB.listen(0,'127.0.0.1',res));
+    const APP='http://127.0.0.1:'+WEB.address().port+'/';
+    const SB='https://giqeknvzfeznxouxegxk.supabase.co/**';
+    const toks={ TA:'u1', TB:'u1' };
+    const dev=async(tok, seed)=>{
+      const ctx=await b.newContext({viewport:{width:390,height:844}});
+      const pg=await ctx.newPage(); pg.__errs=0; pg.on('pageerror',(e)=>{ pg.__errs++; console.log('PE', e.message); });
+      await pg.route(SB, async (route)=>{
+        const rq=route.request(), u=rq.url(), path=u.replace('https://giqeknvzfeznxouxegxk.supabase.co','');
+        let body=null; try{ body=rq.postDataJSON(); }catch(e){}
+        if(path.endsWith('/rest/v1/rpc/touch_active')) return route.fulfill({ status:204, body:'' });
+        const who=toks[String(rq.headers()['authorization']||'').replace('Bearer ','')];
+        const r=SV.handle(who, rq.method(), path, body||{});
+        if(r.status===0) return route.abort();
+        return route.fulfill({ status:r.status, contentType:'application/json', body:r.body==null?'':JSON.stringify(r.body) });
+      });
+      await pg.addInitScript((a)=>{ if(sessionStorage.getItem('seeded')) return; sessionStorage.setItem('seeded','1');
+        localStorage.setItem('ttacct_session', JSON.stringify({ access_token:a.tok, refresh_token:'R', expires_at:Date.now()+3600e3, user_id:'u1', email:'brent@example.com' }));
+        localStorage.setItem('ttacct_email','brent@example.com');
+        Object.keys(a.seed).forEach((k)=>localStorage.setItem(k, JSON.stringify(a.seed[k]))); }, { tok, seed });
+      await pg.goto(APP,{waitUntil:'load'}); await dropSplash(pg); await pg.waitForTimeout(900);
+      return pg;
+    };
+    const P=(id,name)=>({ id, name, lane:'Daily Activity', notes:'', order:0, parentId:null, role:'project', kind:'ongoing', stages:[], milestones:[] });
+    const look=(mode)=>({layout:'comfortable',tracking:'timer',theme:'neon-dream',schemes:{},fonts:{},mode,handedness:'right',headerPos:'top'});
+    const top=(pg)=>pg.locator('[data-modal-panel]').last();
+    const openSync=async(pg)=>{
+      await pg.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await pg.waitForTimeout(350);
+      await pg.locator('[data-menuaccount]').click(); await pg.waitForTimeout(450);
+      await pg.locator('[data-acctsync]').click(); await pg.waitForTimeout(450);
+    };
+    const pA=await dev('TA', { tt_settings:look('dark'), tt_projects:[P(101,'Deck rebuild'),P(102,'Order seals')], tt_laneorder:['Daily Activity'] });
+    await openSync(pA);
+    t("sync: Account has a Sync this board row, off at first, opening its own sheet with the trail",
+      (await pA.locator('[data-syncrow="off"]').count())===1 && /Account/.test(await top(pA).locator('[data-trail]').getAttribute('data-trail')||''));
+    t("sync: the sheet says what travels and what stays on this device", /Travels/i.test(await pA.locator('[data-synclists]').innerText()) && /The look/.test(await pA.locator('[data-synclists]').innerText()));
+    t("sync: Sync now waits until it's on", await pA.locator('[data-syncnow]').isDisabled());
+    await pA.locator('[data-onswitch="sync"]').click(); await pA.waitForTimeout(1200);
+    t("sync: the first device switches straight on - the account was empty, nothing to ask", (await pA.locator('[data-syncrow="on"]').count())===1 && (await top(pA).innerText()).indexOf('already has a board')<0);
+    t("sync: and its board is on the server", !!SV.rows.get('u1|projects|101') && SV.rows.get('u1|projects|101').fields.name==='Deck rebuild');
+    t("sync: the look stayed behind", !('mode' in (SV.rows.get('u1|keys|tt_settings')||{fields:{}}).fields));
+    t("sync: the sheet says it's up to date", /Up to date/.test(await pA.locator('[data-syncstate]').innerText()));
+
+    const pB=await dev('TB', { tt_settings:look('light'), tt_projects:[P(201,'Fence')], tt_laneorder:['Daily Activity'] });
+    await openSync(pB);
+    await pB.locator('[data-onswitch="sync"]').click(); await pB.waitForTimeout(1200);
+    t("sync: the second device is asked, with both boards' numbers", /already has a board/.test(await top(pB).innerText()) &&
+      /1 project/.test(await pB.locator('[data-linkboards] > div').first().innerText()) && /2 projects/.test(await pB.locator('[data-linkboards] > div').last().innerText()));
+    t("sync: Use the account's board is suggested and picked, and says what happens in plain words",
+      (await pB.locator('[data-linkpick="account"][aria-pressed="true"]').count())===1 && /replaced by the account’s 2 projects/.test(await pB.locator('[data-linkwhat]').innerText()));
+    const h1=await pB.locator('[data-linkwhat]').evaluate((e)=>e.getBoundingClientRect().height);
+    await pB.locator('[data-linkpick="combine"]').click(); await pB.waitForTimeout(200);
+    const h2=await pB.locator('[data-linkwhat]').evaluate((e)=>e.getBoundingClientRect().height);
+    t("sync: the words box keeps its size as the choice changes", Math.abs(h1-h2)<1);
+    t("sync: Combine is a plain tap; replacing a board is held", (await pB.locator('[data-linkgo="combine"][data-holdreplace]').count())===0);
+    await pB.locator('[data-linkpick="account"]').click(); await pB.waitForTimeout(200);
+    t("sync: Use the account's board is held", (await pB.locator('[data-linkgo="account"][data-holdreplace]').count())===1);
+    await pB.locator('[data-linkgo="account"]').click(); await pB.waitForTimeout(500);
+    t("sync: a tap alone doesn't replace anything", /already has a board/.test(await top(pB).innerText()));
+    const gb=await pB.locator('[data-linkgo="account"]').boundingBox();
+    await pB.mouse.move(gb.x+gb.width/2, gb.y+gb.height/2); await pB.mouse.down(); await pB.waitForTimeout(1800); await pB.mouse.up();
+    // the device reloads onto the account's board: wait for that, not for a fixed time
+    await pB.waitForFunction(()=>/Deck rebuild/.test(document.body.innerText) && !document.querySelector('[data-linkboards]'), null, { timeout:15000 }).catch(()=>{});
+    await pB.waitForTimeout(600);
+    const bTxt=await pB.locator('body').innerText();
+    t("sync: held - this device now shows the account's board", /Deck rebuild/.test(bTxt) && /Order seals/.test(bTxt) && !/Fence/.test(bTxt));
+    t("sync: and kept its own look", (await pB.evaluate(()=>JSON.parse(localStorage.getItem('tt_settings')).mode))==='light');
+    t("sync: and is on", (await pB.evaluate(()=>JSON.parse(localStorage.getItem('ttsync_state')).on))===true);
+
+    // a project added on A reaches B, live
+    await pA.locator('[data-modal-panel]').last().locator('button').filter({hasText:/^Close$/}).click(); await pA.waitForTimeout(300);
+    await pA.locator('[data-modal-panel]').last().locator('button').filter({hasText:/^Close$/}).click().catch(()=>{}); await pA.waitForTimeout(300);
+    await pA.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await pA.waitForTimeout(300);
+    await pA.locator('button').filter({hasText:/^Edit…$/}).first().click(); await pA.waitForTimeout(450);
+    const list=await pA.locator('[data-outlineopen]').allInnerTexts();
+    await pA.locator('[data-outlineopen]').nth(0).click(); await pA.waitForTimeout(400);   // the lane row heads the outline
+    await pA.locator('[data-rowmenuitem]').filter({hasText:/^New project$/}).click(); await pA.waitForTimeout(500);
+    await top(pA).locator('input').first().fill('Added on A');
+    await top(pA).locator('button').filter({hasText:/^Add Project$/}).first().click(); await pA.waitForTimeout(3200);
+    t("sync: a project added on one device goes up by itself, a moment later", [...SV.rows.values()].some((r)=>r.coll==='projects' && r.fields.name==='Added on A'));
+    await openSync(pB);
+    await pB.locator('[data-syncnow]').click(); await pB.waitForTimeout(1500);
+    await top(pB).locator('button').filter({hasText:/^Close$/}).click(); await pB.waitForTimeout(300);
+    await top(pB).locator('button').filter({hasText:/^Close$/}).click().catch(()=>{}); await pB.waitForTimeout(400);
+    t("sync: and appears on the other, without a reload", /Added on A/.test(await pB.locator('body').innerText()));
+    t("sync: the badge shows synced on both", (await pA.locator('[data-anchor="hdr-cloud"]').getAttribute('data-cloud'))==='synced' && (await pB.locator('[data-anchor="hdr-cloud"]').getAttribute('data-cloud'))==='synced');
+    t("sync: a Before sync copy was kept on the device that took the account's board",
+      await pB.evaluate(()=>new Promise((res)=>{ const r=indexedDB.open('tt-saves',1); r.onsuccess=()=>{ const q=r.result.transaction('snaps').objectStore('snaps').getAll(); q.onsuccess=()=>res(q.result.some((x)=>x.why==='before-sync')); }; r.onerror=()=>res(false); })));
+    t("sync: no page errors", pA.__errs===0 && pB.__errs===0);
+    await pA.context().close(); await pB.context().close();
+    WEB.close();
+  }
+
   // ---- reminders & nudges, 11-12 ----
   {
     const now=Date.now(), H=3600e3, D=86400e3;

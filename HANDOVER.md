@@ -17,13 +17,48 @@ container reset (see "Container resets"); the schema did not change.
 **Delivery rule (Brent, 10-27):** when Brent asks for files to push, send
 the full set as ONE zip **and** the built `index.html` on its own beside it,
 so he can open and check the build before pushing.
+**ZIP CHECK (Brent, 11-13):** before sending a zip, check every .html file
+name in it - the 1.4 zip carried a wrongly labelled .html that Brent had to
+fix by hand. The site's .html must be `index.html`. NEVER put
+`shell-10-10.html` (the build's template: a full v1.0 app) in a zip - on the
+site it would be an old app sharing the real one's storage.
 
 **Everything above is green at this build.** Pushing it is Brent's step
 (Working Copy -> GitHub Pages). `10-20 v1.2 ids and tracking` was the build
 before (pushed). First paint is identical to 1.2 apart from the splash's
 version number.
 
-## START HERE - 1.4 DELIVERED 11-13 (stamp "11-13 v1.4"): sign-in + reminders. NEXT: sync.
+## START HERE - 1.5 DELIVERED 11-14 (stamp "11-14 v1.5"): opt-in PERSONAL SYNC. NEXT: Brent's two-device test, then sharing.
+
+Brent said push (11-14). APP_VERSION = "1.5". Zip time-tracker-v1.5.zip (no
+shell-10-10.html - checked) + index.html; notes RELEASE-NOTES-1.5.md for Brent
+to trim. Advised test: back up both devices; turn sync on FIRST on the device
+with the real board; on the other choose "Use the account's board"; rename on
+one, Sync now on the other. Watch for: the sandbox pausing after a quiet week
+(restore_project), clock skew between devices, storage size of ttsync_meta.
+
+AHEAD OF SHARING (added to 1.5 before push, Brent 11-14): personal sync
+leaves SHARED projects alone, both ways. ttSyncSharedIds(list): a project
+with a `shareId`, and every task under it (parentId chain). They never go up,
+a server row for one is ignored, applying never drops one, and "Use the
+account's board" keeps them. A project that BECOMES shared is marked gone in
+personal sync (stays on the device). Logs/time stay in personal sync for now
+- the sharing release decides how a person's time on a shared project
+travels (time_entries). The field name `shareId` is now a contract.
+sync.js 62 checks.
+E2E GOTCHA (11-14): Chromium sometimes DROPS a file:// page's localStorage on
+reload (seen: 23 keys at unload, 0 after). Any e2e step that reloads and
+relies on storage must serve the page over http - the sync block runs a tiny
+http server (WEB) for this. 10/10 after, vs ~1 in 3 failing before. Not an app
+bug: the real site is https and storage survives reloads.
+
+(Before: 1.4 pushed and live 11-13: sign-in + reminders.)
+
+PUSH NOTES (11-13): Brent pushed from his iPhone; its Working Copy clone was
+stale (earlier pushes came from the iPad) -> "could not be fast forwarded".
+Fixed by deleting the phone's local copy and re-cloning. iOS Files then made
+"name 2.ext" duplicates (Keep Both) - deleted, re-copied with REPLACE. Tell
+him: Pull before copying files in, on whichever device; always choose Replace.
 
 Brent said push (11-13). APP_VERSION = "1.4". Zip time-tracker-v1.4.zip + index.html
 sent; full release notes in RELEASE-NOTES-1.4.md for Brent to trim. Next big
@@ -100,6 +135,72 @@ home-screen icon shows the count (setAppBadge / clearAppBadge). Server push
   mutants killed) and an e2e block (20). Run:
   `TZ=America/Los_Angeles node reminders.js /tmp/app_only.js`
 - Mocks: design/notif.py, design/form*.js.
+
+## Personal sync - DECIDED 11-13: OPT-IN
+Brent (11-13): "Go with your recommendation" = OPT-IN personal sync. A
+setting ("Sync my own jobs and hours to my account", off by default) puts a
+person's whole board on all their own devices and backs it up; only they can
+read it. Teammates still see only shared projects. Supersedes "personal jobs
+never leave the phone" FOR THOSE WHO TURN IT ON (off = unchanged).
+CONFIRMED 11-13: look stays per device; three-way first-link choice.
+BUILT 11-13 (stamp "11-13 sync", not released):
+- SERVER: db/04_personal.sql, LIVE on the sandbox (migration
+  personal_sync_draft1). personal_items (user_id, coll, item_id, fields,
+  field_ts {field: device ms}, del_ts, updated_at = server time via trigger =
+  the pull cursor). RLS owner-only on all four verbs. personal_push(items)
+  merges FIELD BY FIELD later-wins (tie keeps stored), deletion is a time
+  (wins over older edits; a later edit revives; tie stays gone);
+  personal_replace(items, at_ms); personal_clock() = newest time held (so
+  "use this device" beats a device clock that runs behind). Max 500/push.
+  Tests db/05_personal_tests.sql; run.sh now 01+04 then 02+05+99_report:
+  120/120; 16/16 SQL mutants killed.
+- ENGINE (time-tracker.jsx, after ttCloud): ttSyncMake/ttSync. The doorway
+  calls TT_DB_NOTE(key) on every write; synced keys are rescanned 400 ms
+  later against ttsync_meta (per field [time, FNV hash]); changed records
+  queue in ttsync_state.out; push 2 s after; pull every 60 s while visible,
+  on check-in, back online. Pull = since cursor - 30 s, paged 500 by offset.
+  Travels: tt_projects/logs/disruptions/breaks (records by id), tt_settings
+  MINUS the look (TT_SYNC_LOOK), lanemeta, laneorder, distpresets, modules,
+  tt_mod_*, session (not under the practice board), breaknags,
+  remind_fired, notif_fired. Stays: collapse states, tt_test*, remind_away/
+  last, ttacct_*, tt_gone. A server row for any other key is IGNORED.
+  link("device"|"account"|"combine"); account/combine take a "Before sync"
+  snapshot first. Settings load is now settingsFromStore() (shared by start
+  and sync). TT_SYNC_APPLIED (set by App) puts pulled changes on screen.
+  ttCloud gained request(method, path, body) (refresh + retry on 401),
+  activity(net) (sync drives the badge), user().
+- Tests: sync.js (55: two devices + a stand-in server written from the SQL,
+  not the app); 27 engine mutants, 24 killed, 3 equivalent. tt-tests'
+  tutorial-sandbox check now cuts out the sync apply block (and checks it
+  never touches setTest*).
+- KNOWN LIMITS: later-wins uses DEVICE clocks (accepted design); ttsync_meta
+  lives in localStorage (~30 bytes per field) - move to IndexedDB if boards
+  grow large. Sandbox paused itself (free plan) by 11-13 - restored; it will
+  pause again after a quiet week.
+UI DECIDED (Brent 11-13 "Go with your suggestion"): C + 3, BUILT:
+- Account (signed in) has a "Sync this board  On/Off >" row (data-acctsync,
+  anchor acct-sync) opening SyncModal (trail ... Account > Sync): switch
+  "Sync my own jobs and hours" (OnSwitch name sync, data-syncrow,
+  data-syncstate words via syncWords), Sync now (data-syncnow), a steady
+  message line, "What travels and what doesn't" two lists (data-synclists).
+- Switching on: probe; empty account -> link("device") at once (first
+  device); account has a board -> FirstLinkModal "Which board?" (layout 3):
+  This device / Your account counts (data-linkboards; personal_summary RPC
+  + ttSync.localSummary), three choices (data-linkpick; account Suggested),
+  a steady words box (data-linkwhat, min-height 8.6em) via syncConsequence,
+  then HoldButton (data-holdreplace, NOT data-holddelete) for account/device,
+  a plain tap for Combine. account/combine reload the page after.
+- Engine does NOTHING while off (no rescans, no meta) - zero cost for people
+  who never turn it on. Module keys: tt_mod_<id>_<key> (ids may hold
+  hyphens) sync as one whole value (MODULES.md has a section).
+- Manual: guide `sync` (six steps; stages account(in) / sync / firstlink),
+  under Your data. signin step 3 wording updated.
+- Server: personal_summary() added (migration personal_sync_summary);
+  db tests 124/124.
+- Tests: sync.js 57; e2e block "personal sync, 11-13" (21) - two contexts
+  routed to a stand-in server (PServer, copied from sync.js) incl. the hold,
+  reload, look kept, live arrival, badge, Before sync snapshot.
+NEXT: Brent's real two-device test (iPad + iPhone) once pushed as 1.5.
 
 ## Web project report (with sync) - DESIGN SETTLED 11-13 (H3 setup, W1 page)
 Brent (11-13): audience SELECTABLE; LIVE, always up to date (no snapshots);

@@ -1673,8 +1673,17 @@ test("the tutorial is a sandbox - nothing in it touches the real board", () => {
   has(/var setLaneOrder=testMode\?setTestLaneOrder:setRealLaneOrder;/, "and writes to it");
   has(/var laneMeta=testMode\?testLaneMeta:realLaneMeta;/, "lane meta too");
   has(/var setLaneMeta=testMode\?setTestLaneMeta:setRealLaneMeta;/, "both ways");
-  // Nothing may reach past the switch to a mode-specific setter directly.
-  const app = s.slice(s.indexOf("var setLaneMeta=testMode"));
+  // Nothing may reach past the switch to a mode-specific setter directly -
+  // except personal sync putting another device's REAL board on screen
+  // (11-13), which is the real board by definition. That one block is cut out.
+  let app = s.slice(s.indexOf("var setLaneMeta=testMode"));
+  const syncA = app.indexOf("TT_SYNC_APPLIED=function(keys){"), syncB = app.indexOf("var off=ttSync.subscribe(setSyncSt);");
+  has(/TT_SYNC_APPLIED=function\(keys\)\{/, "sync puts another device's changes on screen in one block");
+  if (syncA > 0 && syncB > syncA) {
+    const blk = app.slice(syncA, syncB);
+    ok(!/setTest[A-Z]/.test(blk), "and that block never touches the practice board's stores");
+    app = app.slice(0, syncA) + app.slice(syncB);
+  }
   ["setRealLaneOrder", "setRealLaneMeta", "setTestLaneOrder", "setTestLaneMeta"].forEach((fn) => {
     eq((app.match(new RegExp(fn + "\\(", "g")) || []).length, 0,
       "nothing calls " + fn + " directly after the switch");
