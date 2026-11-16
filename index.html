@@ -18,7 +18,7 @@
 </head>
 <body>
 <pre id="err"></pre>
-<div id="root"><div id="boot">Time Tracker build 11-14 v1.5<br>
+<div id="root"><div id="boot">Time Tracker build 11-14 v1.5.1<br>
 HTML loaded &#10003; &mdash; starting scripts&hellip;<br>
 <span style="font-size:11px;opacity:.7">If this message never goes away, the scripts below it failed to run.<br>
 If you cannot see this message at all, the file itself is not being displayed.</span></div></div>
@@ -25686,6 +25686,13 @@ function accountSentence(c){
 // The sheet: email, then the code from the email, then signed in. One sheet,
 // three steps; the trail names the step. demo (the manual) draws a step with
 // nothing live behind it.
+// Sign-in codes: six or eight digits, whichever the server sends. The length
+// that last worked here is remembered (not a tt_ key: never in a backup).
+var TT_CODE_MAX = 8, TT_CODE_PAUSE_MS = 1500;
+function ttCodeLen(set){
+  if(set===6 || set===8){ ttDb.setRaw("ttacct_codelen", String(set)); return set; }
+  var n=+ttDb.getRaw("ttacct_codelen"); return n===6 || n===8 ? n : null;
+}
 function AccountModal(props){
   var c=props.cloud||ttCloud.get(), demo=props.demo||null;
   var syncOpenS=useState(false); var syncOpen=syncOpenS[0], setSyncOpen=syncOpenS[1];
@@ -25716,6 +25723,8 @@ function AccountModal(props){
       else setMsg(r.msg);
     });
   }
+  var codeWaitRef=useRef(null);
+  useEffect(function(){ return function(){ if(codeWaitRef.current) clearTimeout(codeWaitRef.current); }; }, []);
   function verify(v){
     var digits=String(v!=null ? v : code).replace(/\D/g,"");
     if(busy || demo) return;
@@ -25723,7 +25732,7 @@ function AccountModal(props){
     setBusy(true); setMsg("");
     ttCloud.verify(mail, digits).then(function(r){
       setBusy(false);
-      if(r.ok){ haptic([10,40,10]); setStep("in"); }
+      if(r.ok){ haptic([10,40,10]); ttCodeLen(digits.length); setStep("in"); }
       else { setMsg(r.msg); setCode(""); }
     });
   }
@@ -25767,25 +25776,39 @@ function AccountModal(props){
   }
 
   if(step==="code"){
-    var digits=String(code).replace(/\D/g,"").slice(0,6);
-    var boxes=[0,1,2,3,4,5].map(function(i){
-      var cur=focused && (i===Math.min(digits.length,5));
-      return React.createElement("div", { key:i, style:{ flex:"1 1 0", maxWidth:"3rem", height:"3.4rem", display:"flex", alignItems:"center", justifyContent:"center",
+    // Codes are six or eight digits, as the server is set (11-14: the sandbox
+    // sent eight). Six boxes, or eight once the code is longer than six or an
+    // eight-digit code has signed in here before.
+    var digits=String(code).replace(/\D/g,"").slice(0,TT_CODE_MAX);
+    var nBox=(digits.length>6 || ttCodeLen()===8) ? 8 : 6;
+    var boxes=Array.apply(null, Array(nBox)).map(function(_, i){
+      var cur=focused && (i===Math.min(digits.length,nBox-1));
+      return React.createElement("div", { key:i, "data-codebox":true, style:{ flex:"1 1 0", maxWidth:nBox===8 ? "2.5rem" : "3rem", height:"3.4rem", display:"flex", alignItems:"center", justifyContent:"center",
           background:INPUT_STYLE.background, border:"2px solid "+(cur ? S.actionBdr : S.border), borderRadius:S.radius3,
-          fontFamily:S.fontMono, fontSize:"1.6rem", fontWeight:500, color:S.text, boxShadow:cur ? "0 0 0 3px "+rgba(S.actionBdr,0.25) : "none" } }, digits[i]||"");
+          fontFamily:S.fontMono, fontSize:nBox===8 ? "1.4rem" : "1.6rem", fontWeight:500, color:S.text, boxShadow:cur ? "0 0 0 3px "+rgba(S.actionBdr,0.25) : "none" } }, digits[i]||"");
     });
     return React.createElement(Modal, { title:"Account", trailHere:"Code", onClose:props.onClose,
         trail:trail ? trail.concat([{ label:"Account", go:function(){ setStep("email"); setMsg(""); } }]) : null,
         onSave:function(){ verify(); }, saveLabel:busy ? "Checking…" : "Sign in", saveAnchor:"acct-signin" },
       P("Enter the code from the email sent to "+mail+". Check spam if it isn’t there in a minute."),
-      // Six boxes, one real field laid over them: the field takes typing,
+      // The boxes, one real field laid over them: the field takes typing,
       // pasting and the phone's "From Mail" suggestion; the boxes show it.
-      React.createElement("div", { "data-anchor":"acct-code", style:{ position:"relative", display:"flex", gap:"0.45rem", justifyContent:"center", direction:"ltr" } },
+      React.createElement("div", { "data-anchor":"acct-code", style:{ position:"relative", display:"flex", gap:nBox===8 ? "0.3rem" : "0.45rem", justifyContent:"center", direction:"ltr" } },
         boxes,
-        React.createElement("input", { ref:codeRef, "data-acctcode":true, type:"text", inputMode:"numeric", autoComplete:"one-time-code", maxLength:6,
+        React.createElement("input", { ref:codeRef, "data-acctcode":true, type:"text", inputMode:"numeric", autoComplete:"one-time-code", maxLength:TT_CODE_MAX,
           value:digits, "aria-label":"Code from the email",
           onFocus:function(){ setFocused(true); }, onBlur:function(){ setFocused(false); },
-          onChange:function(e){ var v=String(e.target.value).replace(/\D/g,"").slice(0,6); setCode(v); if(msg) setMsg(""); if(v.length===6) verify(v); },
+          onChange:function(e){
+            var v=String(e.target.value).replace(/\D/g,"").slice(0,TT_CODE_MAX), jump=v.length-digits.length;
+            setCode(v); if(msg) setMsg("");
+            if(codeWaitRef.current){ clearTimeout(codeWaitRef.current); codeWaitRef.current=null; }
+            // a whole code arriving at once (pasted, or "From Mail"), or the
+            // eighth digit: sign in now. Six typed: sign in after a pause, in
+            // case two more are coming - unless six is what this server sends.
+            if(v.length>=6 && (jump>1 || v.length===TT_CODE_MAX || ttCodeLen()===6)) verify(v);
+            // (known to be eight here: six waits for the rest, or for Sign in)
+            else if(v.length===6 && ttCodeLen()!==8) codeWaitRef.current=setTimeout(function(){ codeWaitRef.current=null; verify(v); }, TT_CODE_PAUSE_MS);
+          },
           style:{ position:"absolute", inset:0, width:"100%", height:"100%", opacity:0.01, color:"transparent", caretColor:"transparent",
                   background:"transparent", border:"none", outline:"none", fontSize:"16px", padding:0 } })),
       React.createElement("div", { style:{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:"0.5rem" } },
@@ -29509,7 +29532,7 @@ function TTErrorBoundary(props){ return props.children; }
 // APP_VERSION is the public number. The build stamp stays where it has always
 // been, in the boot div, because that is the thing that proves which deploy
 // landed; this is the thing a person reads.
-var APP_VERSION = "1.5";   // personal sync between your own devices (Brent, 11-14). 1.4 = sign-in + reminders.
+var APP_VERSION = "1.5.1";   // 1.5 + sign-in codes of six or eight digits (Brent, 11-14: "call it 1.5.1"). 1.5 = personal sync.
 var SPLASH_SHOW_MS = 2500;   // fully opaque
 var SPLASH_FADE_MS = 320;    // then fades out over this
 function SplashScreen(props){

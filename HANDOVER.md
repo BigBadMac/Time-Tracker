@@ -28,7 +28,26 @@ site it would be an old app sharing the real one's storage.
 before (pushed). First paint is identical to 1.2 apart from the splash's
 version number.
 
-## START HERE - 1.5 DELIVERED 11-14 (stamp "11-14 v1.5"): opt-in PERSONAL SYNC. NEXT: Brent's two-device test, then sharing.
+## START HERE - 1.5.1 DELIVERED 11-14 (stamp "11-14 v1.5.1"). 1.5 (personal sync) was pushed 11-14. NEXT: Brent's two-device test, then sharing.
+
+1.5.1 (Brent named it - "call it 1.5.1"; a small fix to a pushed release):
+sign-in codes of SIX OR EIGHT digits. The sandbox sends 8 (Brent set Email
+OTP Length to 6 but mails still came with 8 - unresolved on the dashboard
+side). TT_CODE_MAX 8; boxes 6, or 8 once the code runs past six or an 8 is
+remembered (ttacct_codelen via ttDb - not tt_, never in backups). Auto
+sign-in: a whole code at once (paste / From Mail) or the 8th digit -> now;
+six typed -> after TT_CODE_PAUSE_MS 1500 unless 8 is remembered (then it
+waits for the rest or Sign in); six remembered -> at once. e2e account block
+41 checks.
+PENDING FOR THE NEXT UPDATE (Brent 11-14): a new reminder suggests the
+item's name for "Remind me about", with the option to write your own.
+Mocked A filled-in / B suggestion chips / C name-or-own switch / D faint name
++ Use name (design/remwhat.html); I suggested B. Awaiting his pick.
+SUPABASE AUTH SETUP STILL OWED BY BRENT (11-14): the "Confirm sign up" email
+template still had the default LINK (new accounts get that one, not "Magic
+link"); Site URL was still http://localhost:3000. Gave him the code template
+and told him to set Site URL to the app's GitHub Pages address.
+
 
 Brent said push (11-14). APP_VERSION = "1.5". Zip time-tracker-v1.5.zip (no
 shell-10-10.html - checked) + index.html; notes RELEASE-NOTES-1.5.md for Brent
@@ -46,6 +65,9 @@ personal sync (stays on the device). Logs/time stay in personal sync for now
 - the sharing release decides how a person's time on a shared project
 travels (time_entries). The field name `shareId` is now a contract.
 sync.js 62 checks.
+(Same gotcha bit the account block's long-name check, 11-14: it seeded the
+board then reloaded; a dropped reload brought back the default board. fresh()
+now takes seed.board and writes it in the init script on every load.)
 E2E GOTCHA (11-14): Chromium sometimes DROPS a file:// page's localStorage on
 reload (seen: 23 keys at unload, 0 after). Any e2e step that reloads and
 relies on storage must serve the page over http - the sync block runs a tiny

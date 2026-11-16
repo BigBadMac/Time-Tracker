@@ -1977,7 +1977,7 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
         const json=(st,b)=>route.fulfill({ status:st, contentType:'application/json', body:b==null?'':JSON.stringify(b) });
         if(opt.down) return json(503, { message:'down' });
         if(u.endsWith('/auth/v1/otp')){ pg.__sb.otp++; return json(200, {}); }
-        if(u.endsWith('/auth/v1/verify')){ pg.__sb.verify++; return body.token==='123456'
+        if(u.endsWith('/auth/v1/verify')){ pg.__sb.verify++; return (body.token==='123456' || body.token==='12345678')
           ? json(200, { access_token:'A', refresh_token:'R', expires_in:3600, user:{ id:'u-1', email:body.email } })
           : json(403, { error_code:'otp_expired', msg:'Token has expired or is invalid' }); }
         if(u.endsWith('/rest/v1/rpc/touch_active')){ pg.__sb.touch++; return route.fulfill({ status:204, body:'' }); }
@@ -1991,7 +1991,9 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
       await mockSB(pg, seed&&seed.mock);
       await pg.addInitScript((a)=>{ localStorage.setItem('tt_settings', JSON.stringify({layout:'comfortable',tracking:'timer',theme:'neon-dream',schemes:{},fonts:{},mode:'dark',handedness:a.hand,headerPos:a.pos}));
         if(a.sess) localStorage.setItem('ttacct_session', JSON.stringify(a.sess));
-        if(a.email) localStorage.setItem('ttacct_email', a.email); }, { hand, pos, sess:seed&&seed.sess, email:seed&&seed.email });
+        if(a.email) localStorage.setItem('ttacct_email', a.email);
+        if(a.board){ localStorage.setItem('tt_projects', JSON.stringify(a.board)); localStorage.setItem('tt_laneorder', JSON.stringify(['Daily Activity'])); } },
+        { hand, pos, sess:seed&&seed.sess, email:seed&&seed.email, board:seed&&seed.board });
       await pg.goto('file:///tmp/e2e.html',{waitUntil:'load'}); await dropSplash(pg); await pg.waitForTimeout(500);
       return pg;
     };
@@ -2057,20 +2059,62 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     await pC.close();
 
     // a long job name: shortens, keeps the time, never runs under the tag
-    const pD=await fresh('right','top');
-    await pD.evaluate(()=>{ localStorage.setItem('tt_projects', JSON.stringify([{id:1,name:"Line 4 Hydraulic Press Rebuild and Recommission",lane:"Daily Activity",notes:"",order:0,parentId:null,role:"project",kind:"ongoing",stages:[]}]));
-      localStorage.setItem('tt_laneorder', JSON.stringify(['Daily Activity'])); });
-    await pD.reload(); await dropSplash(pD); await pD.waitForTimeout(500);
+    // the board comes in with every load (a file:// reload can drop storage)
+    const pD=await fresh('right','top', { board:[{id:1,name:"Line 4 Hydraulic Press Rebuild and Recommission",lane:"Daily Activity",notes:"",order:0,parentId:null,role:"project",kind:"ongoing",stages:[]}] });
     await pD.locator('[data-anchor="hdr-clock"]').click(); await pD.waitForTimeout(400);
     for(let i=0;i<2;i++){ if(await pD.locator('[data-shiftchoice]').count()){ await pD.locator('[data-shiftchoice]').first().click(); await pD.waitForTimeout(400); } }
     await pD.locator('[data-surface="lane"] button').filter({hasText:/^Start$/}).first().click(); await pD.waitForTimeout(400);
     for(let i=0;i<2;i++){ if(await pD.locator('[data-shiftchoice]').count()){ await pD.locator('[data-shiftchoice]').first().click(); await pD.waitForTimeout(400); } }
+    // measure only once the running job is in the top bar and laid out
+    await pD.waitForFunction(()=>{ const n=document.querySelector('[data-hdrjob]'); return n && n.scrollWidth>n.clientWidth && !document.querySelector('[data-shiftchoice]'); }, null, { timeout:4000 }).catch(()=>{});
+    await pD.waitForTimeout(300);
     const g=await pD.evaluate(()=>{ const n=document.querySelector('[data-hdrjob]'), tag=document.querySelector('[data-breaktag]'), c=document.querySelector('[data-anchor="hdr-cloud"]');
       const time=n && n.nextElementSibling; const R=(e)=>e.getBoundingClientRect();
       return n&&tag&&time ? { nameRight:R(n).right, timeLeft:R(time).left, timeRight:R(time).right, tagLeft:R(tag).left, tagRight:R(tag).right, cloudLeft:R(c).left, clipped:n.scrollWidth>n.clientWidth, vw:innerWidth } : null; });
     t("account: a long job name is shortened, not run under the Break tag", !!g && g.clipped && g.nameRight<=g.timeLeft && g.timeRight<=g.tagLeft && g.tagRight<=g.cloudLeft && g.cloudLeft<g.vw);
     t("account: no page errors (long name)", pD.__errs===0);
     await pD.close();
+    // codes of eight digits (11-14: the sandbox sends eight)
+    const pE=await fresh('right','top', {});
+    await pE.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await pE.waitForTimeout(300);
+    await pE.locator('[data-menuaccount]').click(); await pE.waitForTimeout(400);
+    await pE.locator('[data-anchor="acct-email"]').fill('brent@example.com');
+    await pE.locator('[data-anchor="acct-send"]').click(); await pE.waitForTimeout(500);
+    t("account: six boxes to start", (await pE.locator('[data-codebox]').count())===6);
+    await pE.locator('[data-acctcode]').click(); await pE.keyboard.type('123456', { delay:60 }); await pE.waitForTimeout(500);
+    t("account: six digits typed: it waits a moment in case two more are coming", pE.__sb.verify===0);
+    await pE.keyboard.type('78', { delay:60 }); await pE.waitForTimeout(250);
+    t("account: the boxes widen to eight as the code runs on", (await pE.locator('[data-codebox]').count())===8 || (await pE.locator('[data-acct="signout"]').count())===1);
+    await pE.waitForTimeout(900);
+    t("account: the eighth digit signs in straight away, once", pE.__sb.verify===1 && (await pE.locator('[data-acct="signout"]').count())===1);
+    t("account: and the length is remembered for next time", (await pE.evaluate(()=>localStorage.getItem('ttacct_codelen')))==='8');
+    await pE.locator('[data-acct="signout"]').click(); await pE.waitForTimeout(400);
+    await pE.locator('[data-anchor="acct-email"]').fill('brent@example.com');
+    await pE.locator('[data-anchor="acct-send"]').click(); await pE.waitForTimeout(500);
+    t("account: next time it opens on eight boxes", (await pE.locator('[data-codebox]').count())===8);
+    await pE.locator('[data-acctcode]').fill('111111'); await pE.waitForTimeout(600);
+    t("account: a whole code pasted signs in at once, whatever its length", pE.__sb.verify===2 && /wrong or has expired/.test(await pE.locator('[data-modal-panel]').innerText()));
+    await pE.locator('[data-acctcode]').click(); await pE.keyboard.type('123456', { delay:60 }); await pE.waitForTimeout(2000);
+    t("account: known to be eight here: six digits wait, even after a pause", pE.__sb.verify===2 && (await pE.locator('[data-acct="signout"]').count())===0);
+    await pE.locator('[data-anchor="acct-signin"]').click(); await pE.waitForTimeout(700);
+    t("account: and Sign in sends them (a server switched back to six still works)", pE.__sb.verify===3 && (await pE.locator('[data-acct="signout"]').count())===1);
+    t("account: now six is remembered", (await pE.evaluate(()=>localStorage.getItem('ttacct_codelen')))==='6');
+    for(const known of [true,false]){
+      await pE.locator('[data-acct="signout"]').click(); await pE.waitForTimeout(400);
+      if(!known) await pE.evaluate(()=>localStorage.removeItem('ttacct_codelen'));
+      await pE.locator('[data-anchor="acct-email"]').fill('brent@example.com');
+      await pE.locator('[data-anchor="acct-send"]').click(); await pE.waitForTimeout(500);
+      const before=pE.__sb.verify;
+      await pE.locator('[data-acctcode]').click(); await pE.keyboard.type('123456', { delay:60 }); await pE.waitForTimeout(400);
+      if(known) t("account: known to be six: the sixth digit signs in at once", pE.__sb.verify===before+1 && (await pE.locator('[data-acct="signout"]').count())===1);
+      else {
+        t("account: length not known: six typed one by one wait a moment...", pE.__sb.verify===before);
+        await pE.waitForTimeout(1600);
+        t("account: ...then sign in", pE.__sb.verify===before+1 && (await pE.locator('[data-acct="signout"]').count())===1);
+      }
+    }
+    t("account: no page errors (codes)", pE.__errs===0);
+    await pE.close();
   }
 
   // ---- personal sync, 11-13: two devices, one account, a stand-in server ----
