@@ -18,7 +18,7 @@
 </head>
 <body>
 <pre id="err"></pre>
-<div id="root"><div id="boot">Time Tracker build 11-14 v1.5.1<br>
+<div id="root"><div id="boot">Time Tracker build 11-17 v1.5.2<br>
 HTML loaded &#10003; &mdash; starting scripts&hellip;<br>
 <span style="font-size:11px;opacity:.7">If this message never goes away, the scripts below it failed to run.<br>
 If you cannot see this message at all, the file itself is not being displayed.</span></div></div>
@@ -17596,6 +17596,32 @@ var TT_SYNC_OVERLAP_MS = 30000;          // pull a little earlier than the curso
 var TT_SYNC_SETTLE_MS = 400;             // a burst of writes is one change
 var TT_SYNC_PUSH_MS = 2000;              // and goes up this long after the last one
 var TT_SYNC_PULL_MS = 60000;             // while open, look for other devices' changes this often
+// How often (Brent, 11-17: all four, each person picks; per device, never
+// synced). The choice is kept PER NETWORK from the start - wifi, cell, other
+// - so the native app can offer "on Wi-Fi" and "on mobile data" separately
+// without changing what is stored. A web app can't tell networks apart, so
+// it is always "other" and the web Sync sheet sets all three together.
+var TT_SYNC_PREFS = "ttsync_prefs";
+var TT_SYNC_RATES = ["now","smart","q15","open"];
+var TT_SYNC_QUIET_MS = 10*60000;        // Smart: this long after the last change, slow down
+var TT_SYNC_SLOW_MS = 15*60000;         // to this
+var TT_SYNC_OVERHEAD = 700;             // rough bytes of headers per request, both ways
+// The one scheduling brain: given the rate, the network and when anything
+// last changed, when should changes go up and when should it look for others?
+// null = not on its own (only on opening the app, coming back to it, or Sync now).
+//   ctx: { net:"wifi"|"cell"|"other", now, lastChange (ms or 0) }
+function ttSyncPlan(rate, ctx){
+  var busy=ctx.lastChange && ctx.now-ctx.lastChange < TT_SYNC_QUIET_MS;
+  if(rate==="now") return { push:TT_SYNC_PUSH_MS, pull:TT_SYNC_PULL_MS };
+  if(rate==="q15") return { push:null, pull:TT_SYNC_SLOW_MS };          // sent with the next check
+  if(rate==="open") return { push:null, pull:null };
+  return { push:TT_SYNC_PUSH_MS, pull:busy ? TT_SYNC_PULL_MS : TT_SYNC_SLOW_MS };   // smart
+}
+function ttSyncNormPrefs(p){
+  p=(p && typeof p==="object") ? p : {};
+  var out={}; ["wifi","cell","other"].forEach(function(k){ out[k]=TT_SYNC_RATES.indexOf(p[k])>=0 ? p[k] : "smart"; });
+  return out;
+}
 function ttSyncKind(k){
   if(!k || typeof k!=="string") return null;
   if(TT_SYNC_COLLS[k]) return "coll";
@@ -17745,14 +17771,33 @@ function ttSyncMake(env){
     var keys=Object.keys(pending); if(!keys.length) return;
     var n=0; keys.forEach(function(k){ n+=rescan(k, pending[k]); });
     pending={};
-    if(n){ keepMeta(); keepState(); if(state.on) schedulePush(); }
+    if(n){ state.lastChange=now(); keepMeta(); keepState(); if(state.on){ schedulePush(); api.startPulling(); } }
   }
   function note(key){
     if(applying || !state.on || !ttSyncKind(key)) return;   // off: no work, no storage, for anyone who never turns it on
     if(!pending[key]) pending[key]=now();
     if(!settleT) settleT=later(settle, TT_SYNC_SETTLE_MS);
   }
-  function schedulePush(){ if(pushT) cancel(pushT); pushT=later(function(){ pushT=null; api.sync(); }, TT_SYNC_PUSH_MS); }
+  // ---- when: the plan for this device's rate on this network ----
+  var prefs=ttSyncNormPrefs(readJ(TT_SYNC_PREFS, null));
+  function net(){ try{ var n=env.network ? env.network() : "other"; return n==="wifi"||n==="cell" ? n : "other"; }catch(e){ return "other"; } }
+  function plan(){ return ttSyncPlan(prefs[net()], { net:net(), now:now(), lastChange:state.lastChange||0 }); }
+  function schedulePush(){
+    var d=plan().push; if(pushT){ cancel(pushT); pushT=null; }
+    if(d!=null) pushT=later(function(){ pushT=null; api.sync(); }, d);
+  }
+  // ---- how much: a rough count of bytes, per month and network, per device ----
+  function count(sentBody, recvBody){
+    var mon=new Date(now()).toISOString().slice(0,7), b=state.bytes;
+    if(!b || b.month!==mon) b=state.bytes={ month:mon, sent:0, recv:0, n:0, by:{} };
+    var sz=function(x){ try{ return x==null ? 0 : JSON.stringify(x).length; }catch(e){ return 0; } };
+    var up=sz(sentBody)+TT_SYNC_OVERHEAD/2, down=sz(recvBody)+TT_SYNC_OVERHEAD/2, k=net();
+    b.sent+=up; b.recv+=down; b.n++;
+    var by=b.by[k]=b.by[k]||{ sent:0, recv:0 }; by.sent+=up; by.recv+=down;
+  }
+  function req(method, path, body){
+    return cloud.request(method, path, body).then(function(r){ count(body, r && r.body); return r; });
+  }
 
   // ---- the server's side ----
   function payloadOf(ik){
@@ -17768,7 +17813,7 @@ function ttSyncMake(env){
     var batch=keys.slice(0, TT_SYNC_BATCH), seen={};
     var items=batch.map(function(ik){ seen[ik]=state.out[ik]; return payloadOf(ik); }).filter(Boolean);
     if(!items.length){ batch.forEach(function(ik){ delete state.out[ik]; }); keepState(); return push(); }
-    return cloud.request("POST", "/rest/v1/rpc/personal_push", { items:items }).then(function(r){
+    return req("POST", "/rest/v1/rpc/personal_push", { items:items }).then(function(r){
       if(!ok(r)) return r;
       batch.forEach(function(ik){ if(state.out[ik]===seen[ik]) delete state.out[ik]; });
       keepState();
@@ -17834,7 +17879,7 @@ function ttSyncMake(env){
             (since!=null ? "&updated_at=gte."+encodeURIComponent(iso(since)) : "")+
             (onlyAlive ? "&del_ts=is.null" : "")+
             "&order=updated_at.asc,coll.asc,item_id.asc&limit="+TT_SYNC_BATCH+"&offset="+off;
-      return cloud.request("GET", q).then(function(r){
+      return req("GET", q).then(function(r){
         if(!ok(r) || !Array.isArray(r.body)) return { ok:false, r:r };
         r.body.forEach(function(x){ rows.push(x); var t=Date.parse(x.updated_at); if(!isNaN(t) && (max===null || t>max)) max=t; });
         if(r.body.length<TT_SYNC_BATCH) return { ok:true, rows:rows, max:max };
@@ -17850,7 +17895,7 @@ function ttSyncMake(env){
       var keys=applyRows(res.rows);
       if(res.max!==null && (state.cursor===null || res.max>state.cursor)) state.cursor=res.max;
       keepState();
-      if(keys.length && env.onApplied) env.onApplied(keys);
+      if(keys.length){ state.lastChange=now(); if(env.onApplied) env.onApplied(keys); }
       return true;
     });
   }
@@ -17881,7 +17926,7 @@ function ttSyncMake(env){
 
   var api={
     note:note,
-    status:function(){ return { on:!!state.on, user:state.user, waiting:Object.keys(state.out).length, cursor:state.cursor, busy:!!running }; },
+    status:function(){ return { on:!!state.on, user:state.user, waiting:Object.keys(state.out).length, cursor:state.cursor, busy:!!running, rate:prefs[net()] }; },
     subscribe:function(fn){ subs.push(fn); return function(){ subs=subs.filter(function(x){ return x!==fn; }); }; },
     // On start: catch anything written while the app was closed (a restore,
     // a reset, a load - those write storage directly), stamped now.
@@ -17896,14 +17941,14 @@ function ttSyncMake(env){
     },
     // Does the account already hold a board? -> { ok, has }
     probe:function(){
-      return cloud.request("GET", "/rest/v1/personal_items?select=item_id&del_ts=is.null&limit=1").then(function(r){
+      return req("GET", "/rest/v1/personal_items?select=item_id&del_ts=is.null&limit=1").then(function(r){
         if(!ok(r) || !Array.isArray(r.body)) return { ok:false, status:r.status };
         return { ok:true, has:r.body.length>0 };
       });
     },
     // What the account holds -> { ok, projects, logs, last (ms or null) }
     summary:function(){
-      return cloud.request("POST", "/rest/v1/rpc/personal_summary", {}).then(function(r){
+      return req("POST", "/rest/v1/rpc/personal_summary", {}).then(function(r){
         if(!ok(r) || !r.body) return { ok:false, status:r.status };
         var b=r.body, t=b.last ? Date.parse(b.last) : NaN;
         return { ok:true, projects:+b.projects||0, logs:+b.logs||0, last:isNaN(t) ? null : t };
@@ -17944,13 +17989,13 @@ function ttSyncMake(env){
         }
         if(mode==="device"){
           // after anything the account already holds, whatever this device's clock says
-          return cloud.request("POST", "/rest/v1/rpc/personal_clock", {}).then(function(c){
+          return req("POST", "/rest/v1/rpc/personal_clock", {}).then(function(c){
             if(!ok(c)) return c;
             at=Math.max(at, (+c.body||0)+1);
             stampAll(at+1, mode);
           var all=Object.keys(state.out), first=all.slice(0, TT_SYNC_BATCH), seen={};
           var items=first.map(function(ik){ seen[ik]=state.out[ik]; return payloadOf(ik); }).filter(Boolean);
-          return cloud.request("POST", "/rest/v1/rpc/personal_replace", { items:items, at_ms:at }).then(function(r){
+          return req("POST", "/rest/v1/rpc/personal_replace", { items:items, at_ms:at }).then(function(r){
             if(!ok(r)) return r;
             first.forEach(function(ik){ if(state.out[ik]===seen[ik]) delete state.out[ik]; });
             return push().then(function(p){ return p===true ? pull() : p; });
@@ -17990,11 +18035,24 @@ function ttSyncMake(env){
       return running;
     },
     startPulling:function(){
-      if(pullT) cancel(pullT);
+      if(pullT){ cancel(pullT); pullT=null; }
       if(!state.on) return;
+      var d=plan().pull; if(d==null) return;
       pullT=later(function(){ pullT=null; var vis=true; try{ vis=typeof document==="undefined" || !document.hidden; }catch(e){}
-        (vis ? api.sync() : Promise.resolve()).then(function(){ api.startPulling(); }); }, TT_SYNC_PULL_MS);
+        (vis ? api.sync() : Promise.resolve()).then(function(){ api.startPulling(); }); }, d);
     },
+    // Opening the app, coming back to it, or getting back online: every rate
+    // takes a fresh look then, so what's on screen is current.
+    wake:function(){ if(!state.on) return Promise.resolve(false); return api.sync().then(function(r){ api.startPulling(); return r; }); },
+    // How often, for this device. The web knows no networks: one choice, all three set.
+    prefs:function(){ return Object.assign({}, prefs); },
+    setRate:function(rate, which){
+      if(TT_SYNC_RATES.indexOf(rate)<0) return;
+      if(which==="wifi"||which==="cell"||which==="other") prefs[which]=rate; else prefs={ wifi:rate, cell:rate, other:rate };
+      writeJ(TT_SYNC_PREFS, prefs); tell(); api.startPulling(); if(Object.keys(state.out).length) schedulePush();
+    },
+    rate:function(){ return prefs[net()]; },
+    bytes:function(){ var mon=new Date(now()).toISOString().slice(0,7), b=state.bytes; return b && b.month===mon ? JSON.parse(JSON.stringify(b)) : { month:mon, sent:0, recv:0, n:0, by:{} }; },
     // for tests
     _meta:function(){ return meta; }, _state:function(){ return state; }, _settle:function(){ if(settleT){ cancel(settleT); } settle(); },
     _apply:applyRows, _rescan:rescan
@@ -20401,6 +20459,10 @@ var HELP_GUIDES = {
         text:"Turning sync on where the account already holds a board asks which to keep. Both boards are counted so you can see which is which." },
       { stage:{ kind:"firstlink" }, ring:'[data-anchor="link-go"]', side:"above", title:"Choose, then hold",
         text:"Use the account’s board, use this device’s board, or combine both. The box says exactly what will happen. Replacing a board takes a hold, and a Before sync copy goes into Backups first." },
+      { stage:{ kind:"sync" }, ring:'[data-anchor="sync-how"]', side:"above", title:"How often",
+        text:"How often decides how much data sync uses on this device. Right away is the freshest; Smart is quick while you work and slows when things are quiet; every quarter of an hour is lighter; When I open it is the lightest." },
+      { stage:{ kind:"howoften" }, ring:'[data-anchor="sync-bytes"]', side:"above", title:"What it costs",
+        text:"Each choice shows roughly what it uses in a working month, and the box below shows what this device has really used so far this month. Every device keeps its own choice." },
       { stage:{ kind:"sync" }, ring:'[data-anchor="sync-now"]', side:"above", title:"Sync now",
         text:"Sync now sends and fetches straight away. The cloud in the top bar turns while it works and shows the green check when everything matches. Turning sync off keeps everything on this device." }
     ] },
@@ -20764,6 +20826,8 @@ function helpStageEl(stage, on){
     return React.createElement(AccountModal, { demo:stage.step||"email", onClose:nop });
   if(stage.kind==="sync")
     return React.createElement(SyncModal, { demo:true, cloud:{ phase:"in", net:"ok", online:true, okAt:Date.now()-120000, email:"you@example.com" }, onClose:nop, trail:[{ label:"Account", back:true, go:nop }] });
+  if(stage.kind==="howoften")
+    return React.createElement(HowOftenModal, { demo:true, onClose:nop, trail:[{ label:"Account", back:true, go:nop }, { label:"Sync", back:true, go:nop }] });
   if(stage.kind==="firstlink")
     return React.createElement(FirstLinkModal, { demo:true, here:{ projects:9, logs:412, last:Date.now()-3600000 }, there:{ projects:12, logs:538, last:Date.now()-5*3600000 },
       onCancel:nop, onDone:nop, trail:[{ label:"Account", back:true, go:nop }, { label:"Sync", back:true, go:nop }] });
@@ -20853,10 +20917,10 @@ var HELP_CARD_W = 366, HELP_SHEET_W = 390, HELP_MARK = 22;
 var HELP_STAGE_FULL = { full:true };
 var HELP_STAGE_W = { paywork:400, unpaid:400, card:366, close:390, header:366, presets:300, headerfull:390, msline:366,
                      schedule:470, shiftask:390, backup:390, outline:390, msedit:400, msstep:390, reports:400,
-                     themes:400, layout:400, summary:400, archive:390, extensions:390, tracking:400, breaks:390, ticker:390, account:390, remind:366, reminder:390, away:390, remindsettings:390, sync:390, firstlink:390 };
+                     themes:400, layout:400, summary:400, archive:390, extensions:390, tracking:400, breaks:390, ticker:390, account:390, remind:366, reminder:390, away:390, remindsettings:390, sync:390, firstlink:390, howoften:390 };
 // Kinds that stage a whole sheet: measured off the staged panel, not the content.
 var HELP_SHEETS = { paywork:true, unpaid:true, close:true, schedule:true, shiftask:true, backup:true, outline:true, msedit:true, msstep:true, reports:true,
-                    themes:true, layout:true, summary:true, archive:true, extensions:true, tracking:true, breaks:true, account:true, reminder:true, away:true, sync:true, firstlink:true };
+                    themes:true, layout:true, summary:true, archive:true, extensions:true, tracking:true, breaks:true, account:true, reminder:true, away:true, sync:true, firstlink:true, howoften:true };
 function HelpStage(props){
   // A module's stage never reads the core's tables - its kinds are its own and
   // could share a name with a core kind. Every module screen is a sheet
@@ -21625,7 +21689,7 @@ function ProjectForm(props){
       ),
       React.createElement(RemindBlock, { hasDue:kind==="finite" && pickedEnd!=null, dueWord:"Before it ends",
         noDueHint: kind==="finite" ? "Set an end date to be reminded before it ends." : null,
-        rule:remindDue, onRule:setRemindDue, reminders:reminders, onReminders:setReminders,
+        rule:remindDue, onRule:setRemindDue, reminders:reminders, onReminders:setReminders, itemName:(name||"").trim(),
         // The sub-sheets carry the whole way back: this record last, and
         // every step before it through the same unsaved-edits question.
         trail:(props.trail && props.trail.length) ? props.trail.map(function(it){ return { label:it.label, go:function(){
@@ -23061,7 +23125,10 @@ function RemindTimingModal(props){
 // One reminder of your own.
 function ReminderModal(props){
   var r=props.reminder||{}, isNew=!r.id;
-  var labelS=useState(r.label||""); var label=labelS[0], setLabel=labelS[1];
+  // A new reminder starts with the item's name, all selected: Save keeps it,
+  // typing replaces it (Brent 11-17, option A).
+  var labelS=useState(r.label || (isNew && props.itemName ? props.itemName : "")); var label=labelS[0], setLabel=labelS[1];
+  var pickedRef=useRef(false);
   var whenS=useState(r.when||"at"); var when=whenS[0], setWhen=whenS[1];
   var base=r.at>0 ? r.at : (function(){ var d=new Date(); d.setDate(d.getDate()+1); d.setHours(9,0,0,0); return d.getTime(); })();
   var dS=useState(toDateInput(base)); var d=dS[0], setD=dS[1];
@@ -23081,7 +23148,10 @@ function ReminderModal(props){
       React.createElement("div", null,
         React.createElement("label", { style:LABEL_STYLE }, "What"),
         React.createElement("input", { "data-reminderlabel":true, value:label, placeholder:"What to remind you about",
-          onChange:function(e){ setLabel(e.target.value); }, style:INPUT_STYLE })),
+          onFocus:function(e){ if(isNew && !pickedRef.current && props.itemName && label===props.itemName){ pickedRef.current=true; try{ e.target.select(); }catch(x){} } },
+          onChange:function(e){ setLabel(e.target.value); }, style:INPUT_STYLE }),
+        isNew && props.itemName && React.createElement("div", { style:{ fontSize:"0.76rem", color:S.textDim, marginTop:"0.25rem" } },
+          "Keep the name, or type something of your own.")),
       React.createElement("div", null,
         React.createElement("label", { style:LABEL_STYLE }, "When"),
         React.createElement(Toggle, { name:"reminderwhen", keys:["at","shiftStart","shiftEnd"], value:when,
@@ -23153,7 +23223,7 @@ function RemindBlock(props){
              color:S.infoText,fontWeight:700,fontSize:"0.88rem",cursor:"pointer",fontFamily:S.fontBody} }, "+ Add a reminder"),
     timing && React.createElement(RemindTimingModal, { rule:rule, trail:subTrail(function(){ setTiming(false); }),
       onSave:function(r){ props.onRule(r); setTiming(false); }, onCancel:function(){ setTiming(false); } }),
-    edit && React.createElement(ReminderModal, { reminder:edit, trail:subTrail(function(){ setEdit(null); }),
+    edit && React.createElement(ReminderModal, { reminder:edit, itemName:props.itemName, trail:subTrail(function(){ setEdit(null); }),
       onSave:function(r){ var exists=list.some(function(x){ return x.id===r.id; });
         props.onReminders(exists ? list.map(function(x){ return x.id===r.id ? r : x; }) : list.concat([r])); setEdit(null); },
       onDelete:function(id){ props.onReminders(list.filter(function(x){ return x.id!==id; })); setEdit(null); },
@@ -25780,7 +25850,8 @@ function AccountModal(props){
     // sent eight). Six boxes, or eight once the code is longer than six or an
     // eight-digit code has signed in here before.
     var digits=String(code).replace(/\D/g,"").slice(0,TT_CODE_MAX);
-    var nBox=(digits.length>6 || ttCodeLen()===8) ? 8 : 6;
+    // eight unless this device knows the server sends six (11-17: the sandbox sends eight)
+    var nBox=(digits.length>6 || ttCodeLen()!==6) ? 8 : 6;
     var boxes=Array.apply(null, Array(nBox)).map(function(_, i){
       var cur=focused && (i===Math.min(digits.length,nBox-1));
       return React.createElement("div", { key:i, "data-codebox":true, style:{ flex:"1 1 0", maxWidth:nBox===8 ? "2.5rem" : "3rem", height:"3.4rem", display:"flex", alignItems:"center", justifyContent:"center",
@@ -25846,13 +25917,47 @@ function syncWords(st, c){
   if(st.waiting>0) return { text:st.waiting===1 ? "One change waiting to go up." : st.waiting+" changes waiting to go up.", col:S.textDim };
   return { text:"Up to date"+(c.okAt ? " · last synced "+fmtTime(c.okAt) : "")+".", col:S.successText };
 }
+// How often (layout D, Brent 11-17): its own list, each choice with what it
+// does and roughly what it costs; this device's real use this month beneath.
+var SYNC_RATE_INFO = {
+  now:["Right away", "Changes go up within seconds; checks every minute while open.", "about 10 MB"],
+  smart:["Smart", "Within seconds when you’re busy; every 15 minutes when it’s quiet; always when you open the app.", "about 2 MB"],
+  q15:["Every 15 minutes", "Sends and fetches together, four times an hour.", "about 1 MB"],
+  open:["When I open it", "Only when you open the app, come back to it, or tap Sync now.", "under 0.5 MB"]
+};
+function syncBytesWords(n){ if(n<1024*1024) return Math.max(1, Math.round(n/1024))+" KB"; return (Math.round(n/104857.6)/10)+" MB"; }
+function HowOftenModal(props){
+  var demo=props.demo||null;
+  var rS=useState(demo ? "smart" : ttSync.rate()); var rate=rS[0], setRate=rS[1];
+  var b=demo ? { sent:180000, recv:260000, n:212 } : ttSync.bytes();
+  return React.createElement(Modal, { title:"How often", onClose:props.onClose, cancelLabel:"Done", trail:props.trail },
+    React.createElement("p", { style:{ margin:"0 0 0.7rem", color:S.textDim, fontSize:"0.88rem", lineHeight:1.45 } },
+      "For this device only. Rough data for a working month with the app open during shifts."),
+    TT_SYNC_RATES.map(function(k){ var on=rate===k, info=SYNC_RATE_INFO[k];
+      return React.createElement("button", { key:k, "data-syncrate":k, "aria-pressed":on?"true":"false", "data-flat":true,
+          onClick:function(){ haptic(6); setRate(k); if(!demo) ttSync.setRate(k); },
+          style:{ display:"block", width:"100%", textAlign:"left", marginBottom:"0.5rem", padding:"0.6rem 0.7rem", cursor:"pointer",
+                  borderRadius:S.radius, border:(on?"2px solid ":"1.5px solid ")+(on?S.actionBdr:S.border), background:on?S.infoBg:S.bg1, fontFamily:S.fontBody } },
+        React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.55rem" } },
+          React.createElement("span", { style:{ width:"16px", height:"16px", borderRadius:"50%", flexShrink:0, border:"2px solid "+(on?S.actionBdr:S.textDim),
+              boxShadow:on?"inset 0 0 0 3px "+S.infoBg+", inset 0 0 0 8px "+S.actionBdr:"none" } }),
+          React.createElement("span", { style:{ fontWeight:700, fontSize:"0.94rem", color:S.text } }, info[0]),
+          React.createElement("span", { style:{ marginLeft:"auto", fontSize:"0.72rem", fontWeight:800, color:S.textDim, whiteSpace:"nowrap" } }, info[2]+" / month")),
+        React.createElement("div", { style:{ fontSize:"0.8rem", color:S.textDim, marginTop:"0.2rem", marginLeft:"1.6rem", lineHeight:1.4 } }, info[1])); }),
+    React.createElement("div", { "data-syncbytes":true, "data-anchor":"sync-bytes", style:{ marginTop:"0.6rem", padding:"0.6rem 0.7rem", borderRadius:S.radius, background:S.bg1,
+        border:"1px solid "+S.border, fontSize:"0.84rem", color:S.text, lineHeight:1.45 } },
+      React.createElement("b", null, "This month on this device: "), "about "+syncBytesWords((b.sent||0)+(b.recv||0)),
+      React.createElement("div", { style:{ color:S.textDim, fontSize:"0.78rem", marginTop:"0.15rem" } },
+        b.n ? syncBytesWords(b.sent||0)+" sent, "+syncBytesWords(b.recv||0)+" received, over "+b.n+" exchanges with the server." : "Nothing yet.")));
+}
 function SyncModal(props){
   var c=props.cloud||ttCloud.get(), demo=props.demo||null;
-  var stS=useState(ttSync.status()); var st=demo ? { on:true, waiting:0 } : stS[0];
+  var stS=useState(ttSync.status()); var st=demo ? { on:true, waiting:0, rate:"smart" } : stS[0];
   useEffect(function(){ if(demo) return; return ttSync.subscribe(stS[1]); }, []);
   var busyS=useState(false); var busy=busyS[0], setBusy=busyS[1];
   var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
   var askS=useState(null); var ask=askS[0], setAsk=askS[1];   // { here, there } when the account already has a board
+  var howS=useState(false); var how=howS[0], setHow=howS[1];
   function turnOn(){
     if(busy || demo) return;
     setBusy(true); setMsg("");
@@ -25882,12 +25987,21 @@ function SyncModal(props){
         onClick:function(){ if(demo) return; haptic(8); ttSync.sync(); },
         style:{ width:"100%", marginTop:"0.8rem", background:S.infoBg, border:"2px solid "+S.actionBdr, borderRadius:S.radius, padding:"0.7rem",
                 color:S.actionBdrText||S.actionBdr, fontFamily:S.fontBody, fontWeight:700, fontSize:"0.95rem", cursor:"pointer", opacity:(!st.on||busy)?0.4:1 } }, "Sync now"),
+    React.createElement("button", { "data-synchow":st.rate||"smart", "data-anchor":"sync-how", "data-flat":true,
+        onClick:function(){ haptic(8); setHow(true); },
+        style:{ display:"flex", alignItems:"center", gap:"0.6rem", width:"100%", background:"none", border:"none", borderBottom:"1px solid "+S.border,
+                padding:"0.8rem 0.1rem", marginTop:"0.3rem", cursor:"pointer", fontFamily:S.fontBody, textAlign:"left" } },
+      React.createElement("span", { style:{ fontWeight:700, color:S.text, fontSize:"0.95rem" } }, "How often"),
+      React.createElement("span", { style:{ marginLeft:"auto", fontWeight:700, fontSize:"0.88rem", color:S.actionText } }, (SYNC_RATE_INFO[st.rate||"smart"]||SYNC_RATE_INFO.smart)[0]),
+      React.createElement("span", { style:{ color:S.textDim } }, "›")),
     React.createElement("div", { "data-syncmsg":msg?true:undefined, style:{ minHeight:"2.6rem", marginTop:"0.5rem", color:S.dangerText, fontSize:"0.85rem", lineHeight:1.4 } }, msg),
     React.createElement("div", { "data-anchor":"sync-lists", style:{ fontSize:"0.72rem", letterSpacing:"0.09em", textTransform:"uppercase", color:S.textDim, fontWeight:700, margin:"0.2rem 0 0.4rem" } }, "What travels and what doesn’t"),
     React.createElement("div", { "data-synclists":true, style:{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"0.7rem" } },
       col("Travels", SYNC_TRAVELS), col("Stays on this device", SYNC_STAYS)),
     React.createElement("p", { style:{ margin:"0.9rem 0 0", color:S.textDim, fontSize:"0.8rem", lineHeight:1.45 } },
       "Only you can see your board on the server. Turning sync off keeps everything on this device; your other devices keep theirs."),
+    how && React.createElement(HowOftenModal, { demo:demo, trail:(props.trail||[]).concat([{ label:"Sync", back:true, go:function(){ setHow(false); } }]),
+      onClose:function(){ setHow(false); } }),
     ask && React.createElement(FirstLinkModal, { here:ask.here, there:ask.there,
       trail:(props.trail||[]).concat([{ label:"Sync", back:true, go:function(){ setAsk(null); } }]),
       onCancel:function(){ setAsk(null); }, onDone:function(mode){ setAsk(null); if(mode!=="device" && props.onReload) props.onReload(); } }));
@@ -29532,7 +29646,7 @@ function TTErrorBoundary(props){ return props.children; }
 // APP_VERSION is the public number. The build stamp stays where it has always
 // been, in the boot div, because that is the thing that proves which deploy
 // landed; this is the thing a person reads.
-var APP_VERSION = "1.5.1";   // 1.5 + sign-in codes of six or eight digits (Brent, 11-14: "call it 1.5.1"). 1.5 = personal sync.
+var APP_VERSION = "1.5.2";   // 1.5 + six/eight-digit codes, How often, the item's name in new reminders (Brent, 11-17: "should be 1.5.2"). 1.5.1 was the code-length fix.
 var SPLASH_SHOW_MS = 2500;   // fully opaque
 var SPLASH_FADE_MS = 320;    // then fades out over this
 function SplashScreen(props){
@@ -29816,11 +29930,14 @@ function TTBoard(){
     };
     var off=ttSync.subscribe(setSyncSt);
     ttSync.boot(); setSyncSt(ttSync.status());
-    var offC=ttCloud.subscribe(function(c){ if(c.phase==="in" && c.net==="ok" && ttSync.status().on && !ttSync.status().busy && Date.now()-lastSyncRef.current>5000){ lastSyncRef.current=Date.now(); ttSync.sync(); } });
-    if(ttSync.status().on){ ttSync.sync(); ttSync.startPulling(); }
-    return function(){ TT_SYNC_APPLIED=null; off(); offC(); };
+    // A fresh look on opening, on coming back to the app and on getting back
+    // online - whatever the rate. (Not off the badge's own "synced": that
+    // fired a second round after every round, 11-17.)
+    var wake=function(){ if(!document.hidden) ttSync.wake(); };
+    document.addEventListener("visibilitychange", wake); window.addEventListener("online", wake);
+    ttSync.wake();
+    return function(){ TT_SYNC_APPLIED=null; off(); document.removeEventListener("visibilitychange", wake); window.removeEventListener("online", wake); };
   }, []);
-  var lastSyncRef=useRef(0);
   // Whichever module screen is open, as { id, screen }. Null with no modules.
   var modScreenS=useState(null); var setModScreen=modScreenS[1]; var modScreen=modScreenS[0];
   // Enablement lives in storage, not in React state, so a toggle in Extensions

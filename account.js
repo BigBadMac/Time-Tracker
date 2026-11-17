@@ -193,7 +193,7 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
   h = sh({ cloud: { phase: "out", online: true, net: "idle", email: "brent@example.com", note: "" }, onClose: nop });
   t("signed out: the email is filled in, and it says signed out", /value="brent@example.com"/.test(h) && /Signed out/.test(h));
   h = sh({ demo: "code", onClose: nop });
-  t("the code step: six boxes over one field the phone can fill from Mail", (h.match(/font-size:1\.6rem/g) || []).length === 6 && /autoComplete="one-time-code"|autocomplete="one-time-code"/.test(h) && /inputMode="numeric"|inputmode="numeric"/.test(h));
+  t("the code step: eight boxes (the server sends eight) over one field the phone can fill from Mail", (h.match(/data-codebox/g) || []).length === 8 && /autoComplete="one-time-code"|autocomplete="one-time-code"/.test(h) && /inputMode="numeric"|inputmode="numeric"/.test(h));
   t("with Sign in, a way back to the email, and a wait before resending", />Sign in</.test(h) && /data-acct="change"/.test(h));
   h = sh({ cloud: { phase: "in", online: true, net: "ok", email: "brent@example.com", okAt: Date.now() }, onClose: nop });
   t("signed in: who, the state in words, Sign out, Close", /brent@example\.com/.test(h) && /Signed in\./.test(h) && /data-acct="signout"/.test(h) && />Close</.test(h));

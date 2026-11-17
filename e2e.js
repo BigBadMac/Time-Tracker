@@ -2080,11 +2080,11 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     await pE.locator('[data-menuaccount]').click(); await pE.waitForTimeout(400);
     await pE.locator('[data-anchor="acct-email"]').fill('brent@example.com');
     await pE.locator('[data-anchor="acct-send"]').click(); await pE.waitForTimeout(500);
-    t("account: six boxes to start", (await pE.locator('[data-codebox]').count())===6);
+    t("account: eight boxes to start (the server sends eight)", (await pE.locator('[data-codebox]').count())===8);
     await pE.locator('[data-acctcode]').click(); await pE.keyboard.type('123456', { delay:60 }); await pE.waitForTimeout(500);
     t("account: six digits typed: it waits a moment in case two more are coming", pE.__sb.verify===0);
     await pE.keyboard.type('78', { delay:60 }); await pE.waitForTimeout(250);
-    t("account: the boxes widen to eight as the code runs on", (await pE.locator('[data-codebox]').count())===8 || (await pE.locator('[data-acct="signout"]').count())===1);
+    t("account: still eight boxes as the code runs on", (await pE.locator('[data-codebox]').count())===8 || (await pE.locator('[data-acct="signout"]').count())===1);
     await pE.waitForTimeout(900);
     t("account: the eighth digit signs in straight away, once", pE.__sb.verify===1 && (await pE.locator('[data-acct="signout"]').count())===1);
     t("account: and the length is remembered for next time", (await pE.evaluate(()=>localStorage.getItem('ttacct_codelen')))==='8');
@@ -2226,6 +2226,20 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     t("sync: and its board is on the server", !!SV.rows.get('u1|projects|101') && SV.rows.get('u1|projects|101').fields.name==='Deck rebuild');
     t("sync: the look stayed behind", !('mode' in (SV.rows.get('u1|keys|tt_settings')||{fields:{}}).fields));
     t("sync: the sheet says it's up to date", /Up to date/.test(await pA.locator('[data-syncstate]').innerText()));
+    // how often (11-17, layout D)
+    t("sync: How often reads Smart to start", (await pA.locator('[data-synchow="smart"]').count())===1 && /Smart/.test(await pA.locator('[data-synchow]').innerText()));
+    await pA.locator('[data-synchow]').click(); await pA.waitForTimeout(450);
+    t("sync: it opens its own list - four choices, each with its rough data", (await pA.locator('[data-syncrate]').count())===4 &&
+      /MB \/ month/.test(await pA.locator('[data-syncrate="now"]').innerText()) && /Sync/.test(await top(pA).locator('[data-trail]').getAttribute('data-trail')||''));
+    t("sync: and this device's real data this month", /This month on this device: about/.test(await pA.locator('[data-syncbytes]').innerText()) && /exchanges/.test(await pA.locator('[data-syncbytes]').innerText()));
+    await pA.locator('[data-syncrate="now"]').click(); await pA.waitForTimeout(200);
+    t("sync: picking one marks it, and it's kept for this device only", (await pA.locator('[data-syncrate="now"][aria-pressed="true"]').count())===1 &&
+      (await pA.evaluate(()=>JSON.parse(localStorage.getItem('ttsync_prefs')).other))==='now' && !SV.rows.has('u1|keys|ttsync_prefs'));
+    await top(pA).locator('button').filter({hasText:/^Done$/}).click(); await pA.waitForTimeout(350);
+    t("sync: back in Sync, the row says the new choice", /Right away/.test(await pA.locator('[data-synchow]').innerText()));
+    const n0=SV.log.length;
+    await pA.locator('[data-syncnow]').click(); await pA.waitForTimeout(2500);
+    t("sync: one Sync now is one round with the server - not two", SV.log.slice(n0).filter((x)=>/^GET \/rest\/v1\/personal_items/.test(x)).length===1);
 
     const pB=await dev('TB', { tt_settings:look('light'), tt_projects:[P(201,'Fence')], tt_laneorder:['Daily Activity'] });
     await openSync(pB);
@@ -2326,7 +2340,9 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     await pR.locator('[data-anchor="remind-timing-save"]').click(); await pR.waitForTimeout(400);
     t("reminders: Just this one shows in words", /Just this one/.test(await top(pR).innerText()) && /1 hour before/.test(await top(pR).innerText()));
     await pR.locator('[data-reminderadd]').click(); await pR.waitForTimeout(450);
-    await pR.locator('[data-reminderlabel]').fill('Order seals');
+    t("reminders: a new reminder starts with the project's name", (await pR.locator('[data-reminderlabel]').inputValue())==='Line 4 Rebuild');
+    await pR.locator('[data-reminderlabel]').click(); await pR.keyboard.type('Order seals'); await pR.waitForTimeout(150);
+    t("reminders: and typing replaces it (the name was selected)", (await pR.locator('[data-reminderlabel]').inputValue())==='Order seals');
     await top(pR).getByText('Shift start',{exact:true}).click(); await pR.waitForTimeout(200);
     await top(pR).locator('[data-chip="weekly"]').click();
     await pR.locator('[data-anchor="reminder-save"]').click(); await pR.waitForTimeout(400);

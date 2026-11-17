@@ -172,6 +172,10 @@ t("a milestone step: the switch, no own reminders", /data-reminddue/.test(h) && 
 h = R(React.createElement(X.Rem, { reminder: {}, onSave: nop, onCancel: nop }));
 t("a new reminder: what, when (three ways), date and time, repeat (four)", /data-reminderlabel/.test(h) && /Date &amp; time/.test(h) && /Shift start/.test(h) && /Shift end/.test(h) && /type="date"/.test(h) && /type="time"/.test(h) && (h.match(/data-chip="(once|daily|workdays|weekly)"/g) || []).length === 4);
 t("no Delete on a new one", !/data-reminderdelete/.test(h));
+h = R(React.createElement(X.Rem, { reminder: {}, itemName: "Line 4 Rebuild", onSave: nop, onCancel: nop }));
+t("a new reminder starts with the item's name, ready to keep or replace", /<input data-reminderlabel="true"[^>]*value="Line 4 Rebuild"/.test(h) && /Keep the name, or type something of your own/.test(h));
+h = R(React.createElement(X.Rem, { reminder: { id: "x", label: "Order seals", when: "at", at: at(19, 9), repeat: "once" }, itemName: "Line 4 Rebuild", onSave: nop, onCancel: nop }));
+t("an existing reminder keeps its own words", /value="Order seals"/.test(h) && !/Keep the name/.test(h));
 h = R(React.createElement(X.Rem, { reminder: { id: "x", label: "Order seals", when: "shiftStart", repeat: "daily" }, onSave: nop, onDelete: nop, onCancel: nop }));
 t("a shift reminder says it follows the schedule; Delete is held", /follows your Work Schedule/.test(h) && /data-reminderdelete/.test(h) && /data-holddelete/.test(h) && /data-chip="daily" aria-pressed="true"/.test(h));
 h = R(React.createElement(X.Timing, { rule: null, onSave: nop, onCancel: nop }));

@@ -1,6 +1,8 @@
 # Time Tracker — session handover
 
-Current build: **`10-27 v1.3B baker`** (public version **1.3B** "Baker", `APP_VERSION` - Brent named this release 10-27: the one getting the app ready for the database. A letter suffix, his call, instead of the usual minor bump to 1.4)
+Current build: **`11-17 v1.5.2`** (public version **1.5.2**, `APP_VERSION`; Brent names versions when he pushes - 1.3B "Baker" 10-27, 1.4 11-13, 1.5 and 1.5.1 11-14, 1.5.2 11-17)
+
+At "11-17 v1.5.2": tt-tests 1901, boot 440, shift 46, lifecycle 646, account 67, reminders 85, sync 81, e2e 903, db/run.sh 124. The block below is the 1.3B baseline, kept for history.
 
 ```
 tt-tests.js  1893 assertions   214 cases   (static, no browser)
@@ -28,7 +30,13 @@ site it would be an old app sharing the real one's storage.
 before (pushed). First paint is identical to 1.2 apart from the splash's
 version number.
 
-## START HERE - 1.5.1 DELIVERED 11-14 (stamp "11-14 v1.5.1"). 1.5 (personal sync) was pushed 11-14. NEXT: Brent's two-device test, then sharing.
+## START HERE - 1.5.2 DELIVERED 11-17 (stamp "11-17 v1.5.2"): How often, item name in new reminders, eight code boxes. NEXT: About + Developer Feedback (Brent reviewing about.html), THEN project sharing.
+
+Brent 11-17: "Push 1.5.2 ... Once the about and feedback is done, I want to get
+back to the project sharing." Zip time-tracker-v1.5.2.zip (25 files, only
+index.html, checked) + index.html + RELEASE-NOTES-1.5.2.md.
+
+(Previous heading: 1.5.1 DELIVERED 11-14 (stamp "11-14 v1.5.1"). 1.5 (personal sync) was pushed 11-14. NEXT: Brent's two-device test, then sharing.)
 
 1.5.1 (Brent named it - "call it 1.5.1"; a small fix to a pushed release):
 sign-in codes of SIX OR EIGHT digits. The sandbox sends 8 (Brent set Email
@@ -39,10 +47,47 @@ sign-in: a whole code at once (paste / From Mail) or the 8th digit -> now;
 six typed -> after TT_CODE_PAUSE_MS 1500 unless 8 is remembered (then it
 waits for the rest or Sign in); six remembered -> at once. e2e account block
 41 checks.
-PENDING FOR THE NEXT UPDATE (Brent 11-14): a new reminder suggests the
-item's name for "Remind me about", with the option to write your own.
-Mocked A filled-in / B suggestion chips / C name-or-own switch / D faint name
-+ Use name (design/remwhat.html); I suggested B. Awaiting his pick.
+SYNC RATE - BUILT 11-17 (stamp "11-17 sync rate", not released; version still
+1.5.1 until Brent says push). Brent: "Go with D and build all three now".
+- ttSyncPlan(rate, {net, now, lastChange}) is THE scheduling brain: now =
+  push 2 s / pull 1 min; smart = push 2 s, pull 1 min within 10 min of any
+  change (local or pulled) else 15 min; q15 = no own push, pull (with push)
+  every 15 min; open = nothing on its own. Every rate syncs on wake (opening,
+  coming back to the app, back online) and Sync now: ttSync.wake().
+- ttsync_prefs {wifi, cell, other}, Smart each to start; per device, never
+  synced, not in backups. env.network() (web: always "other") picks which;
+  the web sheet sets all three (ttSync.setRate(rate)); setRate(rate, net)
+  for the native app.
+- Byte counter: every engine request goes through req() -> state.bytes
+  {month, sent, recv, n, by:{net:{sent,recv}}}; ~700 B headers per round.
+- UI layout D: Sync sheet row "How often  Smart >" (data-synchow) opens
+  HowOftenModal (trail ... Sync > How often): four rows (data-syncrate) with
+  rough MB/month, and "This month on this device: about N" (data-syncbytes).
+- FIXED: the App re-ran a sync whenever the badge turned "ok" - including
+  the "ok" a sync itself emits - so every round was followed by a second
+  one. Now sync only wakes on visibility/online/open + its own timers.
+  e2e: "one Sync now is one round with the server - not two".
+- Code boxes now start at EIGHT unless six is remembered.
+- Manual: sync guide gains How often + What it costs (stage howoften).
+- Tests: sync.js 81 (11/11 new mutants killed); e2e sync block 27.
+NATIVE-NETWORK-SYNC.md: build-now items A, B, D DONE.
+REMINDER WORDING - BUILT 11-17: Brent chose A. A new reminder's "Remind me
+about" starts with the item's name (ReminderModal itemName, from ProjectForm's
+name), selected on first focus so typing replaces it; hint "Keep the name, or
+type something of your own."
+VERSION: Brent 11-17 "Updated rev should be 1.5.2, not 1.5.1" -> APP_VERSION
+"1.5.2", stamp "11-17 v1.5.2"; splash checked (reads v1.5.2). e2e 903/903.
+ABOUT + DEVELOPER FEEDBACK (Brent 11-17): wants Menu > User Manual > "About
+Time Tracker" (developer info, rev numbers, updates per rev) with "Developer
+Feedback", stored in Supabase, manageable by him and assigned helpers
+("blog style"). Mocked design/about.html: About A one page / B tabs / C rows
+that open (S3) / D timeline + feedback card; F1 send form, F2 My feedback
+thread. Proposed system: same Supabase project, own `support` schema; tables
+feedback / feedback_messages (internal notes flag) / support_staff; RLS
+reporter-own + staff-all; in-app staff inbox first, web support desk later
+(H3/W1 style), email on new items via webhook+edge function, opt-in error
+reports, statuses linked to releases. Awaiting his picks. Credit line:
+"Developed at Hiatt Studios". Release notes to live in source as data.
 SUPABASE AUTH SETUP STILL OWED BY BRENT (11-14): the "Confirm sign up" email
 template still had the default LINK (new accounts get that one, not "Magic
 link"); Site URL was still http://localhost:3000. Gave him the code template

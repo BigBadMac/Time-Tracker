@@ -13,7 +13,7 @@ const gmem = new Map();
 const localStorage = { get length(){ return gmem.size; }, key: (i) => Array.from(gmem.keys())[i],
   getItem: (k) => (gmem.has(k) ? gmem.get(k) : null), setItem: (k, v) => gmem.set(k, String(v)), removeItem: (k) => gmem.delete(k) };
 const X = new Function("React", "window", "localStorage", "navigator", "document",
-  src + "\nreturn { make: ttSyncMake, merge: ttSyncMerge, items: ttSyncItemsOf, kind: ttSyncKind, hash: ttFieldHash, LOOK: TT_SYNC_LOOK, snapIds: snapIdsFor, WHY: SNAP_WHY };")(React, win, localStorage, navigator, document);
+  src + "\nreturn { plan: ttSyncPlan, normPrefs: ttSyncNormPrefs, make: ttSyncMake, merge: ttSyncMerge, items: ttSyncItemsOf, kind: ttSyncKind, hash: ttFieldHash, LOOK: TT_SYNC_LOOK, snapIds: snapIdsFor, WHY: SNAP_WHY };")(React, win, localStorage, navigator, document);
 
 const res = []; const t = (l, p) => res.push([l, !!p]);
 
@@ -87,8 +87,9 @@ function Device(server, user, seed){
     request: (m, p, b) => Promise.resolve(server.handle(who, m, p, b ? JSON.parse(JSON.stringify(b)) : b)),
     activity: (n) => activity.push(n), user: () => who, get: () => ({ phase })
   };
-  const timers = [];
-  const eng = X.make({ cloud, store, now: () => clock, setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout(){},
+  const timers = []; let netType = "other";
+  const eng = X.make({ cloud, store, now: () => clock, network: () => netType,
+    setTimeout: (fn, d) => { timers.push({ fn, d, live: true }); return timers.length; }, clearTimeout: (id) => { if (timers[id - 1]) timers[id - 1].live = false; },
     onApplied: (keys) => applied.push(keys.slice().sort().join(",")), snapshot: (why) => { snaps.push(why); return Promise.resolve(); } });
   const d = {
     eng, mem, activity, applied, snaps,
@@ -98,6 +99,9 @@ function Device(server, user, seed){
     tick: (ms) => { clock += ms || 1; }, at: () => clock,
     settle: () => eng._settle(),
     signOut: () => { phase = "out"; }, switchTo: (u) => { who = u; },
+    // the timers the engine has set and not cancelled, by what they're for
+    pending: () => timers.filter((x) => x.live).map((x) => x.d),
+    setNet: (n) => { netType = n; },
   };
   return d;
 }
@@ -323,6 +327,41 @@ function names(d){ return (d.get("tt_projects") || []).map((p) => p.name).sort()
   r = await Slow.eng.link("device");
   await Fast.eng.sync();
   t("Use this device's board works even from a device whose clock runs behind", r.ok && names(Fast) === "S project 1" && names(Slow) === "S project 1");
+
+  // ---------------- how often (11-17) ----------------
+  const P0 = { now: 0, lastChange: 0 };
+  t("Right away: changes up in seconds, a check every minute", JSON.stringify(X.plan("now", P0)) === JSON.stringify({ push: 2000, pull: 60000 }));
+  t("Smart, quiet: changes up in seconds, a check every 15 minutes", JSON.stringify(X.plan("smart", { now: 3600000, lastChange: 0 })) === JSON.stringify({ push: 2000, pull: 900000 }));
+  t("Smart, busy (a change in the last 10 minutes): a check every minute", X.plan("smart", { now: 3600000, lastChange: 3600000 - 9 * 60000 }).pull === 60000);
+  t("Smart slows again once it has been quiet for 10 minutes", X.plan("smart", { now: 3600000, lastChange: 3600000 - 11 * 60000 }).pull === 900000);
+  t("Every 15 minutes: nothing sent on its own; sent with the check, four times an hour", JSON.stringify(X.plan("q15", P0)) === JSON.stringify({ push: null, pull: 900000 }));
+  t("When I open it: nothing on its own at all", JSON.stringify(X.plan("open", P0)) === JSON.stringify({ push: null, pull: null }));
+  t("the choice is stored per network - Wi-Fi, mobile, other - Smart to start",
+    JSON.stringify(X.normPrefs(null)) === '{"wifi":"smart","cell":"smart","other":"smart"}' && X.normPrefs({ wifi: "now", cell: "bogus" }).cell === "smart");
+  t("how often never travels between devices, and isn't in backups", X.kind("ttsync_prefs") === null);
+
+  const S6 = Server();
+  const R1 = Device(S6, "u7", board("R", 1)); await R1.eng.link("device");
+  t("a device starts on Smart", R1.eng.rate() === "smart" && R1.eng.status().rate === "smart");
+  R1.eng.setRate("open");
+  t("the web sets all three networks at once", JSON.stringify(R1.eng.prefs()) === '{"wifi":"open","cell":"open","other":"open"}' && R1.get("ttsync_prefs").cell === "open");
+  t("When I open it: no check is waiting to fire", R1.pending().length === 0);
+  R1.tick(1000); R1.put("tt_projects", R1.get("tt_projects").map((p) => Object.assign({}, p, { name: "Quiet edit" }))); R1.settle();
+  t("When I open it: an edit waits, nothing set to send it", R1.eng.status().waiting === 1 && R1.pending().length === 0);
+  await R1.eng.wake();
+  t("opening the app (or coming back to it) sends it", R1.eng.status().waiting === 0 && S6.rows.get("u7|projects|R1").fields.name === "Quiet edit");
+  R1.eng.setRate("q15");
+  R1.tick(1000); R1.put("tt_projects", R1.get("tt_projects").map((p) => Object.assign({}, p, { name: "Q edit" }))); R1.settle();
+  t("Every 15 minutes: the edit waits for the check; the only timer is the 15-minute one", R1.eng.status().waiting === 1 && R1.pending().every((d) => d === 900000) && R1.pending().length >= 1);
+  R1.eng.setRate("now");
+  t("Right away: switching to it sends what's waiting in seconds", R1.pending().includes(2000));
+  R1.eng.setRate("smart", "cell"); R1.setNet("cell");
+  t("a rule for one network (the native app's future) is honoured when on that network", R1.eng.rate() === "smart" && R1.eng.prefs().wifi === "now");
+  R1.setNet("other");
+  const by = R1.eng.bytes();
+  t("bytes are counted per month on this device", by.n > 0 && by.sent > 0 && by.recv > 0 && /^\d{4}-\d{2}$/.test(by.month));
+  t("and per network", by.by.other && by.by.other.sent > 0);
+  t("the count never travels either", ![...S6.rows.keys()].some((k) => /ttsync/.test(k)));
 
   // ---------------- a big board ----------------
   const big = board("Z", 3); big.tt_logs = Array.from({ length: 1234 }, (_, i) => ({ id: "z" + i, type: "project", projectId: "Z1", startTime: i, endTime: i + 1, duration: 1 }));
