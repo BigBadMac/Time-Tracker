@@ -20,6 +20,13 @@ const res = []; const t = (l, p) => res.push([l, !!p]);
 // ---------------- the stand-in server ----------------
 function Server(){
   const rows = new Map(); let clock = 1000000; let up = true; const log = [];
+  // jsonb keeps object keys in its own order (shorter first, then by bytes),
+  // not the order they were sent in - the real database does this, so must we.
+  function jb(v){
+    if (Array.isArray(v)) return v.map(jb);
+    if (v && typeof v === "object") { const o = {}; Object.keys(v).sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0)).forEach((k) => { o[k] = jb(v[k]); }); return o; }
+    return v;
+  }
   function merge(old, it){
     const f = Object.assign({}, old ? old.fields : {}), ts = Object.assign({}, old ? old.field_ts : {});
     for (const k of Object.keys(it.field_ts || {})) {
@@ -33,8 +40,8 @@ function Server(){
   }
   function pushOne(user, it){
     const key = user + "|" + it.coll + "|" + it.item_id, old = rows.get(key), m = merge(old, it);
-    if (!old || JSON.stringify([old.fields, old.field_ts, old.del_ts]) !== JSON.stringify([m.fields, m.field_ts, m.del_ts])) {
-      rows.set(key, Object.assign({ user, coll: it.coll, item_id: it.item_id }, m, { updated_at: clock })); return 1;
+    if (!old || JSON.stringify(jb([old.fields, old.field_ts, old.del_ts])) !== JSON.stringify(jb([m.fields, m.field_ts, m.del_ts]))) {
+      rows.set(key, Object.assign({ user, coll: it.coll, item_id: it.item_id }, { fields: jb(m.fields), field_ts: jb(m.field_ts), del_ts: m.del_ts }, { updated_at: clock })); return 1;
     }
     return 0;
   }
@@ -327,6 +334,26 @@ function names(d){ return (d.get("tt_projects") || []).map((p) => p.name).sort()
   r = await Slow.eng.link("device");
   await Fast.eng.sync();
   t("Use this device's board works even from a device whose clock runs behind", r.ok && names(Fast) === "S project 1" && names(Slow) === "S project 1");
+
+  // ---------------- the loop found live on 1.5.2 (11-17) ----------------
+  // The database rearranges object keys. The app writes its settings back in
+  // its own order after every pull. That must not count as a change.
+  const SL = Server();
+  const appOrder = () => ({ workSchedule: { mon: { on: true, start: "06:00", end: "14:30" }, tue: { on: true, start: "06:00", end: "14:30" }, sat: { on: false, start: "", end: "" } },
+    timeInc: "minutes", notifs: { before: 5, missed: true } });
+  const LA = Device(SL, "u9", { tt_settings: Object.assign({}, look, appOrder()) }); await LA.eng.link("device");
+  const LB = Device(SL, "u9", { tt_settings: Object.assign({}, look) }); await LB.eng.link("account");
+  t("the server hands settings back in its own key order (as the real database does)",
+    Object.keys(SL.rows.get("u9|keys|tt_settings").fields.workSchedule).join() !== "mon,tue,sat");
+  // what the App does after a pull: normalize and save in its own order
+  LB.put("tt_settings", Object.assign({}, look, appOrder())); LB.settle();
+  t("writing the same settings back in a different order is not a change", LB.eng.status().waiting === 0);
+  LA.put("tt_settings", Object.assign({}, look, appOrder())); LA.settle();
+  const before = SL.log.length;
+  await LA.eng.sync(); await LB.eng.sync(); await LA.eng.sync(); await LB.eng.sync();
+  t("so a quiet pair of devices sends nothing back and forth", SL.log.slice(before).filter((x) => /personal_push/.test(x)).length === 0);
+  LA.tick(5000); LA.put("tt_settings", Object.assign({}, look, appOrder(), { timeInc: "tenths" })); LA.settle();
+  t("while a real change still goes up", LA.eng.status().waiting === 1);
 
   // ---------------- how often (11-17) ----------------
   const P0 = { now: 0, lastChange: 0 };

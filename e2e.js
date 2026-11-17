@@ -2121,6 +2121,13 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   {
     function PServer(){
   const rows = new Map(); let clock = Date.now(); let up = true; const log = [];
+  // jsonb keeps object keys in its own order (shorter first, then by bytes),
+  // not the order they were sent in - the real database does this, so must we.
+  function jb(v){
+    if (Array.isArray(v)) return v.map(jb);
+    if (v && typeof v === "object") { const o = {}; Object.keys(v).sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0)).forEach((k) => { o[k] = jb(v[k]); }); return o; }
+    return v;
+  }
   function merge(old, it){
     const f = Object.assign({}, old ? old.fields : {}), ts = Object.assign({}, old ? old.field_ts : {});
     for (const k of Object.keys(it.field_ts || {})) {
@@ -2134,8 +2141,8 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   }
   function pushOne(user, it){
     const key = user + "|" + it.coll + "|" + it.item_id, old = rows.get(key), m = merge(old, it);
-    if (!old || JSON.stringify([old.fields, old.field_ts, old.del_ts]) !== JSON.stringify([m.fields, m.field_ts, m.del_ts])) {
-      rows.set(key, Object.assign({ user, coll: it.coll, item_id: it.item_id }, m, { updated_at: clock })); return 1;
+    if (!old || JSON.stringify(jb([old.fields, old.field_ts, old.del_ts])) !== JSON.stringify(jb([m.fields, m.field_ts, m.del_ts]))) {
+      rows.set(key, Object.assign({ user, coll: it.coll, item_id: it.item_id }, { fields: jb(m.fields), field_ts: jb(m.field_ts), del_ts: m.del_ts }, { updated_at: clock })); return 1;
     }
     return 0;
   }
@@ -2240,6 +2247,11 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     const n0=SV.log.length;
     await pA.locator('[data-syncnow]').click(); await pA.waitForTimeout(2500);
     t("sync: one Sync now is one round with the server - not two", SV.log.slice(n0).filter((x)=>/^GET \/rest\/v1\/personal_items/.test(x)).length===1);
+    // the loop found live on 1.5.2: settings came back in the database's key
+    // order, the app saved them in its own, and that counted as a change
+    const n1=SV.log.length;
+    await pA.waitForTimeout(9000);
+    t("sync: left alone, a device sends nothing (no loop over rearranged settings)", SV.log.slice(n1).filter((x)=>/personal_push/.test(x)).length===0);
 
     const pB=await dev('TB', { tt_settings:look('light'), tt_projects:[P(201,'Fence')], tt_laneorder:['Daily Activity'] });
     await openSync(pB);
@@ -2283,6 +2295,9 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     await top(pB).locator('button').filter({hasText:/^Close$/}).click(); await pB.waitForTimeout(300);
     await top(pB).locator('button').filter({hasText:/^Close$/}).click().catch(()=>{}); await pB.waitForTimeout(400);
     t("sync: and appears on the other, without a reload", /Added on A/.test(await pB.locator('body').innerText()));
+    const n2=SV.log.length;
+    await pB.waitForTimeout(6000);
+    t("sync: two devices left alone send nothing back and forth", SV.log.slice(n2).filter((x)=>/personal_push/.test(x)).length===0);
     t("sync: the badge shows synced on both", (await pA.locator('[data-anchor="hdr-cloud"]').getAttribute('data-cloud'))==='synced' && (await pB.locator('[data-anchor="hdr-cloud"]').getAttribute('data-cloud'))==='synced');
     t("sync: a Before sync copy was kept on the device that took the account's board",
       await pB.evaluate(()=>new Promise((res)=>{ const r=indexedDB.open('tt-saves',1); r.onsuccess=()=>{ const q=r.result.transaction('snaps').objectStore('snaps').getAll(); q.onsuccess=()=>res(q.result.some((x)=>x.why==='before-sync')); }; r.onerror=()=>res(false); })));

@@ -18,7 +18,7 @@
 </head>
 <body>
 <pre id="err"></pre>
-<div id="root"><div id="boot">Time Tracker build 11-17 v1.5.2<br>
+<div id="root"><div id="boot">Time Tracker build 11-17 v1.5.3<br>
 HTML loaded &#10003; &mdash; starting scripts&hellip;<br>
 <span style="font-size:11px;opacity:.7">If this message never goes away, the scripts below it failed to run.<br>
 If you cannot see this message at all, the file itself is not being displayed.</span></div></div>
@@ -17637,7 +17637,21 @@ function ttHash(str){
   for(var i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h, 0x01000193)>>>0; }
   return h.toString(36);
 }
-function ttFieldHash(v){ return ttHash(JSON.stringify(v===undefined ? null : v)); }
+// The database hands objects back with their keys in ITS order (jsonb sorts
+// them), so the same value can come back spelled differently. Comparing the
+// raw text made a rearranged Work Schedule look like a change: it went up,
+// came back rearranged, went up again - a loop every couple of seconds
+// (found live on 1.5.2, 11-17). Hash a canonical spelling: keys sorted, at
+// every depth, so only a real change counts.
+function ttStable(v){
+  if(v===undefined) return "null";
+  if(Array.isArray(v)) return "["+v.map(function(x){ return x===undefined ? "null" : ttStable(x); }).join(",")+"]";
+  if(v && typeof v==="object"){
+    return "{"+Object.keys(v).sort().filter(function(k){ return v[k]!==undefined; }).map(function(k){ return JSON.stringify(k)+":"+ttStable(v[k]); }).join(",")+"}";
+  }
+  return JSON.stringify(v);
+}
+function ttFieldHash(v){ return ttHash(ttStable(v)); }
 // Shared projects live in the shared tables, never in personal sync (11-14,
 // ahead of sharing): a project carrying a shareId - and every task under it -
 // is left alone here, both ways. Nothing carries one yet; this is so a device
@@ -29646,7 +29660,7 @@ function TTErrorBoundary(props){ return props.children; }
 // APP_VERSION is the public number. The build stamp stays where it has always
 // been, in the boot div, because that is the thing that proves which deploy
 // landed; this is the thing a person reads.
-var APP_VERSION = "1.5.2";   // 1.5 + six/eight-digit codes, How often, the item's name in new reminders (Brent, 11-17: "should be 1.5.2"). 1.5.1 was the code-length fix.
+var APP_VERSION = "1.5.3";   // fixes a sync loop over rearranged settings (Brent, 11-17: "1.5.3"). 1.5.2 = How often, item names in reminders.
 var SPLASH_SHOW_MS = 2500;   // fully opaque
 var SPLASH_FADE_MS = 320;    // then fades out over this
 function SplashScreen(props){

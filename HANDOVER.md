@@ -1,6 +1,6 @@
 # Time Tracker — session handover
 
-Current build: **`11-17 v1.5.2`** (public version **1.5.2**, `APP_VERSION`; Brent names versions when he pushes - 1.3B "Baker" 10-27, 1.4 11-13, 1.5 and 1.5.1 11-14, 1.5.2 11-17)
+Current build: **`11-17 v1.5.3`** (public version **1.5.3**, `APP_VERSION`; Brent names versions when he pushes - 1.3B "Baker" 10-27, 1.4 11-13, 1.5 and 1.5.1 11-14, 1.5.2 and 1.5.3 11-17)
 
 At "11-17 v1.5.2": tt-tests 1901, boot 440, shift 46, lifecycle 646, account 67, reminders 85, sync 81, e2e 903, db/run.sh 124. The block below is the 1.3B baseline, kept for history.
 
@@ -30,7 +30,23 @@ site it would be an old app sharing the real one's storage.
 before (pushed). First paint is identical to 1.2 apart from the splash's
 version number.
 
-## START HERE - 1.5.2 DELIVERED 11-17 (stamp "11-17 v1.5.2"): How often, item name in new reminders, eight code boxes. NEXT: About + Developer Feedback (Brent reviewing about.html), THEN project sharing.
+## START HERE - 1.5.3 (11-17, stamp "11-17 v1.5.3"): FIX for a live sync loop on 1.5.2. NEXT: About + Developer Feedback, THEN project sharing.
+
+THE LOOP (found live by Brent on 1.5.2, iPhone, 11-17): the badge flicked
+grey/green every ~2 s. Cause: jsonb returns object keys in ITS order; the app
+hashed field values with JSON.stringify, so a pulled Work Schedule in jsonb
+order hashed differently from the same schedule re-saved in the app's order
+-> "changed" -> push -> pull -> loop. Fix: ttStable() canonical spelling (keys
+sorted, every depth) inside ttFieldHash. The stand-in servers in sync.js and
+e2e.js now store like jsonb (jb()), so tests see what the real database does.
+New checks: sync.js "writing the same settings back in a different order is
+not a change" + "a quiet pair of devices sends nothing" (old hash fails both);
+e2e "left alone, a device sends nothing" / "two devices left alone send
+nothing" (the 1.5.2 build fails all three). LESSON: a stand-in server must
+mimic the real one's quirks - jsonb key order, timestamps, paging.
+Brent's stopgap: How often = When I open it; tell him to set it back.
+
+(Previous heading: 1.5.2 DELIVERED 11-17 (stamp "11-17 v1.5.2"): How often, item name in new reminders, eight code boxes. NEXT: About + Developer Feedback (Brent reviewing about.html), THEN project sharing.)
 
 Brent 11-17: "Push 1.5.2 ... Once the about and feedback is done, I want to get
 back to the project sharing." Zip time-tracker-v1.5.2.zip (25 files, only
