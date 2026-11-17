@@ -362,7 +362,7 @@ function names(d){ return (d.get("tt_projects") || []).map((p) => p.name).sort()
   t("Smart, busy (a change in the last 10 minutes): a check every minute", X.plan("smart", { now: 3600000, lastChange: 3600000 - 9 * 60000 }).pull === 60000);
   t("Smart slows again once it has been quiet for 10 minutes", X.plan("smart", { now: 3600000, lastChange: 3600000 - 11 * 60000 }).pull === 900000);
   t("Every 15 minutes: nothing sent on its own; sent with the check, four times an hour", JSON.stringify(X.plan("q15", P0)) === JSON.stringify({ push: null, pull: 900000 }));
-  t("When I open it: nothing on its own at all", JSON.stringify(X.plan("open", P0)) === JSON.stringify({ push: null, pull: null }));
+  t("On app open: nothing on its own at all", JSON.stringify(X.plan("open", P0)) === JSON.stringify({ push: null, pull: null }));
   t("the choice is stored per network - Wi-Fi, mobile, other - Smart to start",
     JSON.stringify(X.normPrefs(null)) === '{"wifi":"smart","cell":"smart","other":"smart"}' && X.normPrefs({ wifi: "now", cell: "bogus" }).cell === "smart");
   t("how often never travels between devices, and isn't in backups", X.kind("ttsync_prefs") === null);
@@ -372,9 +372,9 @@ function names(d){ return (d.get("tt_projects") || []).map((p) => p.name).sort()
   t("a device starts on Smart", R1.eng.rate() === "smart" && R1.eng.status().rate === "smart");
   R1.eng.setRate("open");
   t("the web sets all three networks at once", JSON.stringify(R1.eng.prefs()) === '{"wifi":"open","cell":"open","other":"open"}' && R1.get("ttsync_prefs").cell === "open");
-  t("When I open it: no check is waiting to fire", R1.pending().length === 0);
+  t("On app open: no check is waiting to fire", R1.pending().length === 0);
   R1.tick(1000); R1.put("tt_projects", R1.get("tt_projects").map((p) => Object.assign({}, p, { name: "Quiet edit" }))); R1.settle();
-  t("When I open it: an edit waits, nothing set to send it", R1.eng.status().waiting === 1 && R1.pending().length === 0);
+  t("On app open: an edit waits, nothing set to send it", R1.eng.status().waiting === 1 && R1.pending().length === 0);
   await R1.eng.wake();
   t("opening the app (or coming back to it) sends it", R1.eng.status().waiting === 0 && S6.rows.get("u7|projects|R1").fields.name === "Quiet edit");
   R1.eng.setRate("q15");

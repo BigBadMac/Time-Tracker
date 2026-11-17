@@ -2224,7 +2224,11 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     };
     const pA=await dev('TA', { tt_settings:look('dark'), tt_projects:[P(101,'Deck rebuild'),P(102,'Order seals')], tt_laneorder:['Daily Activity'] });
     await openSync(pA);
-    t("sync: Account has a Sync this board row, off at first, opening its own sheet with the trail",
+    t("sync: Account says sync is OFF, in red capitals, under a clear Sync Settings button",
+      /Sync is OFF\. Your board stays on this device\./.test(await pA.locator('[data-acctsyncline="off"]').innerText()) &&
+      /Sync Settings/.test(await pA.locator('[data-acctsync]').innerText()) &&
+      (await pA.locator('[data-acctsyncline] b').evaluate((e)=>getComputedStyle(e).color))!==(await pA.locator('[data-acctsyncline]').evaluate((e)=>getComputedStyle(e).color)));
+    t("sync: Sync Settings opens its own sheet with the trail, switch off at first",
       (await pA.locator('[data-syncrow="off"]').count())===1 && /Account/.test(await top(pA).locator('[data-trail]').getAttribute('data-trail')||''));
     t("sync: the sheet says what travels and what stays on this device", /Travels/i.test(await pA.locator('[data-synclists]').innerText()) && /The look/.test(await pA.locator('[data-synclists]').innerText()));
     t("sync: Sync now waits until it's on", await pA.locator('[data-syncnow]').isDisabled());
@@ -2244,6 +2248,7 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
       (await pA.evaluate(()=>JSON.parse(localStorage.getItem('ttsync_prefs')).other))==='now' && !SV.rows.has('u1|keys|ttsync_prefs'));
     await top(pA).locator('button').filter({hasText:/^Done$/}).click(); await pA.waitForTimeout(350);
     t("sync: back in Sync, the row says the new choice", /Right away/.test(await pA.locator('[data-synchow]').innerText()));
+    t("sync: and Account's line follows it", /Sync currently set to Right away/.test(await pA.locator('[data-acctsyncline="on"]').innerText()));
     const n0=SV.log.length;
     await pA.locator('[data-syncnow]').click(); await pA.waitForTimeout(2500);
     t("sync: one Sync now is one round with the server - not two", SV.log.slice(n0).filter((x)=>/^GET \/rest\/v1\/personal_items/.test(x)).length===1);

@@ -18,7 +18,7 @@
 </head>
 <body>
 <pre id="err"></pre>
-<div id="root"><div id="boot">Time Tracker build 11-17 v1.5.3<br>
+<div id="root"><div id="boot">Time Tracker build 11-17 v1.5.4<br>
 HTML loaded &#10003; &mdash; starting scripts&hellip;<br>
 <span style="font-size:11px;opacity:.7">If this message never goes away, the scripts below it failed to run.<br>
 If you cannot see this message at all, the file itself is not being displayed.</span></div></div>
@@ -20464,7 +20464,7 @@ var HELP_GUIDES = {
   sync: { title:"Sync your board between devices", covers:["Sync"],
     steps:[
       { stage:{ kind:"account", step:"in" }, ring:'[data-anchor="acct-sync"]', side:"below", title:"Sync this board",
-        text:"Signed in, open Account and tap Sync this board. It is off until you turn it on, and only you can see your board on the server." },
+        text:"Signed in, open Account and tap Sync Settings. The line under it says how sync is set, or that it is off. It is off until you turn it on, and only you can see your board on the server." },
       { stage:{ kind:"sync" }, ring:'[data-anchor="sync-switch"]', side:"below", title:"Turn it on",
         text:"The switch puts your board on every device you sign in on. Changes go up a moment after you make them and come down on your other devices within a minute. Offline, they wait and go when you are back." },
       { stage:{ kind:"sync" }, ring:'[data-anchor="sync-lists"]', side:"above", title:"What travels",
@@ -20474,7 +20474,7 @@ var HELP_GUIDES = {
       { stage:{ kind:"firstlink" }, ring:'[data-anchor="link-go"]', side:"above", title:"Choose, then hold",
         text:"Use the account’s board, use this device’s board, or combine both. The box says exactly what will happen. Replacing a board takes a hold, and a Before sync copy goes into Backups first." },
       { stage:{ kind:"sync" }, ring:'[data-anchor="sync-how"]', side:"above", title:"How often",
-        text:"How often decides how much data sync uses on this device. Right away is the freshest; Smart is quick while you work and slows when things are quiet; every quarter of an hour is lighter; When I open it is the lightest." },
+        text:"How often decides how much data sync uses on this device. Right away is the freshest; Smart is quick while you work and slows when things are quiet; every quarter of an hour is lighter; On app open is the lightest." },
       { stage:{ kind:"howoften" }, ring:'[data-anchor="sync-bytes"]', side:"above", title:"What it costs",
         text:"Each choice shows roughly what it uses in a working month, and the box below shows what this device has really used so far this month. Every device keeps its own choice." },
       { stage:{ kind:"sync" }, ring:'[data-anchor="sync-now"]', side:"above", title:"Sync now",
@@ -25840,14 +25840,23 @@ function AccountModal(props){
           React.createElement("div", { style:{ color:cloudCol(demo ? "synced" : badge), fontSize:"0.8rem", fontWeight:600, marginTop:"0.1rem" } },
             (demo ? "Signed in" : CLOUD_WORDS[badge])+" · Sandbox server"))),
       React.createElement("div", { "data-acctstate":true, style:{ minHeight:"2.9rem" } }, P(demo ? "Signed in. Last checked in with the server a moment ago." : accountSentence(c))),
-      React.createElement("button", { "data-acctsync":syncSt.on?"on":"off", "data-anchor":"acct-sync", "data-flat":true,
+      // A clear button (Brent 11-17, version 2): the sync icon, "Sync
+      // Settings", a ›; under it, how sync is set right now - OFF in red
+      // capitals when it's off, so it can't be missed.
+      React.createElement("button", { "data-acctsync":syncSt.on?"on":"off", "data-anchor":"acct-sync",
           onClick:function(){ if(demo) return; haptic(8); setSyncOpen(true); },
-          style:{ display:"flex", alignItems:"center", gap:"0.6rem", width:"100%", background:"none", border:"none",
-                  borderTop:"1px solid "+S.border, borderBottom:"1px solid "+S.border, padding:"0.85rem 0.2rem", marginBottom:"0.8rem",
-                  cursor:"pointer", fontFamily:S.fontBody, textAlign:"left" } },
-        React.createElement("span", { style:{ fontWeight:700, color:S.text, fontSize:"0.98rem" } }, "Sync this board"),
-        React.createElement("span", { style:{ marginLeft:"auto", fontWeight:700, fontSize:"0.88rem", color:syncSt.on ? S.successText : S.textDim } }, syncSt.on ? "On" : "Off"),
-        React.createElement("span", { style:{ color:S.textDim } }, "›")),
+          style:{ display:"flex", alignItems:"center", gap:"0.55rem", width:"100%", background:S.infoBg, border:"2px solid "+S.actionBdr,
+                  borderRadius:S.radius2||"12px", padding:"0.7rem 0.85rem", cursor:"pointer", fontFamily:S.fontBody, color:S.actionText } },
+        React.createElement("svg", { width:22, height:22, viewBox:"0 0 28 28", fill:"none", stroke:"currentColor", strokeWidth:2.5, strokeLinecap:"round", strokeLinejoin:"round", "aria-hidden":"true" },
+          React.createElement("path", { d:CLOUD_PATH }),
+          React.createElement("path", { d:"M10.9 15.6a3.2 3.2 0 0 1 5.6-1.6" }),
+          React.createElement("path", { d:"M17.1 17.4a3.2 3.2 0 0 1-5.6 1.6" })),
+        React.createElement("span", { style:{ fontWeight:800, fontSize:"1rem" } }, "Sync Settings"),
+        React.createElement("span", { style:{ marginLeft:"auto", fontWeight:800, opacity:0.85 } }, "›")),
+      React.createElement("div", { "data-acctsyncline":syncSt.on?"on":"off", style:{ fontSize:"0.84rem", color:S.textDim, margin:"0.4rem 0.15rem 0.9rem", minHeight:"1.3em" } },
+        syncSt.on
+          ? ["Sync currently set to ", React.createElement("b", { key:"r", style:{ color:S.successText } }, (SYNC_RATE_INFO[syncSt.rate||"smart"]||SYNC_RATE_INFO.smart)[0])]
+          : ["Sync is ", React.createElement("b", { key:"o", style:{ color:S.dangerText, letterSpacing:"0.04em" } }, "OFF"), ". Your board stays on this device."]),
       P("Your board on every device you sign in on, if you want it. Shared projects with other people come later."),
       syncOpen && React.createElement(SyncModal, { cloud:c, trail:(trail||[]).concat([{ label:"Account", back:true, go:function(){ setSyncOpen(false); } }]),
         onClose:function(){ setSyncOpen(false); },
@@ -25937,7 +25946,7 @@ var SYNC_RATE_INFO = {
   now:["Right away", "Changes go up within seconds; checks every minute while open.", "about 10 MB"],
   smart:["Smart", "Within seconds when you’re busy; every 15 minutes when it’s quiet; always when you open the app.", "about 2 MB"],
   q15:["Every 15 minutes", "Sends and fetches together, four times an hour.", "about 1 MB"],
-  open:["When I open it", "Only when you open the app, come back to it, or tap Sync now.", "under 0.5 MB"]
+  open:["On app open", "When you open or come back to the app, or tap Sync now.", "under 0.5 MB"]
 };
 function syncBytesWords(n){ if(n<1024*1024) return Math.max(1, Math.round(n/1024))+" KB"; return (Math.round(n/104857.6)/10)+" MB"; }
 function HowOftenModal(props){
@@ -29660,7 +29669,7 @@ function TTErrorBoundary(props){ return props.children; }
 // APP_VERSION is the public number. The build stamp stays where it has always
 // been, in the boot div, because that is the thing that proves which deploy
 // landed; this is the thing a person reads.
-var APP_VERSION = "1.5.3";   // fixes a sync loop over rearranged settings (Brent, 11-17: "1.5.3"). 1.5.2 = How often, item names in reminders.
+var APP_VERSION = "1.5.4";   // the Sync Settings button and how sync is set, on Account; "On app open" (Brent, 11-17: "1.5.4"). 1.5.3 = the sync loop fix.
 var SPLASH_SHOW_MS = 2500;   // fully opaque
 var SPLASH_FADE_MS = 320;    // then fades out over this
 function SplashScreen(props){

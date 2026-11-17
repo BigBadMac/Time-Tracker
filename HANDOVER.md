@@ -1,6 +1,6 @@
 # Time Tracker — session handover
 
-Current build: **`11-17 v1.5.3`** (public version **1.5.3**, `APP_VERSION`; Brent names versions when he pushes - 1.3B "Baker" 10-27, 1.4 11-13, 1.5 and 1.5.1 11-14, 1.5.2 and 1.5.3 11-17)
+Current build: **`11-17 v1.5.4`** (public version **1.5.4**, `APP_VERSION`; Brent names versions when he pushes - 1.3B "Baker" 10-27, 1.4 11-13, 1.5 and 1.5.1 11-14, 1.5.2, 1.5.3 and 1.5.4 11-17)
 
 At "11-17 v1.5.2": tt-tests 1901, boot 440, shift 46, lifecycle 646, account 67, reminders 85, sync 81, e2e 903, db/run.sh 124. The block below is the 1.3B baseline, kept for history.
 
@@ -31,6 +31,21 @@ before (pushed). First paint is identical to 1.2 apart from the splash's
 version number.
 
 ## START HERE - 1.5.3 (11-17, stamp "11-17 v1.5.3"): FIX for a live sync loop on 1.5.2. NEXT: About + Developer Feedback, THEN project sharing.
+
+SYNC SETTINGS BUTTON - RELEASED AS 1.5.4 11-17 (stamp "11-17 v1.5.4", Brent
+named it): Brent chose mock 2 + changes. Account's "Sync
+this board On >" row is now a clear action button (sync-arrows cloud icon,
+"Sync Settings", ›; data-acctsync, anchor acct-sync); under it
+data-acctsyncline: "Sync currently set to <rate>" (green) or "Sync is OFF.
+Your board stays on this device." (OFF red capitals). The last How often
+choice is renamed "On app open" (Brent 11-17), described "When you open or
+come back to the app, or tap Sync now." Manual steps updated. Mocks:
+design/syncbtn.html, syncbtn2.html.
+
+TESTING RULE (Brent 11-17, "Yes"): small fixes = all unit suites + the
+browser tests for the part that changed, ship at once, full e2e follows in
+the background (report anything). Releases changing screens or several areas
+= full e2e BEFORE sending. (Also in project memory, ways-of-working.)
 
 THE LOOP (found live by Brent on 1.5.2, iPhone, 11-17): the badge flicked
 grey/green every ~2 s. Cause: jsonb returns object keys in ITS order; the app
