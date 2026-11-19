@@ -363,3 +363,20 @@ board. A module key syncs as ONE value: the later edit of the whole key wins
 that wants finer merging should keep many small keys rather than one big one.
 Nothing changes for a module while sync is off.
 
+
+## Developer feedback (11-17)
+Core, not a module. Modules don't touch it. The client is `ttFeedback`
+(time-tracker.jsx, after `ttSync`); the server is db/06_support.sql (schema
+`support`, reached only through `public.fb_*`). A module that wants to
+offer feedback should open About > Send feedback rather than calling fb_send
+itself, so the sign-in check, the draft, and the "never your board" app
+details stay in one place. Its key `ttfb_draft` is outside `tt_`, so it is
+never in backups or sync.
+
+## FAQ and the staff inbox (11-18)
+Core, not modules. The FAQ client is `ttFeedback.faq` (cache `ttfaq_cache`,
+signed-out votes `ttfaq_votes`; neither is tt_, so neither is backed up or
+synced). A module that wants an FAQ link should open User Manual > FAQ, not
+read the cache itself. A module guide can be linked from an FAQ entry by its
+namespaced id (e.g. `tools:out`) - the entry's guide field accepts
+`[a-z0-9:_-]`.

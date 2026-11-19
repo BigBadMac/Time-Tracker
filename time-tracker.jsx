@@ -320,6 +320,9 @@ function ttCloudMake(env){
         });
       });
     },
+    // A request anyone may make, signed in or not: the public (anon) key only.
+    // Used for the FAQ, which everyone can read.
+    publicRequest:function(method, path, body){ return call(path, body, null, method); },
     // The sync layer reports here, so the one badge tells the whole story.
     activity:function(net){
       if(st.phase!=="in") return;
@@ -856,6 +859,97 @@ var TT_SYNC_APPLIED = null;   // the App sets this, to put another device's chan
 var ttSync = ttSyncMake({ cloud:ttCloud, onApplied:function(keys){ if(TT_SYNC_APPLIED) TT_SYNC_APPLIED(keys); },
   snapshot:function(why){ try{ return snapTake(why); }catch(e){ return Promise.resolve(); } } });
 TT_DB_NOTE = function(k){ ttSync.note(k); };
+
+// ---------------- Developer feedback (11-17) ----------------
+// Brent (11-17): About Time Tracker carries Developer Feedback. It needs
+// sign-in (so a reply can reach the sender and nobody sends in another's
+// name), lives in the same Supabase project in its own "support" schema, and
+// is answered from an in-app staff inbox, in threads. See db/06_support.sql:
+// the app only ever calls the public.fb_* functions; it cannot read the
+// tables. Nothing here runs unless someone opens About or signs in.
+var TT_FB_KINDS = [["problem","Problem"],["idea","Idea"],["question","Question"],["praise","Praise"]];
+var TT_FB_PROMPT = { problem:"What happened, and what did you expect?", idea:"What would make Time Tracker better?",
+                     question:"What would you like to know?", praise:"What’s working well?" };
+// Where an item stands, as the sender reads it. [words, tone]
+var TT_FB_STATUS = { "new":["Sent","warn"], open:["Looking into it","info"], waiting:["Needs your reply","warn"],
+                     planned:["Planned","info"], fixed:["Fixed","ok"], closed:["Closed","dim"] };
+var TT_FB_MAX = 4000;                 // the server refuses anything longer
+var TT_FB_DRAFT = "ttfb_draft";       // not tt_: never in backups, never synced
+var TT_FB_UNREAD_MS = 5*60000;        // ask the server for the badge at most this often
+function ttFeedbackMake(env){
+  env=env||{};
+  var cloud=env.cloud;
+  function now(){ return env.now ? env.now() : Date.now(); }
+  var st={ mine:0, inbox:0, staff:null, at:0 }, subs=[], inflight=null;
+  function emit(p){ st=Object.assign({}, st, p||{}); subs.slice().forEach(function(fn){ try{ fn(st); }catch(e){} }); }
+  function explain(r){
+    var code=r.body && r.body.code;
+    if(r.status===0) return "Can’t reach the server. Check your connection and try again.";
+    if(r.status===401) return "Sign in first.";
+    if(code==="54000") return "That’s a lot sent in a short time. Try again a little later.";
+    if(code==="22001") return "That’s too long. Shorten it a little and try again.";
+    if(code==="22023") return String(r.body.message||"Check what you wrote and try again.").replace(/^./, function(c){ return c.toUpperCase(); })+".";
+    if(code==="42501") return "That isn’t allowed for your account.";
+    if(code==="P0002") return "That isn’t there any more.";
+    if(code==="PGRST202") return "Feedback isn’t set up on the server yet.";
+    if(r.status>=500) return "The server isn’t answering properly right now. Try again in a minute.";
+    return "Something went wrong ("+r.status+"). Try again.";
+  }
+  function rpc(name, args){
+    if(!cloud || cloud.get().phase!=="in") return Promise.resolve({ ok:false, status:401, msg:"Sign in first." });
+    return cloud.request("POST", "/rest/v1/rpc/"+name, args||{}).then(function(r){
+      if(r.status>=200 && r.status<300) return { ok:true, data:r.body };
+      return { ok:false, status:r.status, code:r.body && r.body.code, msg:explain(r) };
+    });
+  }
+  var api={
+    status:function(){ return st; },
+    subscribe:function(fn){ subs.push(fn); return function(){ subs=subs.filter(function(x){ return x!==fn; }); }; },
+    // The badge counts. Cheap, and asked for rarely: on open, on About, after
+    // a thread is read. force skips the wait.
+    refresh:function(force){
+      if(!cloud || cloud.get().phase!=="in"){ if(st.mine||st.inbox||st.staff) emit({ mine:0, inbox:0, staff:null, at:0 }); return Promise.resolve(st); }
+      if(inflight) return inflight;
+      if(!force && st.at && now()-st.at < TT_FB_UNREAD_MS) return Promise.resolve(st);
+      inflight=rpc("fb_unread").then(function(r){
+        inflight=null;
+        if(r.ok && r.data) emit({ mine:+r.data.mine||0, inbox:+r.data.inbox||0, staff:r.data.staff||null, at:now() });
+        return st;
+      }, function(){ inflight=null; return st; });
+      return inflight;
+    },
+    send:function(kind, body, app){
+      var b=String(body||"").trim();
+      if(!b) return Promise.resolve({ ok:false, msg:"Write something first." });
+      if(b.length>TT_FB_MAX) return Promise.resolve({ ok:false, msg:"That’s too long. Shorten it a little and try again." });
+      return rpc("fb_send", { kind:kind, body:b, app:app||null });
+    },
+    rpcRaw:rpc,
+    mine:function(){ return rpc("fb_mine"); },
+    thread:function(id){ return rpc("fb_thread", { id:id }).then(function(r){ if(r.ok) api.refresh(true); return r; }); },
+    reply:function(id, body, internal){
+      var b=String(body||"").trim();
+      if(!b) return Promise.resolve({ ok:false, msg:"Write something first." });
+      if(b.length>TT_FB_MAX) return Promise.resolve({ ok:false, msg:"That’s too long. Shorten it a little and try again." });
+      return rpc("fb_reply", { id:id, body:b, internal:!!internal });
+    },
+    // staff
+    inbox:function(q){ return rpc("fb_inbox", { q:q||{} }); },
+    update:function(id, ch){ return rpc("fb_update", { id:id, ch:ch||{} }); },
+    remove:function(id){ return rpc("fb_delete", { id:id }); },
+    team:function(){ return rpc("fb_team"); },
+    teamSet:function(email, role, name){ return rpc("fb_team_set", { email:email, role:role||null, name:name||null }); },
+    draft:function(v){
+      if(arguments.length===0){ try{ var d=JSON.parse(ttDb.getRaw(TT_FB_DRAFT)||"null"); return d && typeof d==="object" ? d : null; }catch(e){ return null; } }
+      if(v && String(v.text||"").trim()) ttDb.setRaw(TT_FB_DRAFT, JSON.stringify({ kind:v.kind, text:String(v.text) }));
+      else ttDb.remove(TT_FB_DRAFT);
+    }
+  };
+  if(cloud && cloud.subscribe) cloud.subscribe(function(c){ if(c.phase!=="in" && (st.mine||st.inbox||st.staff)) emit({ mine:0, inbox:0, staff:null, at:0 }); });
+  return api;
+}
+var ttFeedback = ttFeedbackMake({ cloud:ttCloud });
+ttFeedback.faq = ttFaqClient(ttFeedback, ttCloud);
 
 // ---------------- Backup & restore ----------------
 // Every app key is tt_-prefixed, so a backup is simply every tt_* key with its
@@ -1846,7 +1940,9 @@ function Modal(props){
       },
         React.createElement("div", { style:{display:"flex",justifyContent:UI.left?"flex-end":"flex-start",alignItems:"center",gap:"0.5rem",marginBottom:"1rem"} },
           React.createElement(ModalGlyph, { title:props.title }),
-          React.createElement("span", { style:{fontWeight:700,fontSize:"1rem",color:S.text} }, props.title)
+          React.createElement("span", { style:{fontWeight:700,fontSize:"1rem",color:S.text,flex:props.titleAside?1:undefined,minWidth:0} }, props.title),
+          // titleAside (11-18): a small control beside the title, e.g. the inbox's Mail | Blog switch
+          props.titleAside || null
         ),
         props.children,
         // Modals that keep their own action row pass ownActions; every other
@@ -2739,8 +2835,8 @@ function MenuGroupModal(props){
           style:{display:"flex",alignItems:"center",gap:"0.6rem",width:"100%",textAlign:"left",
                  background:S.bg1,border:"2px solid "+S.border,borderRadius:S.radius,
                  padding:"0.9rem 1rem",color:S.text,cursor:"pointer",
-                 fontFamily:S.fontBody,fontWeight:700,fontSize:MENU_FONT,whiteSpace:"nowrap"} },
-          it.label);
+                 fontFamily:S.fontBody,fontWeight:700,fontSize:MENU_FONT,whiteSpace:"nowrap"}, "data-groupkey":it.anchor },
+          it.label, it.pill ? React.createElement("span", { style:{ marginLeft:"auto" } }, React.createElement(FbCount, { n:it.pill, label:it.pill===1 ? "1 reply" : it.pill+" replies" })) : null);
       })
     ),
     React.createElement("button", { onClick:onClose,
@@ -3234,7 +3330,7 @@ var HELP_GUIDES = {
       { stage:{ kind:"account", step:"email" }, ring:'[data-anchor="acct-email"]', side:"below", title:"Your email",
         text:"Account is the last row in the menu; the cloud at the end of the top bar opens it too. Type your email and tap Send code." },
       { stage:{ kind:"account", step:"code" }, ring:'[data-anchor="acct-code"]', side:"below", title:"The code from the email",
-        text:"A short code arrives by email. Type it in, or tap the suggestion above the keyboard. There is no password to remember. No email? Look in spam, or send a new code after a minute." },
+        text:"A short code arrives by email. Type it in, or tap the suggestion above the keyboard. The last two boxes are dashed: they fill only if your code is the longer kind. There is no password to remember. No email? Look in spam, or send a new code after a minute." },
       { stage:{ kind:"account", step:"in" }, ring:'[data-anchor="acct-who"]', side:"below", title:"Signed in",
         text:"The sheet shows who you are signed in as and whether the app can reach the server. Signing in sends nothing from your board; syncing it to your other devices is its own switch." },
       { stage:{ kind:"account", step:"in" }, ring:'[data-anchor="acct-signout"]', side:"above", title:"Sign out",
@@ -3258,6 +3354,25 @@ var HELP_GUIDES = {
         text:"Each choice shows roughly what it uses in a working month, and the box below shows what this device has really used so far this month. Every device keeps its own choice." },
       { stage:{ kind:"sync" }, ring:'[data-anchor="sync-now"]', side:"above", title:"Sync now",
         text:"Sync now sends and fetches straight away. The cloud in the top bar turns while it works and shows the green check when everything matches. Turning sync off keeps everything on this device." }
+    ] },
+  feedback: { title:"About Time Tracker, the FAQ and feedback", covers:["About Time Tracker","Send feedback","My feedback","FAQ"],
+    steps:[
+      { stage:{ kind:"about" }, ring:'[data-anchor="about-hero"]', side:"below", title:"About Time Tracker",
+        text:"In the menu, User Manual, About Time Tracker. The top shows which version you have and when it was built: the first thing to check when something looks different." },
+      { stage:{ kind:"about" }, ring:'[data-anchor="about-rows"]', side:"above", title:"What changed, and feedback",
+        text:"What’s new lists the latest changes, and Version history every release before it. Send feedback and My feedback reach the developer. Privacy says what is kept, and where." },
+      { stage:{ kind:"fbsend" }, ring:'[data-anchor="fb-kind"]', side:"below", title:"What kind",
+        text:"Pick a problem, an idea, a question or praise, then say it in your own words. You need to be signed in, so a reply can reach you. A half-written note waits on this device if you close the sheet." },
+      { stage:{ kind:"fbsend" }, ring:'[data-anchor="fb-details"]', side:"above", title:"App details",
+        text:"With the switch on, the note carries the version, the kind of device, the look you use and how sync is set, written out so you can see exactly what goes. Never your board." },
+      { stage:{ kind:"fbsend", ask:true }, ring:"[data-faqhint]", side:"above", title:"It may already be answered",
+        text:"Ask a question or describe a problem and answers from the FAQ that look like a fit appear under the form. Read one; if it doesn’t help, Send anyway." },
+      { stage:{ kind:"faq" }, ring:'[data-anchor="faq-list"]', side:"below", title:"Questions people ask",
+        text:"In the menu, User Manual, FAQ. Questions are grouped by topic: tap one to open its answer, and Show me how opens the guide for it. Say whether it helped; Still stuck sends the question on. It works offline once it has loaded." },
+      { stage:{ kind:"fbmine" }, ring:'[data-anchor="fb-list"]', side:"below", title:"My feedback",
+        text:"Everything you have sent, each with where it stands: sent, looking into it, planned, or fixed with the version that fixed it. A blue edge means a new reply. When one is waiting, About shows it in the menu too." },
+      { stage:{ kind:"fbthread" }, ring:'[data-anchor="fb-thread"]', side:"below", title:"The conversation",
+        text:"Open one to see the replies as a conversation, with each change of status along the way. Write back in the box below; replying to something marked fixed or closed opens it again." }
     ] },
   reminders: { title:"Reminders & nudges", covers:["Reminders & nudges"],
     steps:[
@@ -3395,6 +3510,7 @@ var HELP_INDEX = [
       ["guide","setschedule"],["guide","setpay"],["guide","setunpaid"],["guide","night"],["guide","reminders"]] },
   { id:"reports", topic:"Reports & records", items:[["picture","reports"],["picture","summary"],["picture","archive"]] },
   { id:"data", topic:"Your data", items:[["guide","backup"],["guide","signin"],["guide","sync"]] },
+  { id:"about", topic:"About & feedback", items:[["guide","feedback"]] },
   { id:"look", topic:"Look & add-ons", items:[["picture","themes"],["picture","layout"],["picture","extensions"]] },
   { id:"practice", topic:"Practise", flat:true, items:[["practice","gestures"]] }
 ];
@@ -3442,6 +3558,9 @@ function helpSearchDocs(){
   Object.keys(A.practice).forEach(function(id){
     var pr=A.practice[id]; out.push({ kind:"practice", id:id, at:0, title:pr.title, where:"Practise", text:pr.blurb||"" });
   });
+  // The FAQ as last loaded on this device (11-18). Not in the manual's
+  // freshness checks: its words are written by the team, not the build.
+  try{ (ttFeedback.faq.cached()||[]).forEach(function(f){ out.push({ kind:"faq", id:f.id, at:0, title:f.question, where:"FAQ \u00B7 "+f.topic, text:f.answer }); }); }catch(e){}
   return out;
 }
 function helpSearch(q){
@@ -3619,6 +3738,18 @@ function helpStageEl(stage, on){
     return React.createElement(AccountModal, { demo:stage.step||"email", onClose:nop });
   if(stage.kind==="sync")
     return React.createElement(SyncModal, { demo:true, cloud:{ phase:"in", net:"ok", online:true, okAt:Date.now()-120000, email:"you@example.com" }, onClose:nop, trail:[{ label:"Account", back:true, go:nop }] });
+  if(stage.kind==="about")
+    return React.createElement(AboutModal, { demo:{ fb:{ mine:1 } }, onClose:nop, trail:[{ label:"Board", go:nop }, { label:"Menu", go:nop }, { label:"User Manual", go:nop }] });
+  if(stage.kind==="fbsend")
+    return React.createElement(FeedbackSendModal, { demo:stage.ask ? { kind:"question", text:"Do paid breaks count toward my overtime?", faq:HELP_FB_FAQ() }
+                                                                    : { kind:"idea", text:"A dark mode for the printed report would be easier on the eyes at night." },
+      settings:{ theme:"neon-dream", mode:"dark" }, onClose:nop, trail:[{ label:"About", back:true, go:nop }] });
+  if(stage.kind==="faq")
+    return React.createElement(FaqModal, { demo:{ list:HELP_FB_FAQ(), open:"q2" }, onClose:nop, trail:[{ label:"User Manual", go:nop }] });
+  if(stage.kind==="fbmine")
+    return React.createElement(MyFeedbackModal, { demo:{ list:HELP_FB_LIST() }, onClose:nop, trail:[{ label:"About", back:true, go:nop }] });
+  if(stage.kind==="fbthread")
+    return React.createElement(FeedbackThreadModal, { demo:{ thread:HELP_FB_THREAD() }, id:"h1", onClose:nop, trail:[{ label:"About", back:true, go:nop }, { label:"My feedback", back:true, go:nop }] });
   if(stage.kind==="howoften")
     return React.createElement(HowOftenModal, { demo:true, onClose:nop, trail:[{ label:"Account", back:true, go:nop }, { label:"Sync", back:true, go:nop }] });
   if(stage.kind==="firstlink")
@@ -3706,14 +3837,27 @@ function helpStageEl(stage, on){
 // single ringed control (steps); each is { anchor, n, side, on }. Positions are
 // MEASURED from the live render, never typed in, so a layout change moves the
 // marks with it. A mark whose anchor is missing draws nothing.
+// Sample feedback for the manual's pictures: dated relative to today.
+function HELP_FB_LIST(){ var d=function(n){ return new Date(Date.now()-n*86400000).toISOString(); };
+  return [{ id:"h1", kind:"problem", body:"The code boxes only take six digits", status:"fixed", fixed_in:"1.5.1", created_at:d(3), replies:1, unread:true },
+          { id:"h2", kind:"idea", body:"Sync only on Wi-Fi", status:"planned", created_at:d(1), replies:1, unread:false },
+          { id:"h3", kind:"question", body:"How do paid breaks count toward overtime?", status:"new", created_at:d(0), replies:0, unread:false }]; }
+function HELP_FB_FAQ(){
+  return [{ id:"q1", topic:"Breaks", question:"Do paid breaks count toward overtime?", answer:"Yes, unless you change it in Time Settings, Work Schedule, Pay & Work Week. Rules differ by employer and state.", guide:"setpay" },
+          { id:"q2", topic:"Sync", question:"Does sync use a lot of data?", answer:"Very little on Smart, the starting choice. Account, Sync Settings, How often shows each choice and what this device has really used.", guide:"sync" },
+          { id:"q3", topic:"Sync", question:"Why doesn’t my other device show a change?", answer:"It arrives within a minute while the app is open. Tap Sync now to fetch it straight away." }]; }
+function HELP_FB_THREAD(){ var d=function(h){ return new Date(Date.now()-h*3600000).toISOString(); };
+  return { as:"reporter", item:{ id:"h1", kind:"problem", body:"The email has an eight-digit code but the app only takes six.", status:"fixed", fixed_in:"1.5.1", created_at:d(30) },
+    messages:[{ id:1, by_staff:true, who:"Hiatt Studios", body:"Thanks for telling us. Fixed: codes of six or eight digits both work now.", at:d(26) },
+              { id:2, by_staff:true, event:"status:fixed", body:"", at:d(26) }] }; }
 var HELP_CARD_W = 366, HELP_SHEET_W = 390, HELP_MARK = 22;
 var HELP_STAGE_FULL = { full:true };
 var HELP_STAGE_W = { paywork:400, unpaid:400, card:366, close:390, header:366, presets:300, headerfull:390, msline:366,
                      schedule:470, shiftask:390, backup:390, outline:390, msedit:400, msstep:390, reports:400,
-                     themes:400, layout:400, summary:400, archive:390, extensions:390, tracking:400, breaks:390, ticker:390, account:390, remind:366, reminder:390, away:390, remindsettings:390, sync:390, firstlink:390, howoften:390 };
+                     themes:400, layout:400, summary:400, archive:390, extensions:390, tracking:400, breaks:390, ticker:390, account:390, remind:366, reminder:390, away:390, remindsettings:390, sync:390, firstlink:390, howoften:390, about:390, fbsend:390, fbmine:390, fbthread:390, faq:390 };
 // Kinds that stage a whole sheet: measured off the staged panel, not the content.
 var HELP_SHEETS = { paywork:true, unpaid:true, close:true, schedule:true, shiftask:true, backup:true, outline:true, msedit:true, msstep:true, reports:true,
-                    themes:true, layout:true, summary:true, archive:true, extensions:true, tracking:true, breaks:true, account:true, reminder:true, away:true, sync:true, firstlink:true, howoften:true };
+                    themes:true, layout:true, summary:true, archive:true, extensions:true, tracking:true, breaks:true, account:true, reminder:true, away:true, sync:true, firstlink:true, howoften:true, about:true, fbsend:true, fbmine:true, fbthread:true, faq:true };
 function HelpStage(props){
   // A module's stage never reads the core's tables - its kinds are its own and
   // could share a name with a core kind. Every module screen is a sheet
@@ -4108,7 +4252,7 @@ function HelpPractice(props){
 // The Guides sheet. One mount, four views; each view is its own component so
 // every hook sits at the top of a component, never in a loop or a branch.
 function GuidesModal(props){
-  var viewS=useState({ kind:"index" }); var setView=viewS[1]; var view=viewS[0];
+  var viewS=useState(props.initial || { kind:"index" }); var setView=viewS[1]; var view=viewS[0];
   var openS=useState({}); var setOpenT=openS[1]; var openT=openS[0];
   var qS=useState(""); var setQuery=qS[1]; var query=qS[0];
   var home=function(){ setView({ kind:"index" }); };
@@ -4118,6 +4262,10 @@ function GuidesModal(props){
   if(view.kind==="picture")
     return React.createElement(HelpPicture, Object.assign({ key:"p"+view.id+(view.k||""), id:view.id, start:view.start||0, onClose:props.onClose, onBack:home,
       onHow:function(gid, part){ setView({ kind:"guide", id:gid, from:{ picture:view.id, part:part } }); } }, search));
+  // An FAQ answer found by the manual's search (11-18).
+  if(view.kind==="faq")
+    return React.createElement(FaqModal, { key:"f"+view.id, openId:view.id, onClose:props.onClose,
+      trail:[{ label:"Guides", back:true, go:home }], onGuide:function(gid){ setView({ kind:"guide", id:gid }); } });
   if(view.kind==="practice")
     return React.createElement(HelpPractice, Object.assign({ id:view.id, onClose:props.onClose, onBack:home }, search));
   if(view.kind==="guide")
@@ -8649,27 +8797,31 @@ function AccountModal(props){
 
   if(step==="code"){
     // Codes are six or eight digits, as the server is set (11-14: the sandbox
-    // sent eight). Six boxes, or eight once the code is longer than six or an
-    // eight-digit code has signed in here before.
+    // sent eight). Brent 11-19 (mock C2 + hint, design/codebox.html): all
+    // eight boxes always show, so nothing moves; the first six are solid, the
+    // last two DASHED but just as bright, with "if your code has 8" under
+    // them, until a 7th digit arrives - then they turn solid and the hint goes
+    // (its line keeps its space). The box for the next digit is lit blue.
     var digits=String(code).replace(/\D/g,"").slice(0,TT_CODE_MAX);
-    // eight unless this device knows the server sends six (11-17: the sandbox sends eight)
-    var nBox=(digits.length>6 || ttCodeLen()!==6) ? 8 : 6;
-    var boxes=Array.apply(null, Array(nBox)).map(function(_, i){
-      var cur=focused && (i===Math.min(digits.length,nBox-1));
-      return React.createElement("div", { key:i, "data-codebox":true, style:{ flex:"1 1 0", maxWidth:nBox===8 ? "2.5rem" : "3rem", height:"3.4rem", display:"flex", alignItems:"center", justifyContent:"center",
-          background:INPUT_STYLE.background, border:"2px solid "+(cur ? S.actionBdr : S.border), borderRadius:S.radius3,
-          fontFamily:S.fontMono, fontSize:nBox===8 ? "1.4rem" : "1.6rem", fontWeight:500, color:S.text, boxShadow:cur ? "0 0 0 3px "+rgba(S.actionBdr,0.25) : "none" } }, digits[i]||"");
+    var longCode=digits.length>6;
+    var boxes=Array.apply(null, Array(TT_CODE_MAX)).map(function(_, i){
+      var cur=focused && (i===Math.min(digits.length,TT_CODE_MAX-1));
+      var spare=i>=6 && !longCode;
+      return React.createElement("div", { key:i, "data-codebox":spare ? "spare" : "main", style:{ flex:"1 1 0", maxWidth:"2.5rem", height:"3.4rem", display:"flex", alignItems:"center", justifyContent:"center",
+          background:INPUT_STYLE.background, border:"2px "+(spare ? "dashed" : "solid")+" "+(cur ? S.actionBdr : S.textDim), borderRadius:S.radius3,
+          fontFamily:S.fontMono, fontSize:"1.4rem", fontWeight:500, color:S.text, boxShadow:cur ? "0 0 0 3px "+rgba(S.actionBdr,0.25) : "none" } }, digits[i]||"");
     });
     return React.createElement(Modal, { title:"Account", trailHere:"Code", onClose:props.onClose,
         trail:trail ? trail.concat([{ label:"Account", go:function(){ setStep("email"); setMsg(""); } }]) : null,
         onSave:function(){ verify(); }, saveLabel:busy ? "Checking…" : "Sign in", saveAnchor:"acct-signin" },
       P("Enter the code from the email sent to "+mail+". Check spam if it isn’t there in a minute."),
+      React.createElement("div", { "data-acctcodelabel":true, style:{ textAlign:"center", fontWeight:700, fontSize:"0.88rem", color:S.text, margin:"0 0 0.5rem" } }, "Input 6 or 8 digit code below"),
       // The boxes, one real field laid over them: the field takes typing,
       // pasting and the phone's "From Mail" suggestion; the boxes show it.
-      React.createElement("div", { "data-anchor":"acct-code", style:{ position:"relative", display:"flex", gap:nBox===8 ? "0.3rem" : "0.45rem", justifyContent:"center", direction:"ltr" } },
+      React.createElement("div", { "data-anchor":"acct-code", style:{ position:"relative", display:"flex", gap:"0.3rem", justifyContent:"center", direction:"ltr" } },
         boxes,
         React.createElement("input", { ref:codeRef, "data-acctcode":true, type:"text", inputMode:"numeric", autoComplete:"one-time-code", maxLength:TT_CODE_MAX,
-          value:digits, "aria-label":"Code from the email",
+          value:digits, "aria-label":"Code from the email, six or eight digits",
           onFocus:function(){ setFocused(true); }, onBlur:function(){ setFocused(false); },
           onChange:function(e){
             var v=String(e.target.value).replace(/\D/g,"").slice(0,TT_CODE_MAX), jump=v.length-digits.length;
@@ -8684,6 +8836,9 @@ function AccountModal(props){
           },
           style:{ position:"absolute", inset:0, width:"100%", height:"100%", opacity:0.01, color:"transparent", caretColor:"transparent",
                   background:"transparent", border:"none", outline:"none", fontSize:"16px", padding:0 } })),
+      React.createElement("div", { "data-acctcodehint":longCode ? "off" : "on", "aria-hidden":"true",
+          style:{ minHeight:"1.2em", textAlign:"right", fontSize:"0.72rem", color:S.textDim, margin:"0.25rem 0.2rem 0", direction:"ltr" } },
+        longCode ? "" : "if your code has 8"),
       React.createElement("div", { style:{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:"0.5rem" } },
         linkBtn("change", "Use a different email", function(){ setStep("email"); setMsg(""); }),
         wait>0 ? React.createElement(Mono, { "data-acctwait":true, style:{ color:S.textDim, fontSize:"0.85rem" } }, "Send again in "+Math.floor(wait/60)+":"+pad(wait%60))
@@ -8956,6 +9111,932 @@ function ExtensionsModal(props){
       "is included in Backup & Saves."),
     body
   );
+}
+
+// ---- About Time Tracker (11-17, layout C) -----------------------------------
+// Menu > User Manual > About Time Tracker. A header (the app, its version and
+// build, "Developed at Hiatt Studios"), then rows that each open their own
+// sheet, the same way Account opens Sync: What's new, Version history, Send
+// feedback, My feedback, Privacy and your data.
+//
+// The app details a person may attach to feedback: which version, what kind
+// of device, the look and how sync is set. Never the board. ttFbAppInfo
+// returns both the record sent and the words that show it in the form, so
+// what the person reads is exactly what goes.
+function ttFbDevice(ua, touch){
+  ua=String(ua||"");
+  var ios=/OS (\d+)[_.](\d+)/.exec(ua);
+  if(/iPhone/.test(ua)) return { device:"iPhone", os:ios ? "iOS "+ios[1]+"."+ios[2] : "iOS" };
+  if(/iPad/.test(ua) || (/Macintosh/.test(ua) && touch)) return { device:"iPad", os:ios ? "iPadOS "+ios[1]+"."+ios[2] : "iPadOS" };
+  var and=/Android (\d+(?:\.\d+)?)/.exec(ua);
+  if(and) return { device:/Mobile/.test(ua) ? "Android phone" : "Android tablet", os:"Android "+and[1] };
+  if(/Macintosh|Mac OS X/.test(ua)) return { device:"Mac", os:"macOS" };
+  if(/Windows/.test(ua)) return { device:"Windows PC", os:"Windows" };
+  return { device:"Other device", os:"" };
+}
+function ttFbAppInfo(settings, sync, nav){
+  settings=settings||{}; nav=nav||{};
+  var d=ttFbDevice(nav.ua, nav.touch);
+  var tk=themeKeyOf(settings), theme=(THEMES[tk] && THEMES[tk].label) || tk, mode=settings.mode==="light" ? "light" : "dark";
+  var rate=sync && sync.on ? ((SYNC_RATE_INFO[sync.rate||"smart"]||SYNC_RATE_INFO.smart)[0]) : "off";
+  var info={ version:APP_VERSION, build:TT_BUILD||null, device:d.device, os:d.os||null, screen:nav.screen||null,
+             home_screen:!!nav.standalone, theme:theme, mode:mode, hand:settings.handedness==="left" ? "left" : "right", sync:rate };
+  var words="Version "+APP_VERSION+", "+d.device+(d.os ? ", "+d.os : "")+", "+theme+" "+mode+", sync "+(rate==="off" ? "off" : rate)+".";
+  return { info:info, words:words };
+}
+function ttFbNav(){
+  try{
+    return { ua:navigator.userAgent, touch:(navigator.maxTouchPoints||0)>1,
+             screen:Math.round(screen.width)+"×"+Math.round(screen.height),
+             standalone:!!(navigator.standalone || (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches)) };
+  }catch(e){ return {}; }
+}
+function ttFbWhen(iso, withTime){
+  var d=new Date(iso); if(isNaN(d.getTime())) return "";
+  var s=TT_MONTHS[d.getMonth()]+" "+d.getDate()+(d.getFullYear()!==new Date().getFullYear() ? ", "+d.getFullYear() : "");
+  return withTime ? s+" · "+fmtTime(d.getTime()) : s;
+}
+// The first line of what was sent, cut to fit a card's title.
+function ttFbTitle(body){ var t=String(body||"").split(/\n/)[0].trim(); return t.length>64 ? t.slice(0,61).replace(/\s+\S*$/,"")+"…" : t; }
+function ttFbKindWord(k){ var x=TT_FB_KINDS.filter(function(p){ return p[0]===k; })[0]; return x ? x[1] : "Feedback"; }
+function ttFbStatusWords(status, fixedIn){
+  var s=TT_FB_STATUS[status]||TT_FB_STATUS["new"];
+  return status==="fixed" && fixedIn ? "Fixed in "+fixedIn : s[0];
+}
+function FbPill(props){
+  var tone=(TT_FB_STATUS[props.status]||TT_FB_STATUS["new"])[1];
+  var col=tone==="ok" ? S.successText : tone==="info" ? S.infoText : tone==="warn" ? S.warnText : S.textDim;
+  return React.createElement("span", { "data-fbstatus":props.status, style:{ fontSize:"0.68rem", fontWeight:800, borderRadius:"99px", padding:"0.12rem 0.5rem",
+      border:"1.5px solid "+col, color:col, whiteSpace:"nowrap", flexShrink:0 } }, ttFbStatusWords(props.status, props.fixedIn));
+}
+function FbCount(props){
+  if(!props.n) return null;
+  return React.createElement("span", { "data-fbcount":props.n, style:{ fontSize:"0.68rem", fontWeight:800, borderRadius:"99px", padding:"0.12rem 0.5rem",
+      background:S.infoBg, border:"1.5px solid "+S.actionBdr, color:S.infoText, whiteSpace:"nowrap" } }, props.label || (props.n===1 ? "1 new reply" : props.n+" new replies"));
+}
+function aboutP(t, extra, attrs){ return React.createElement("p", Object.assign({ style:Object.assign({ margin:"0 0 0.8rem", color:S.textDim, fontSize:"0.9rem", lineHeight:1.45, fontFamily:S.fontBody }, extra||{}) }, attrs||{}), t); }
+function AboutRow(props){
+  return React.createElement("button", { "data-flat":true, "data-aboutrow":props.k, onClick:function(){ haptic(6); props.onClick(); },
+      style:{ display:"flex", alignItems:"center", gap:"0.6rem", width:"100%", background:"none", border:"none", borderBottom:"1px solid "+S.border,
+              padding:"0.85rem 0.15rem", cursor:"pointer", fontFamily:S.fontBody, textAlign:"left", color:S.text } },
+    React.createElement("span", { style:{ fontWeight:700, fontSize:"0.96rem" } }, props.label),
+    React.createElement("span", { style:{ marginLeft:"auto", display:"flex", alignItems:"center", gap:"0.5rem" } }, props.extra||null,
+      React.createElement("span", { style:{ color:S.textDim, fontWeight:700 } }, "›")));
+}
+function AboutHero(){
+  return React.createElement("div", { "data-abouthero":true, "data-anchor":"about-hero", style:{ display:"flex", alignItems:"center", gap:"0.8rem", padding:"0.85rem 0.9rem",
+      background:S.bg1, border:"1px solid "+S.border, borderRadius:S.radius, marginBottom:"0.6rem" } },
+    React.createElement(MenuIcon, { name:"task", size:42, col:S.successText }),
+    React.createElement("div", { style:{ minWidth:0 } },
+      React.createElement("div", { style:{ fontWeight:800, fontSize:"1.1rem", color:S.text } }, "Time Tracker"),
+      React.createElement("div", { "data-aboutversion":APP_VERSION, dir:"ltr", style:{ fontSize:"0.82rem", color:S.textDim, marginTop:"0.1rem" } },
+        "Version "+APP_VERSION+(TT_BUILD ? " · build "+TT_BUILD : "")),
+      React.createElement("div", { style:{ fontSize:"0.8rem", color:S.successText, fontWeight:700, marginTop:"0.15rem" } }, "Developed at Hiatt Studios")));
+}
+function AboutModal(props){
+  var c=props.cloud||ttCloud.get(), demo=props.demo||null;
+  var pageS=useState(demo && demo.page || null); var page=pageS[0], setPage=pageS[1];
+  var fbS=useState(ttFeedback.status()); var fb=demo ? (demo.fb||{ mine:1 }) : fbS[0];
+  useEffect(function(){ if(demo) return; var off=ttFeedback.subscribe(fbS[1]); ttFeedback.refresh(true); return off; }, []);
+  var here=(props.trail||[]).concat([{ label:"About", back:true, go:function(){ setPage(null); } }]);
+  var close=function(){ setPage(null); };
+  var cur=TT_RELEASES[0];
+  return React.createElement(Modal, { title:"About Time Tracker", onClose:props.onClose, cancelLabel:"Close", trail:props.trail, trailHere:"About" },
+    React.createElement(AboutHero),
+    React.createElement("div", { "data-anchor":"about-rows" },
+      React.createElement(AboutRow, { k:"new", label:"What’s new in "+cur.v, onClick:function(){ setPage("new"); } }),
+      React.createElement(AboutRow, { k:"history", label:"Version history", onClick:function(){ setPage("history"); } }),
+      React.createElement(AboutRow, { k:"send", label:"Send feedback", onClick:function(){ setPage("send"); } }),
+      React.createElement(AboutRow, { k:"mine", label:"My feedback", extra:React.createElement(FbCount, { n:fb.mine }), onClick:function(){ setPage("mine"); } }),
+      React.createElement(AboutRow, { k:"privacy", label:"Privacy and your data", onClick:function(){ setPage("privacy"); } }),
+      // Staff only (fb_unread says who): the team's inbox, with what needs a look.
+      fb.staff && React.createElement(AboutRow, { k:"inbox", label:"Feedback inbox", extra:React.createElement(FbCount, { n:fb.inbox, label:fb.inbox+" new" }), onClick:function(){ setPage("inbox"); } })),
+    aboutP("Thank you for using Time Tracker. Problems, ideas and questions all go straight to the developer.", { margin:"0.9rem 0 0", fontSize:"0.84rem" }),
+    !demo && page==="new" && React.createElement(ReleaseModal, { only:true, trail:here, onClose:close }),
+    !demo && page==="history" && React.createElement(ReleaseModal, { trail:here, onClose:close }),
+    !demo && page==="privacy" && React.createElement(PrivacyModal, { trail:here, onClose:close }),
+    !demo && page==="send" && React.createElement(FeedbackSendModal, { cloud:c, settings:props.settings, trail:here, onClose:close, onAccount:props.onAccount,
+      onMine:function(){ setPage("mine"); } }),
+    !demo && page==="mine" && React.createElement(MyFeedbackModal, { cloud:c, trail:here, onClose:close, onAccount:props.onAccount,
+      onSend:function(){ setPage("send"); } }),
+    !demo && page==="inbox" && React.createElement(StaffInboxModal, { trail:here, onClose:function(){ setPage(null); ttFeedback.refresh(true); } }));
+}
+function ReleaseList(props){
+  var list=props.only ? TT_RELEASES.slice(0,1) : TT_RELEASES;
+  return React.createElement("div", { "data-releases":list.length, style:{ borderLeft:"2px solid "+S.border, marginLeft:"0.35rem", paddingLeft:"0.9rem" } },
+    list.map(function(r, i){
+      return React.createElement("div", { key:r.v, "data-release":r.v, style:{ position:"relative", marginBottom:"0.9rem" } },
+        React.createElement("span", { style:{ position:"absolute", left:"-1.33rem", top:"0.28rem", width:"0.7rem", height:"0.7rem", borderRadius:"50%",
+            background:i===0 ? S.successText : S.border } }),
+        React.createElement("div", { dir:"ltr", style:{ fontWeight:700, fontSize:"0.95rem", color:S.text } },
+          r.v+(r.name ? " “"+r.name+"”" : "")+(i===0 && r.v===APP_VERSION ? " · this version" : "")),
+        React.createElement("div", { style:{ fontSize:"0.76rem", color:S.textDim } }, ttReleaseDate(r.date)),
+        React.createElement("ul", { style:{ margin:"0.3rem 0 0", paddingLeft:"1.05rem", fontSize:"0.86rem", color:S.text, lineHeight:1.45 } },
+          r.items.map(function(t){ return React.createElement("li", { key:t }, t); })));
+    }));
+}
+function ReleaseModal(props){
+  return React.createElement(Modal, { title:props.only ? "What’s new" : "Version history", onClose:props.onClose, cancelLabel:"Done", trail:props.trail },
+    React.createElement(ReleaseList, { only:props.only }));
+}
+var TT_PRIVACY = [
+  ["Your board", "Your jobs, hours, notes and settings stay on your devices. They go to the server only if you turn on Sync, and then only you can read them, not even an organization admin."],
+  ["Feedback", "What you send is kept with your sign-in email, so the developer can reply. Only Hiatt Studios and the helpers it chooses can read it, and a helper sees only what is assigned to them."],
+  ["App details", "If you include them: the version, the kind of device, the look you use and how sync is set. Never your board."],
+  ["The FAQ", "To find questions worth answering in the FAQ, feedback may be read by an AI assistant (Claude, by Anthropic) when the developer asks. Its suggestions never include names or emails, and nothing is published without the developer. Anyone can read the FAQ; your votes on it are counted, never shown."],
+  ["Signing in", "Sign-in details stay on this device and are never put in backups. Signing out leaves your board where it is."],
+  ["Removing it", "If your account is deleted, your feedback and anything synced go with it."]
+];
+function PrivacyModal(props){
+  return React.createElement(Modal, { title:"Privacy and your data", onClose:props.onClose, cancelLabel:"Done", trail:props.trail },
+    TT_PRIVACY.map(function(p){
+      return React.createElement("div", { key:p[0], "data-privacy":p[0], style:{ marginBottom:"0.8rem" } },
+        React.createElement("div", { style:{ fontWeight:700, color:S.text, fontSize:"0.93rem", marginBottom:"0.15rem" } }, p[0]),
+        aboutP(p[1], { margin:0, fontSize:"0.86rem" }));
+    }));
+}
+// Signed out: why sign-in is needed, and the way to it.
+function FbSignIn(props){
+  return React.createElement(Modal, { title:props.title, onClose:props.onClose, cancelLabel:"Close", trail:props.trail },
+    React.createElement("div", { "data-fbsignin":true },
+      aboutP("Feedback needs you to be signed in, so a reply can reach you and nobody can send in your name."),
+      React.createElement("button", { "data-fbsigninbtn":true, onClick:function(){ haptic(8); if(props.onAccount) props.onAccount(); },
+          style:{ width:"100%", background:S.infoBg, border:"2px solid "+S.actionBdr, borderRadius:S.radius, padding:"0.75rem",
+                  color:S.actionText, fontFamily:S.fontBody, fontWeight:700, fontSize:"0.98rem", cursor:"pointer" } }, "Sign in"),
+      aboutP("Signing in doesn’t send your board anywhere.", { margin:"0.6rem 0 0", fontSize:"0.82rem" })));
+}
+function FbNote(props){
+  return React.createElement("div", { "data-fbmsg":props.text ? true : undefined,
+      style:{ minHeight:"2.6rem", marginTop:"0.5rem", color:props.col||S.dangerText, fontSize:"0.85rem", lineHeight:1.4, fontFamily:S.fontBody } }, props.text||"");
+}
+function FeedbackSendModal(props){
+  var c=props.cloud||ttCloud.get(), demo=props.demo||null;
+  var d0=demo ? { kind:demo.kind||"problem", text:demo.text||"" } : (props.prefill ? { kind:props.prefill.kind, text:props.prefill.text||(ttFeedback.draft()||{}).text||"" } : (ttFeedback.draft()||{}));
+  // F (11-18): matching FAQ answers under the form as someone types.
+  var faqS=useState(demo && demo.faq || ttFeedback.faq.cached()); var faqList=faqS[0], setFaqList=faqS[1];
+  var readS=useState(null); var reading=readS[0], setReading=readS[1];
+  useEffect(function(){ if(!demo) ttFeedback.faq.load(false).then(function(r){ if(r.list) setFaqList(r.list); }); }, []);
+  var kindS=useState(TT_FB_PROMPT[d0.kind] ? d0.kind : "problem"); var kind=kindS[0], setKind=kindS[1];
+  var textS=useState(d0.text||""); var text=textS[0], setText=textS[1];
+  var incS=useState(true); var inc=incS[0], setInc=incS[1];
+  var busyS=useState(false); var busy=busyS[0], setBusy=busyS[1];
+  var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
+  var sentS=useState(demo && demo.sent || false); var sent=sentS[0], setSent=sentS[1];
+  if(c.phase!=="in" && !demo) return React.createElement(FbSignIn, { title:"Send feedback", trail:props.trail, onClose:props.onClose, onAccount:props.onAccount });
+  var app=ttFbAppInfo(props.settings||settingsFromStore(), demo ? { on:true, rate:"smart" } : ttSync.status(), demo ? { ua:"iPhone OS 18_1" } : ttFbNav());
+  function keep(k, t){ if(!demo) ttFeedback.draft({ kind:k, text:t }); }
+  function send(){
+    if(busy || demo) return;
+    if(!text.trim()){ setMsg("Write something first."); return; }
+    setBusy(true); setMsg("");
+    ttFeedback.send(kind, text, inc ? app.info : null).then(function(r){
+      setBusy(false);
+      if(!r.ok){ setMsg(r.msg); return; }
+      haptic([10,40,10]); ttFeedback.draft(null); setText(""); setSent(true);
+    });
+  }
+  if(sent) return React.createElement(Modal, { title:"Send feedback", onClose:props.onClose, cancelLabel:"Close", trail:props.trail },
+    React.createElement("div", { "data-fbsent":true, style:{ padding:"0.9rem", borderRadius:S.radius, background:S.successBg, border:"1px solid "+S.successBorder, marginBottom:"0.8rem" } },
+      React.createElement("div", { style:{ fontWeight:800, color:S.successText, fontSize:"1rem" } }, "Sent. Thank you."),
+      aboutP("It’s under My feedback, where any reply will show.", { margin:"0.3rem 0 0", color:S.text })),
+    React.createElement("button", { "data-fbopenmine":true, onClick:function(){ haptic(6); if(props.onMine) props.onMine(); },
+        style:{ width:"100%", background:S.infoBg, border:"2px solid "+S.actionBdr, borderRadius:S.radius, padding:"0.7rem", color:S.actionText,
+                fontFamily:S.fontBody, fontWeight:700, fontSize:"0.95rem", cursor:"pointer", marginBottom:"0.5rem" } }, "Open My feedback"),
+    React.createElement("button", { "data-fbanother":true, "data-flat":true, onClick:function(){ haptic(6); setSent(false); },
+        style:{ width:"100%", background:"none", border:"1px solid "+S.border, borderRadius:S.radius, padding:"0.65rem", color:S.textDim,
+                fontFamily:S.fontBody, fontWeight:700, fontSize:"0.92rem", cursor:"pointer" } }, "Send something else"));
+  var left=TT_FB_MAX-text.length;
+  var matches=(kind==="problem" || kind==="question") ? ttFaqMatch(text, faqList, 2) : [];
+  return React.createElement(Modal, { title:"Send feedback", onClose:props.onClose, trail:props.trail,
+      onSave:send, saveLabel:busy ? "Sending…" : (matches.length ? "Send anyway" : "Send"), saveAnchor:"fb-send" },
+    React.createElement("div", { style:LABEL_STYLE }, "What kind"),
+    React.createElement("div", { "data-anchor":"fb-kind", style:{ display:"flex", flexWrap:"wrap", gap:"0.4rem", marginBottom:"0.9rem" } },
+      TT_FB_KINDS.map(function(k){ var on=kind===k[0];
+        return React.createElement("button", { key:k[0], "data-flat":true, "data-fbkind":k[0], "aria-pressed":on ? "true" : "false",
+            onClick:function(){ haptic(5); setKind(k[0]); keep(k[0], text); },
+            style:{ borderRadius:"99px", padding:"0.4rem 0.8rem", cursor:"pointer", fontFamily:S.fontBody, fontWeight:700, fontSize:"0.85rem",
+                    border:"1.5px solid "+(on ? S.actionBdr : S.border), background:on ? S.infoBg : "none", color:on ? S.infoText : S.textDim } }, k[1]); })),
+    React.createElement("div", { style:LABEL_STYLE }, "In your words"),
+    React.createElement("textarea", { "data-fbtext":true, "data-anchor":"fb-text", value:text, maxLength:TT_FB_MAX, placeholder:TT_FB_PROMPT[kind],
+      onChange:function(e){ setText(e.target.value); keep(kind, e.target.value); if(msg) setMsg(""); },
+      style:Object.assign({}, INPUT_STYLE, { minHeight:"7.5rem", resize:"vertical", lineHeight:1.4 }) }),
+    React.createElement("div", { "data-fbleft":true, style:{ minHeight:"1.2em", fontSize:"0.75rem", color:left<200 ? S.warnText : S.textDim, textAlign:"right", marginTop:"0.2rem" } },
+      left<500 ? left+" characters left" : ""),
+    React.createElement("div", { "data-anchor":"fb-details", style:{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:"0.7rem", padding:"0.6rem 0.1rem",
+        borderTop:"1px solid "+S.border, borderBottom:"1px solid "+S.border, marginTop:"0.3rem" } },
+      React.createElement("div", { style:{ minWidth:0 } },
+        React.createElement("div", { style:{ fontWeight:700, color:S.text, fontSize:"0.93rem" } }, "Include app details"),
+        React.createElement("div", { "data-fbdetails":inc ? "on" : "off", style:{ fontSize:"0.78rem", color:S.textDim, marginTop:"0.15rem", lineHeight:1.35, minHeight:"2.2em" } },
+          inc ? app.words+" Never your board." : "Nothing but your words.")),
+      React.createElement(OnSwitch, { name:"fbdetails", on:inc, onChange:function(v){ setInc(v); } })),
+    React.createElement(FbNote, { text:msg }),
+    aboutP("A copy stays under My feedback, where replies appear.", { margin:0, fontSize:"0.8rem" }),
+    React.createElement(FaqHint, { matches:matches, onRead:function(id){ setReading(id); } }),
+    !demo && reading && React.createElement(FaqModal, { openId:reading, cloud:c, trail:(props.trail||[]).concat([{ label:"Send feedback", back:true, go:function(){ setReading(null); } }]),
+      onClose:function(){ setReading(null); }, onAccount:props.onAccount }));
+}
+function MyFeedbackModal(props){
+  var c=props.cloud||ttCloud.get(), demo=props.demo||null;
+  var listS=useState(demo ? demo.list : null); var list=listS[0], setList=listS[1];
+  var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
+  var openS=useState(null); var open=openS[0], setOpen=openS[1];
+  var signed=c.phase==="in" || demo;
+  function load(){ if(demo || !signed) return; ttFeedback.mine().then(function(r){ if(r.ok){ setList(r.data||[]); setMsg(""); } else { setMsg(r.msg); if(!list) setList([]); } }); }
+  useEffect(function(){ load(); }, [c.phase]);
+  if(!signed) return React.createElement(FbSignIn, { title:"My feedback", trail:props.trail, onClose:props.onClose, onAccount:props.onAccount });
+  var here=(props.trail||[]).concat([{ label:"My feedback", back:true, go:function(){ setOpen(null); load(); } }]);
+  var body;
+  if(list===null) body=aboutP("Loading…");
+  else if(!list.length) body=React.createElement("div", { "data-fbempty":true },
+    aboutP("Nothing sent yet. Anything you send shows up here, with where it stands and any reply."),
+    React.createElement("button", { "data-fbgosend":true, onClick:function(){ haptic(6); if(props.onSend) props.onSend(); },
+        style:{ width:"100%", background:S.infoBg, border:"2px solid "+S.actionBdr, borderRadius:S.radius, padding:"0.7rem", color:S.actionText,
+                fontFamily:S.fontBody, fontWeight:700, fontSize:"0.95rem", cursor:"pointer" } }, "Send feedback"));
+  else body=list.map(function(it){
+    return React.createElement("button", { key:it.id, "data-flat":true, "data-fbitem":it.id, "data-fbunread":it.unread ? "1" : undefined,
+        onClick:function(){ haptic(6); setOpen(it.id); },
+        style:{ display:"block", width:"100%", textAlign:"left", cursor:"pointer", fontFamily:S.fontBody, padding:"0.7rem 0.75rem", marginBottom:"0.5rem",
+                background:S.bg1, border:(it.unread ? "2px solid "+S.actionBdr : "1px solid "+S.border), borderRadius:S.radius, color:S.text } },
+      React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.5rem" } },
+        React.createElement("span", { style:{ fontWeight:700, fontSize:"0.93rem", minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" } }, ttFbTitle(it.body)),
+        React.createElement("span", { style:{ marginLeft:"auto" } }, React.createElement(FbPill, { status:it.status, fixedIn:it.fixed_in }))),
+      React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.5rem", fontSize:"0.76rem", color:S.textDim, marginTop:"0.25rem" } },
+        React.createElement("span", null, ttFbKindWord(it.kind)+" · "+ttFbWhen(it.created_at)+(it.replies ? " · "+(it.replies===1 ? "1 reply" : it.replies+" replies") : "")),
+        it.unread && React.createElement("span", { style:{ marginLeft:"auto", color:S.infoText, fontWeight:800 } }, "New reply")));
+  });
+  return React.createElement(Modal, { title:"My feedback", onClose:props.onClose, cancelLabel:"Close", trail:props.trail },
+    React.createElement("div", { "data-fblist":list ? list.length : "loading", "data-anchor":"fb-list" }, body),
+    msg && React.createElement(FbNote, { text:msg }),
+    open && React.createElement(FeedbackThreadModal, { id:open, trail:here, onClose:function(){ setOpen(null); load(); } }));
+}
+// A line in the thread for a change of status or hands.
+function ttFbEventWords(ev, asStaff){
+  var p=String(ev||"").split(":"), k=p[0], v=p[1]||"";
+  if(k==="status") return v==="open" ? "Looking into it" : "Now: "+ttFbStatusWords(v);
+  if(k==="assign") return v==="none" ? "No longer assigned" : "Assigned";
+  return "";
+}
+function FeedbackThreadModal(props){
+  var demo=props.demo||null;
+  var thS=useState(demo ? demo.thread : null); var th=thS[0], setTh=thS[1];
+  var textS=useState(""); var text=textS[0], setText=textS[1];
+  var busyS=useState(false); var busy=busyS[0], setBusy=busyS[1];
+  var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
+  function load(){ if(demo) return; ttFeedback.thread(props.id).then(function(r){ if(r.ok){ setTh(r.data); } else setMsg(r.msg); }); }
+  useEffect(function(){ load(); }, [props.id]);
+  function reply(){
+    if(busy || demo || !th) return;
+    if(!text.trim()){ setMsg("Write your reply first."); return; }
+    setBusy(true); setMsg("");
+    ttFeedback.reply(props.id, text).then(function(r){
+      setBusy(false);
+      if(!r.ok){ setMsg(r.msg); return; }
+      haptic(10); setText(""); load();
+    });
+  }
+  var it=th && th.item;
+  var bubble=function(key, who, when, body, dev){
+    return React.createElement("div", { key:key, "data-fbmsgrow":dev ? "staff" : "you", style:{ border:"1px solid "+(dev ? S.actionBdr : S.border), background:dev ? S.infoBg : S.bg1,
+        borderRadius:S.radius, padding:"0.55rem 0.7rem", marginBottom:"0.45rem" } },
+      React.createElement("div", { style:{ fontSize:"0.72rem", color:S.textDim, fontWeight:700, marginBottom:"0.15rem" } }, who+" · "+when),
+      React.createElement("div", { style:{ fontSize:"0.88rem", color:S.text, lineHeight:1.45, whiteSpace:"pre-wrap", overflowWrap:"anywhere" } }, body));
+  };
+  var rows=!th ? [aboutP(msg ? "" : "Loading…", null, { key:"l" })] : [bubble("o", "You", ttFbWhen(it.created_at, true), it.body, false)].concat((th.messages||[]).map(function(m){
+    if(m.event) return React.createElement("div", { key:m.id, "data-fbevent":m.event, style:{ textAlign:"center", fontSize:"0.74rem", color:/^faq:/.test(m.event) ? S.successText : S.textDim, margin:"0.3rem 0 0.55rem", fontWeight:/^faq:/.test(m.event) ? 700 : 400 } },
+      (/^faq:/.test(m.event) ? (m.body||"It’s now in the FAQ") : ttFbEventWords(m.event))+" · "+ttFbWhen(m.at));
+    return bubble(m.id, m.by_staff ? m.who : "You", ttFbWhen(m.at, true), m.body, m.by_staff);
+  }));
+  return React.createElement(Modal, { title:it ? ttFbKindWord(it.kind) : "Feedback", onClose:props.onClose, trail:props.trail, trailHere:"Thread",
+      onSave:th ? reply : undefined, saveLabel:busy ? "Sending…" : "Reply", saveAnchor:"fb-reply", cancelLabel:"Close" },
+    it && React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.5rem", marginBottom:"0.7rem" } },
+      React.createElement("span", { style:{ fontSize:"0.8rem", color:S.textDim } }, "Sent "+ttFbWhen(it.created_at)),
+      React.createElement("span", { style:{ marginLeft:"auto" } }, React.createElement(FbPill, { status:it.status, fixedIn:it.fixed_in }))),
+    React.createElement("div", { "data-fbthread":th ? (th.messages||[]).length : "loading", "data-anchor":"fb-thread" }, rows),
+    it && it.app && React.createElement("div", { "data-fbappsent":true, style:{ fontSize:"0.74rem", color:S.textDim, margin:"0.1rem 0 0.7rem" } },
+      "Sent with: version "+(it.app.version||"?")+(it.app.device ? ", "+it.app.device : "")+(it.app.os ? ", "+it.app.os : "")+"."),
+    th && React.createElement("textarea", { "data-fbreply":true, "data-anchor":"fb-replybox", value:text, maxLength:TT_FB_MAX, placeholder:"Write a reply",
+      onChange:function(e){ setText(e.target.value); if(msg) setMsg(""); },
+      style:Object.assign({}, INPUT_STYLE, { minHeight:"4.5rem", resize:"vertical", lineHeight:1.4 }) }),
+    React.createElement(FbNote, { text:msg }));
+}
+
+// ---- Feedback inbox: the team's side (11-18) --------------------------------
+// Brent (11-18): option 3 - the title stays, with a small Mail | Blog switch
+// beside it. Mail (D) is the quick list with Reply / Planned / Fixed / Close
+// under each item; Blog (E) is whole threads in the page. Shared: the status
+// chips, Everyone's / Assigned to me / Unassigned, and the search, so
+// switching keeps what you filtered to. Reply in Mail jumps to that thread in
+// Blog with the box ready, and "Back to Mail" returns to the same spot. The
+// view is remembered per device (ttfb_inboxview - not tt_, never backed up or
+// synced). Only staff ever see this: the row on About appears for owners and
+// helpers (fb_unread says which), and the server refuses everyone else.
+var TT_FB_STAFF_WORDS = { "new":"New", open:"Looking into it", waiting:"Waiting on them", planned:"Planned", fixed:"Fixed", closed:"Closed" };
+var TT_FB_STATUSES = ["new","open","waiting","planned","fixed","closed"];
+var TT_FB_PRIORITY = [["low","Low"],["normal","Normal"],["high","High"],["urgent","Urgent"]];
+var TT_FB_VIEW = "ttfb_inboxview";
+var TT_FB_BLOG_MAX = 15;               // threads drawn in Blog before "Show more"
+function ttFbStaffWords(status, fixedIn){ return status==="fixed" && fixedIn ? "Fixed in "+fixedIn : (TT_FB_STAFF_WORDS[status]||"New"); }
+function ttFbAgo(iso){
+  var t=new Date(iso).getTime(); if(isNaN(t)) return "";
+  var m=Math.max(0, Math.round((Date.now()-t)/60000));
+  if(m<60) return m<1 ? "just now" : m+"m";
+  var h=Math.round(m/60); if(h<24) return h+"h";
+  var d=Math.round(h/24); return d<14 ? d+"d" : ttFbWhen(iso);
+}
+// Filter a fetched inbox the way the chips and the search say. Pure: tested.
+function ttFbFilter(list, status, text){
+  var words=String(text||"").toLowerCase().split(/\s+/).filter(Boolean);
+  return (list||[]).filter(function(it){
+    if(status && status!=="all" && it.status!==status) return false;
+    if(!words.length) return true;
+    var hay=(String(it.body||"")+" "+String(it.reporter||"")+" "+(it.tags||[]).join(" ")).toLowerCase();
+    return words.every(function(w){ return hay.indexOf(w)>=0; });
+  });
+}
+function ttFbCounts(list){
+  var c={ all:(list||[]).length }; TT_FB_STATUSES.forEach(function(s){ c[s]=0; });
+  (list||[]).forEach(function(it){ if(c[it.status]!=null) c[it.status]++; });
+  return c;
+}
+function fbBtn(primary, extra){
+  return Object.assign({ background:primary ? S.infoBg : "none", border:(primary ? "2px solid "+S.actionBdr : "1.5px solid "+S.border), borderRadius:S.radius,
+    color:primary ? S.actionText : S.textDim, fontFamily:S.fontBody, fontWeight:700, fontSize:"0.85rem", cursor:"pointer", padding:"0.45rem 0.6rem" }, extra||{});
+}
+function FbChip(props){
+  return React.createElement("button", { "data-flat":true, "data-fbchip":props.k, "aria-pressed":props.on ? "true" : "false", onClick:function(){ haptic(5); props.onClick(); },
+      style:{ borderRadius:"99px", padding:"0.32rem 0.7rem", cursor:"pointer", fontFamily:S.fontBody, fontWeight:700, fontSize:"0.8rem", whiteSpace:"nowrap",
+              border:"1.5px solid "+(props.on ? S.actionBdr : S.border), background:props.on ? S.infoBg : "none", color:props.on ? S.infoText : S.textDim } }, props.label);
+}
+function FbStaffPill(props){
+  var tone=(TT_FB_STATUS[props.status]||TT_FB_STATUS["new"])[1];
+  var col=props.status==="new" ? S.warnText : tone==="ok" ? S.successText : tone==="info" ? S.infoText : tone==="warn" ? S.warnText : S.textDim;
+  return React.createElement("span", { "data-fbstatus":props.status, style:{ fontSize:"0.68rem", fontWeight:800, borderRadius:"99px", padding:"0.12rem 0.5rem",
+      border:"1.5px solid "+col, color:col, whiteSpace:"nowrap", flexShrink:0 } }, ttFbStaffWords(props.status, props.fixedIn));
+}
+// One message in a thread, as the team sees it: the sender, staff replies,
+// internal notes (yellow, never shown to the sender), and event lines.
+function ttFbStaffEvent(m, team){
+  var p=String(m.event||"").split(":"), k=p[0], v=p[1]||"";
+  if(k==="status") return "Marked "+ttFbStaffWords(v)+" · "+(m.who||"");
+  if(k==="assign"){ if(v==="none") return "Unassigned · "+(m.who||""); var t=(team||[]).filter(function(x){ return x.user_id===v; })[0]; return "Assigned to "+(t ? t.name : "a teammate")+" · "+(m.who||""); }
+  if(k==="faq") return m.body || "Added to the FAQ";
+  return "";
+}
+function FbStaffMsg(props){
+  var m=props.m;
+  if(m.event) return React.createElement("div", { "data-fbevent":m.event, style:{ textAlign:"center", fontSize:"0.72rem", color:S.textDim, margin:"0.25rem 0 0.5rem" } },
+    ttFbStaffEvent(m, props.team)+" · "+ttFbAgo(m.at));
+  var bg=m.internal ? S.warnBg : m.by_staff ? S.infoBg : S.bg1, bd=m.internal ? S.warnText : m.by_staff ? S.actionBdr : S.border;
+  return React.createElement("div", { "data-fbmsgrow":m.internal ? "note" : m.by_staff ? "staff" : "sender",
+      style:{ border:"1px solid "+bd, background:bg, borderRadius:S.radius, padding:"0.5rem 0.65rem", marginBottom:"0.4rem" } },
+    React.createElement("div", { style:{ fontSize:"0.7rem", color:m.internal ? S.warnText : S.textDim, fontWeight:700, marginBottom:"0.12rem" } },
+      (m.who||"")+(m.internal ? " · internal note" : "")+" · "+ttFbAgo(m.at)),
+    React.createElement("div", { style:{ fontSize:"0.86rem", color:S.text, lineHeight:1.45, whiteSpace:"pre-wrap", overflowWrap:"anywhere" } }, m.body));
+}
+// The opening message of an item, drawn like a message from the sender.
+function ttFbOpening(it){ return { id:"o", by_staff:false, internal:false, who:it.reporter||"Sender", body:it.body, at:it.created_at }; }
+function ttFbLastReply(th){
+  var r=(th && th.messages||[]).filter(function(m){ return m.by_staff && !m.internal && !m.event; });
+  return r.length ? r[r.length-1].body : "";
+}
+
+function StaffInboxModal(props){
+  var demo=props.demo||null;
+  var view0=demo && demo.view || (function(){ try{ return ttDb.getRaw(TT_FB_VIEW)==="blog" ? "blog" : "mail"; }catch(e){ return "mail"; } })();
+  var viewS=useState(view0); var view=viewS[0], setViewS=viewS[1];
+  var listS=useState(demo ? demo.list : null); var list=listS[0], setList=listS[1];
+  var stS=useState(demo && demo.status || "all"); var status=stS[0], setStatus=stS[1];
+  var whoS=useState("all"); var who=whoS[0], setWho=whoS[1];
+  var qS=useState(""); var q=qS[0], setQ=qS[1];
+  var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
+  var openS=useState(null); var open=openS[0], setOpen=openS[1];
+  var pageS=useState(null); var page=pageS[0], setPage=pageS[1];
+  var thS=useState(demo && demo.threads || {}); var threads=thS[0], setThreads=thS[1];
+  var focusS=useState(null); var focus=focusS[0], setFocus=focusS[1];
+  var fromMailS=useState(null); var fromMail=fromMailS[0], setFromMail=fromMailS[1];
+  var moreS=useState(TT_FB_BLOG_MAX); var more=moreS[0], setMore=moreS[1];
+  var teamS=useState(demo && demo.team || []); var team=teamS[0], setTeam=teamS[1];
+  var role=demo ? (demo.role||"owner") : (ttFeedback.status().staff||"helper");
+  var box=useRef(null);
+  function panel(){ var el=box.current; return el && el.closest ? el.closest("[data-modal-panel]") : null; }
+  function setView(v){ setViewS(v); if(!demo){ try{ ttDb.setRaw(TT_FB_VIEW, v); }catch(e){} } }
+  function load(){
+    if(demo) return;
+    ttFeedback.inbox({ who:who, text:q||undefined }).then(function(r){
+      if(r.ok){ setList(r.data||[]); setMsg(""); } else { setMsg(r.msg); if(!list) setList([]); }
+    });
+    ttFeedback.refresh(true);
+  }
+  useEffect(function(){ if(demo) return; var t=setTimeout(load, q ? 400 : 0); return function(){ clearTimeout(t); }; }, [who, q]);
+  useEffect(function(){ if(!demo) ttFeedback.team().then(function(r){ if(r.ok) setTeam(r.data||[]); }); }, []);
+  var shown=ttFbFilter(list, status, "");
+  var counts=ttFbCounts(list);
+  function loadThread(id){
+    if(demo) return Promise.resolve();
+    return ttFeedback.thread(id).then(function(r){ if(r.ok) setThreads(function(o){ var n=Object.assign({}, o); n[id]=r.data; return n; }); });
+  }
+  // Blog draws whole threads: fetch the ones on screen that aren't loaded yet.
+  useEffect(function(){
+    if(demo || view!=="blog" || !list) return;
+    shown.slice(0, more).forEach(function(it){ if(!threads[it.id]) loadThread(it.id); });
+  }, [view, list, status, more]);
+  // Reply in Mail: jump to that thread in Blog, box ready; remember the spot.
+  function replyFromMail(id){
+    var p=panel(); setFromMail({ top:p ? p.scrollTop : 0 }); setFocus(id); setView("blog");
+    var idx=shown.findIndex(function(x){ return x.id===id; }); if(idx>=more) setMore(idx+1);
+  }
+  useEffect(function(){
+    if(view!=="blog" || !focus) return;
+    var t=setTimeout(function(){
+      var el=box.current && box.current.querySelector('[data-fbpost="'+focus+'"]');
+      if(el && el.scrollIntoView){ el.scrollIntoView({ block:"start" }); var ta=el.querySelector("textarea"); if(ta) try{ ta.focus({ preventScroll:true }); }catch(e){} }
+    }, 260);
+    return function(){ clearTimeout(t); };
+  }, [view, focus, threads[focus]]);
+  function backToMail(){
+    var top=fromMail ? fromMail.top : 0; setFocus(null); setFromMail(null); setView("mail");
+    setTimeout(function(){ var p=panel(); if(p) p.scrollTop=top; }, 60);
+  }
+  function quick(it, st){
+    if(demo) return;
+    haptic(8);
+    ttFeedback.update(it.id, { status:st }).then(function(r){ if(!r.ok) setMsg(r.msg); load(); if(threads[it.id]) loadThread(it.id); });
+  }
+  var here=(props.trail||[]).concat([{ label:"Feedback inbox", back:true, go:function(){ setOpen(null); setPage(null); load(); } }]);
+  var toggle=React.createElement("div", { style:{ width:"9.6rem", flexShrink:0 }, "data-fbview":view },
+    React.createElement(Toggle, { name:"inboxview", keys:["mail","blog"], value:view, onChange:function(v){ if(v==="mail") backToMail(); else setView(v); },
+      labelOf:function(k){ return k==="mail" ? "Mail" : "Blog"; } }));
+  var chipRow=React.createElement("div", { "data-anchor":"inbox-chips", style:{ display:"flex", gap:"0.35rem", overflowX:"auto", paddingBottom:"0.15rem", marginBottom:"0.55rem" } },
+    [["all","All"]].concat(TT_FB_STATUSES.map(function(s){ return [s, TT_FB_STAFF_WORDS[s]]; })).map(function(c){
+      var n=counts[c[0]]||0;
+      return React.createElement(FbChip, { key:c[0], k:c[0], on:status===c[0], label:c[1]+(c[0]!=="all" && n ? " · "+n : ""), onClick:function(){ setStatus(c[0]); } });
+    }));
+  var whoRow=React.createElement("div", { style:{ display:"flex", gap:"0.35rem", marginBottom:"0.7rem" } },
+    [["all", role==="owner" ? "Everyone’s" : "All mine"],["me","Assigned to me"],["none","Unassigned"]].filter(function(w){ return role==="owner" || w[0]!=="none"; }).map(function(w){
+      return React.createElement(FbChip, { key:w[0], k:"who-"+w[0], on:who===w[0], label:w[1], onClick:function(){ setWho(w[0]); } });
+    }));
+  var mailCard=function(it){
+    var meta=ttFbKindWord(it.kind)+" · "+(it.reporter||"")+" · "+ttFbAgo(it.last_at||it.created_at)+(it.replies ? " · "+it.replies+(it.replies===1 ? " reply" : " replies") : "")+" · "+(it.assignee_name||"unassigned");
+    return React.createElement("div", { key:it.id, "data-fbinboxitem":it.id, "data-fbunread":it.unread ? "1" : undefined,
+        style:{ border:(it.unread ? "2px solid "+S.actionBdr : "1px solid "+S.border), background:S.bg1, borderRadius:S.radius, padding:"0.6rem 0.65rem", marginBottom:"0.5rem" } },
+      React.createElement("button", { "data-flat":true, "data-fbopenitem":it.id, onClick:function(){ haptic(6); setOpen(it.id); },
+          style:{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", padding:0, cursor:"pointer", fontFamily:S.fontBody, color:S.text } },
+        React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.45rem" } },
+          it.unread && React.createElement("span", { style:{ width:"0.5rem", height:"0.5rem", borderRadius:"50%", background:S.infoText, flexShrink:0 } }),
+          React.createElement("span", { style:{ fontWeight:700, fontSize:"0.9rem", minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", flex:1 } }, ttFbTitle(it.body)),
+          React.createElement(FbStaffPill, { status:it.status, fixedIn:it.fixed_in })),
+        React.createElement("div", { style:{ fontSize:"0.72rem", color:S.textDim, marginTop:"0.2rem", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" } }, meta)),
+      React.createElement("div", { style:{ display:"flex", gap:"0.35rem", marginTop:"0.5rem" } },
+        React.createElement("button", { "data-flat":true, "data-fbquick":"reply", onClick:function(){ haptic(6); replyFromMail(it.id); }, style:fbBtn(true, { flex:1, padding:"0.35rem 0.2rem", fontSize:"0.78rem" }) }, "Reply"),
+        [["planned","Planned"],["fixed","Fixed"],["closed","Close"]].map(function(a){
+          var on=it.status===a[0];
+          return React.createElement("button", { key:a[0], "data-flat":true, "data-fbquick":a[0], disabled:on, onClick:function(){ quick(it, a[0]); },
+            style:fbBtn(false, { flex:1, padding:"0.35rem 0.2rem", fontSize:"0.78rem", opacity:on ? 0.45 : 1, cursor:on ? "default" : "pointer" }) }, a[1]);
+        })));
+  };
+  var blogPost=function(it){ return React.createElement(FbBlogPost, { key:it.id, it:it, th:threads[it.id], team:team, focus:focus===it.id, demo:demo,
+    onOpen:function(){ setOpen(it.id); }, onSent:function(){ loadThread(it.id); load(); } }); };
+  var body;
+  if(list===null) body=aboutP("Loading…");
+  else if(!shown.length) body=aboutP(list.length ? "Nothing here with these filters." : "No feedback yet. When someone sends some, it lands here.", null, { "data-fbinboxempty":true });
+  else if(view==="mail") body=shown.map(mailCard);
+  else body=[ fromMail && React.createElement("button", { key:"back", "data-flat":true, "data-fbbacktomail":true, onClick:function(){ haptic(6); backToMail(); },
+        style:fbBtn(false, { marginBottom:"0.6rem", color:S.infoText, borderColor:S.actionBdr }) }, "‹ Back to Mail") ]
+    .concat(shown.slice(0, more).map(blogPost))
+    .concat(shown.length>more ? [React.createElement("button", { key:"more", "data-flat":true, "data-fbmore":true, onClick:function(){ setMore(more+TT_FB_BLOG_MAX); }, style:fbBtn(false, { width:"100%" }) },
+      "Show "+Math.min(TT_FB_BLOG_MAX, shown.length-more)+" more")] : []);
+  return React.createElement(Modal, { title:"Feedback inbox", titleAside:toggle, onClose:props.onClose, cancelLabel:"Close", trail:props.trail },
+    React.createElement("div", { ref:box, "data-fbinbox":view, "data-fbinboxcount":shown.length },
+      React.createElement("input", { "data-fbsearch":true, value:q, placeholder:"Search feedback", onChange:function(e){ setQ(e.target.value); },
+        style:Object.assign({}, INPUT_STYLE, { marginBottom:"0.55rem" }) }),
+      chipRow, whoRow,
+      React.createElement("div", { style:{ display:"flex", gap:"0.4rem", marginBottom:"0.7rem" } },
+        React.createElement("button", { "data-flat":true, "data-fbfaq":true, onClick:function(){ haptic(6); setPage("faq"); }, style:fbBtn(false, { flex:1 }) }, "FAQ"),
+        React.createElement("button", { "data-flat":true, "data-fbteam":true, onClick:function(){ haptic(6); setPage("team"); }, style:fbBtn(false, { flex:1 }) }, "Team")),
+      body,
+      // under the list, so a message never pushes the items down
+      msg ? React.createElement(FbNote, { text:msg }) : null),
+    !demo && open && React.createElement(StaffItemModal, { id:open, team:team, role:role, trail:here, onClose:function(){ setOpen(null); load(); if(threads[open]) loadThread(open); } }),
+    !demo && page==="team" && React.createElement(StaffTeamModal, { role:role, trail:here, onClose:function(){ setPage(null); ttFeedback.team().then(function(r){ if(r.ok) setTeam(r.data||[]); }); load(); } }),
+    !demo && page==="faq" && React.createElement(StaffFaqModal, { role:role, trail:here, onClose:function(){ setPage(null); } }));
+}
+// One post in Blog: the whole conversation and a reply box.
+function FbBlogPost(props){
+  var it=props.it, th=props.th;
+  var textS=useState(""); var text=textS[0], setText=textS[1];
+  var busyS=useState(false); var busy=busyS[0], setBusy=busyS[1];
+  var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
+  function send(internal){
+    if(busy || props.demo) return;
+    if(!text.trim()){ setMsg(internal ? "Write the note first." : "Write your reply first."); return; }
+    setBusy(true); setMsg("");
+    ttFeedback.reply(it.id, text, internal).then(function(r){ setBusy(false); if(!r.ok){ setMsg(r.msg); return; } haptic(10); setText(""); props.onSent(); });
+  }
+  var msgs=[ttFbOpening(it)].concat(th ? th.messages||[] : []);
+  return React.createElement("div", { "data-fbpost":it.id, "data-fbfocus":props.focus ? "1" : undefined,
+      style:{ border:(props.focus ? "2px solid "+S.actionBdr : "1px solid "+S.border), background:S.bg1, borderRadius:S.radius, padding:"0.65rem", marginBottom:"0.7rem", scrollMarginTop:"8rem" } },
+    React.createElement("button", { "data-flat":true, "data-fbopenitem":it.id, onClick:function(){ haptic(6); props.onOpen(); },
+        style:{ display:"flex", alignItems:"center", gap:"0.45rem", width:"100%", textAlign:"left", background:"none", border:"none", padding:0, cursor:"pointer", fontFamily:S.fontBody } },
+      it.unread && React.createElement("span", { style:{ width:"0.5rem", height:"0.5rem", borderRadius:"50%", background:S.infoText, flexShrink:0 } }),
+      React.createElement("span", { style:{ fontWeight:800, fontSize:"0.95rem", color:S.text, flex:1, minWidth:0 } }, ttFbTitle(it.body)),
+      React.createElement(FbStaffPill, { status:it.status, fixedIn:it.fixed_in }),
+      React.createElement("span", { style:{ color:S.textDim, fontWeight:700 } }, "›")),
+    React.createElement("div", { style:{ fontSize:"0.72rem", color:S.textDim, margin:"0.2rem 0 0.55rem" } },
+      ttFbKindWord(it.kind)+" · "+(it.reporter||"")+" · "+ttFbAgo(it.created_at)+" · "+(it.assignee_name||"unassigned")),
+    msgs.map(function(m){ return React.createElement(FbStaffMsg, { key:m.id, m:m, team:props.team }); }),
+    !th && !props.demo && aboutP("Loading the conversation…", { fontSize:"0.8rem" }),
+    React.createElement("textarea", { "data-fbpostreply":it.id, value:text, maxLength:TT_FB_MAX, placeholder:"Write a reply…",
+      onChange:function(e){ setText(e.target.value); if(msg) setMsg(""); },
+      style:Object.assign({}, INPUT_STYLE, { minHeight:"3.6rem", resize:"vertical", lineHeight:1.4, marginTop:"0.2rem" }) }),
+    React.createElement("div", { style:{ display:"flex", gap:"0.4rem", marginTop:"0.4rem" } },
+      React.createElement("button", { "data-flat":true, "data-fbpostsend":"reply", onClick:function(){ send(false); }, style:fbBtn(true, { flex:2 }) }, busy ? "Sending…" : "Reply"),
+      React.createElement("button", { "data-flat":true, "data-fbpostsend":"note", onClick:function(){ send(true); }, style:fbBtn(false, { flex:1 }) }, "Internal note")),
+    msg ? React.createElement(FbNote, { text:msg }) : null);
+}
+
+// One item, as the team sees it (T1): who sent it and the details, the four
+// controls, the thread with internal notes, Reply / Internal note, Add to FAQ,
+// and (owners) hold to delete.
+function StaffItemModal(props){
+  var demo=props.demo||null;
+  var thS=useState(demo ? demo.thread : null); var th=thS[0], setTh=thS[1];
+  var textS=useState(""); var text=textS[0], setText=textS[1];
+  var modeS=useState("reply"); var mode=modeS[0], setMode=modeS[1];
+  var busyS=useState(false); var busy=busyS[0], setBusy=busyS[1];
+  var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
+  var fixS=useState(null); var fix=fixS[0], setFix=fixS[1];
+  var faqS=useState(false); var faq=faqS[0], setFaq=faqS[1];
+  var owner=(props.role||"helper")==="owner";
+  function load(){ if(demo) return; ttFeedback.thread(props.id).then(function(r){ if(r.ok){ setTh(r.data); setFix(null); } else setMsg(r.msg); }); }
+  useEffect(function(){ load(); }, [props.id]);
+  function change(ch){
+    if(demo) return;
+    ttFeedback.update(props.id, ch).then(function(r){ if(!r.ok) setMsg(r.msg); load(); });
+  }
+  function send(){
+    if(busy || demo || !th) return;
+    if(!text.trim()){ setMsg(mode==="note" ? "Write the note first." : "Write your reply first."); return; }
+    setBusy(true); setMsg("");
+    ttFeedback.reply(props.id, text, mode==="note").then(function(r){ setBusy(false); if(!r.ok){ setMsg(r.msg); return; } haptic(10); setText(""); load(); });
+  }
+  var it=th && th.item;
+  var sel=function(name, value, opts, onChange, disabled){
+    return React.createElement("select", { "data-fbset":name, value:value, disabled:!!disabled, onChange:function(e){ onChange(e.target.value); },
+      style:Object.assign({}, INPUT_STYLE, { padding:"0.45rem 0.5rem", opacity:disabled ? 0.6 : 1 }) },
+      opts.map(function(o){ return React.createElement("option", { key:o[0], value:o[0] }, o[1]); }));
+  };
+  var cell=function(label, el){ return React.createElement("div", { style:{ minWidth:0 } },
+    React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { marginBottom:"0.2rem", fontSize:"0.66rem" }) }, label), el); };
+  var app=it && it.app;
+  return React.createElement(Modal, { title:it ? ttFbTitle(it.body) : "Feedback", onClose:props.onClose, cancelLabel:"Close", trail:props.trail, trailHere:"Item",
+      onSave:th ? send : undefined, saveLabel:busy ? "Sending…" : (mode==="note" ? "Add note" : "Reply"), saveAnchor:"fb-staffsend" },
+    !it ? aboutP(msg ? "" : "Loading…") : React.createElement("div", { "data-fbitem":it.id },
+      React.createElement("div", { style:{ fontSize:"0.78rem", color:S.textDim, margin:"-0.4rem 0 0.2rem" } },
+        ttFbKindWord(it.kind)+" · "+(it.reporter||"")+" · "+ttFbWhen(it.created_at, true)),
+      React.createElement("div", { "data-fbitemapp":app ? true : undefined, style:{ fontSize:"0.74rem", color:S.textDim, marginBottom:"0.7rem", minHeight:"1.1em" } },
+        app ? ["Version "+(app.version||"?"), app.device, app.os, app.theme && (app.theme+" "+(app.mode||"")), app.sync && ("sync "+app.sync)].filter(Boolean).join(", ") : "No app details sent."),
+      React.createElement("div", { "data-anchor":"fb-controls", style:{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"0.5rem", marginBottom:"0.8rem" } },
+        cell("Status", sel("status", it.status, TT_FB_STATUSES.map(function(s){ return [s, TT_FB_STAFF_WORDS[s]]; }), function(v){ change({ status:v }); })),
+        cell("Fixed in", React.createElement("input", { "data-fbset":"fixed_in", value:fix!=null ? fix : (it.fixed_in||""), placeholder:"e.g. "+APP_VERSION,
+          onChange:function(e){ setFix(e.target.value); },
+          onBlur:function(){ if(fix!=null && fix!==(it.fixed_in||"")) change({ fixed_in:fix }); },
+          onKeyDown:function(e){ if(e.key==="Enter"){ e.target.blur(); } },
+          style:Object.assign({}, INPUT_STYLE, { padding:"0.45rem 0.5rem" }) })),
+        cell("Priority", sel("priority", it.priority||"normal", TT_FB_PRIORITY, function(v){ change({ priority:v }); })),
+        cell("Assigned to", sel("assignee", it.assignee||"", [["", "Nobody"]].concat((props.team||[]).map(function(t){ return [t.user_id, t.name+(t.me ? " (you)" : "")]; })),
+          function(v){ change({ assignee:v||null }); }, !owner))),
+      React.createElement("div", { "data-fbthread":(th.messages||[]).length, "data-anchor":"fb-staffthread" },
+        [ttFbOpening(it)].concat(th.messages||[]).map(function(m){ return React.createElement(FbStaffMsg, { key:m.id, m:m, team:props.team }); })),
+      React.createElement("button", { "data-flat":true, "data-fbaddfaq":true, onClick:function(){ haptic(6); setFaq(true); }, style:fbBtn(true, { width:"100%", margin:"0.4rem 0 0.7rem" }) }, "＋ Add to FAQ"),
+      React.createElement("div", { style:{ display:"flex", gap:"0.35rem", marginBottom:"0.4rem" } },
+        [["reply","Reply"],["note","Internal note"]].map(function(x){
+          return React.createElement(FbChip, { key:x[0], k:"mode-"+x[0], on:mode===x[0], label:x[1], onClick:function(){ setMode(x[0]); } }); })),
+      React.createElement("textarea", { "data-fbstaffreply":true, value:text, maxLength:TT_FB_MAX,
+        placeholder:mode==="note" ? "A note for the team (the sender never sees it)" : "Write a reply (the sender will see this)",
+        onChange:function(e){ setText(e.target.value); if(msg) setMsg(""); },
+        style:Object.assign({}, INPUT_STYLE, { minHeight:"4.5rem", resize:"vertical", lineHeight:1.4,
+          borderColor:mode==="note" ? S.warnText : undefined }) }),
+      React.createElement(FbNote, { text:msg }),
+      owner && React.createElement(HoldButton, { attrs:{ "data-holddelete":"fbitem" }, fill:S.dangerBg||S.warnBg,
+          onHold:function(){ if(demo) return; ttFeedback.remove(props.id).then(function(r){ if(r.ok) props.onClose(); else setMsg(r.msg); }); },
+          style:{ width:"100%", background:"none", border:"1.5px solid "+S.dangerText, borderRadius:S.radius, padding:"0.6rem", color:S.dangerText,
+                  fontFamily:S.fontBody, fontWeight:700, fontSize:"0.88rem", marginTop:"0.3rem" } }, "Hold to delete this item")),
+    !demo && faq && it && React.createElement(FaqEditModal, { role:props.role,
+      init:{ question:ttFbTitle(it.body).replace(/…$/,""), answer:ttFbLastReply(th), source:it.id, notify:true, published:owner },
+      trail:(props.trail||[]).concat([{ label:"Item", back:true, go:function(){ setFaq(false); } }]),
+      onClose:function(){ setFaq(false); load(); } }));
+}
+
+// The team (T2): owners and helpers; an owner adds a helper by the email they
+// sign in with, and removes one with a hold.
+function StaffTeamModal(props){
+  var listS=useState(props.demo ? props.demo.team : null); var list=listS[0], setList=listS[1];
+  var emS=useState(""); var em=emS[0], setEm=emS[1];
+  var nmS=useState(""); var nm=nmS[0], setNm=nmS[1];
+  var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
+  var owner=props.role==="owner";
+  useEffect(function(){ if(!props.demo) ttFeedback.team().then(function(r){ if(r.ok) setList(r.data||[]); else setMsg(r.msg); }); }, []);
+  function add(){
+    if(props.demo) return;
+    if(!ttCloud.goodEmail(em)){ setMsg("Type the email they sign in with."); return; }
+    ttFeedback.teamSet(em.trim(), "helper", nm.trim()||null).then(function(r){ if(r.ok){ setList(r.data||[]); setEm(""); setNm(""); setMsg(""); haptic(10); } else setMsg(r.msg); });
+  }
+  function remove(t){ if(props.demo) return; ttFeedback.teamSet(t.email, null).then(function(r){ if(r.ok) setList(r.data||[]); else setMsg(r.msg); }); }
+  return React.createElement(Modal, { title:"Team", onClose:props.onClose, cancelLabel:"Done", trail:props.trail },
+    aboutP(owner ? "Owners see everything and assign. Helpers see only what is assigned to them." : "Only an owner changes the team."),
+    React.createElement("div", { "data-fbteamlist":list ? list.length : "loading" },
+      (list||[]).map(function(t){
+        return React.createElement("div", { key:t.user_id, "data-fbteamrow":t.role, style:{ display:"flex", alignItems:"center", gap:"0.6rem", padding:"0.6rem 0.1rem", borderBottom:"1px solid "+S.border } },
+          React.createElement("div", { style:{ minWidth:0, flex:1 } },
+            React.createElement("div", { style:{ fontWeight:700, color:S.text } }, t.name+(t.me ? " (you)" : "")),
+            React.createElement("div", { style:{ fontSize:"0.76rem", color:S.textDim, overflow:"hidden", textOverflow:"ellipsis" } }, t.email)),
+          React.createElement("span", { style:{ fontSize:"0.7rem", fontWeight:800, color:t.role==="owner" ? S.successText : S.infoText } }, t.role==="owner" ? "Owner" : "Helper"),
+          owner && t.role==="helper" && React.createElement(HoldButton, { attrs:{ "data-holddelete":"helper" }, fill:S.dangerBg||S.warnBg, onHold:function(){ remove(t); },
+            style:{ background:"none", border:"1.5px solid "+S.dangerText, borderRadius:S.radius, padding:"0.3rem 0.55rem", color:S.dangerText, fontFamily:S.fontBody, fontWeight:700, fontSize:"0.75rem" } }, "Hold to remove"));
+      })),
+    owner && React.createElement("div", { "data-anchor":"fb-teamadd", style:{ marginTop:"0.9rem" } },
+      React.createElement("div", { style:LABEL_STYLE }, "Add a helper"),
+      React.createElement("input", { "data-fbteamemail":true, value:em, placeholder:"The email they sign in with", type:"email", autoCapitalize:"none",
+        onChange:function(e){ setEm(e.target.value); if(msg) setMsg(""); }, style:Object.assign({}, INPUT_STYLE, { marginBottom:"0.4rem" }) }),
+      React.createElement("input", { "data-fbteamname":true, value:nm, placeholder:"Name to show (optional)", onChange:function(e){ setNm(e.target.value); },
+        style:Object.assign({}, INPUT_STYLE, { marginBottom:"0.5rem" }) }),
+      React.createElement("button", { "data-flat":true, "data-fbteamaddbtn":true, onClick:add, style:fbBtn(true, { width:"100%" }) }, "Add helper"),
+      aboutP("They need to have signed in once before they can be added.", { margin:"0.5rem 0 0", fontSize:"0.8rem" })),
+    React.createElement(FbNote, { text:msg }));
+}
+
+// ---- FAQ (11-18) -------------------------------------------------------------
+// Brent (11-18): layout D - questions by topic, tap to open, "Did this help?
+// Yes / No" under each answer, "Still stuck? Send feedback" at the foot - plus
+// F: matching answers shown on Send feedback as someone types. Filled from
+// the inbox (Add to FAQ on any item; Claude's suggestions, option 1: Claude
+// reads the inbox when asked, in the Time Tracker project, and adds them).
+// Anyone reads it, signed in or not; the last copy is kept on the device
+// (ttfaq_cache - not tt_: never backed up or synced) so it works offline and
+// the manual's search can find it.
+var TT_FAQ_CACHE = "ttfaq_cache";
+var TT_FAQ_VOTES = "ttfaq_votes";       // signed out: a thank-you only, kept on this device
+var TT_FAQ_FRESH_MS = 30*60000;         // ask the server again at most this often
+var TT_FAQ_STOP = ("a an and are as at be but by can do does for from get got have how i if in into is it its me my no not of on or so "+
+                   "that the then there this to too up was what when where which who why will with you your").split(" ");
+// Words worth matching on: lower case, letters and digits, three or more long, no filler.
+function ttFaqWords(t){
+  var seen={};
+  return String(t||"").toLowerCase().replace(/[^a-z0-9\s]/g," ").split(/\s+/).filter(function(w){
+    if(w.length<3 || TT_FAQ_STOP.indexOf(w)>=0 || seen[w]) return false; seen[w]=1; return true; });
+}
+// The answers that look like they fit what someone is typing: at least two
+// shared words, one of them in the question. Best two. Pure: tested.
+function ttFaqMatch(text, list, max){
+  var words=ttFaqWords(text); if(words.length<2) return [];
+  return (list||[]).map(function(f){
+    var q=" "+ttFaqWords(f.question).join(" ")+" ", a=" "+ttFaqWords(f.answer).join(" ")+" ", hitQ=0, hit=0;
+    words.forEach(function(w){
+      var stem=w.length>4 ? w.replace(/(ing|ed|es|s)$/,"") : w;
+      var inQ=q.indexOf(" "+stem)>=0, inA=a.indexOf(" "+stem)>=0;
+      if(inQ) hitQ++; if(inQ || inA) hit++;
+    });
+    return { f:f, score:hitQ*2+hit, hit:hit, hitQ:hitQ };
+  }).filter(function(r){ return r.hit>=2 && r.hitQ>=1; })
+    .sort(function(x,y){ return y.score-x.score; }).slice(0, max||2).map(function(r){ return r.f; });
+}
+function ttFaqTopics(list){
+  var out=[]; (list||[]).forEach(function(f){ if(out.indexOf(f.topic)<0) out.push(f.topic); }); return out;
+}
+function ttFaqGuideTitle(id){ try{ var g=helpAll().guides[id]; return g ? g.title : ""; }catch(e){ return ""; } }
+
+// Signed out, FAQ reads go as the public (anon) role: the one call that may.
+function ttFaqClient(fb, cloud){
+  var mem=null;
+  function cached(){ if(mem) return mem; try{ var c=JSON.parse(ttDb.getRaw(TT_FAQ_CACHE)||"null"); if(c && Array.isArray(c.list)) return (mem=c); }catch(e){} return { at:0, list:[] }; }
+  function keep(list){ mem={ at:Date.now(), list:list }; try{ ttDb.setRaw(TT_FAQ_CACHE, JSON.stringify(mem)); }catch(e){} }
+  var inflight=null, subs=[];
+  return {
+    cached:function(){ return cached().list; },
+    subscribe:function(fn){ subs.push(fn); return function(){ subs=subs.filter(function(x){ return x!==fn; }); }; },
+    load:function(force, maxAge){
+      var c=cached();
+      if(!force && c.at && Date.now()-c.at < (maxAge||TT_FAQ_FRESH_MS)) return Promise.resolve({ ok:true, list:c.list, cached:true });
+      if(inflight) return inflight;
+      var go=cloud.get().phase==="in" ? cloud.request("POST", "/rest/v1/rpc/faq_list", {}) : cloud.publicRequest("POST", "/rest/v1/rpc/faq_list", {});
+      inflight=go.then(function(r){
+        inflight=null;
+        if(r.status>=200 && r.status<300 && Array.isArray(r.body)){ keep(r.body); subs.slice().forEach(function(fn){ try{ fn(r.body); }catch(e){} }); return { ok:true, list:r.body }; }
+        return { ok:false, list:c.list, cached:true, offline:r.status===0 };
+      }, function(){ inflight=null; return { ok:false, list:c.list, cached:true, offline:true }; });
+      return inflight;
+    },
+    // Signed in: sent to the server. Signed out: remembered here only.
+    vote:function(id, helpful){
+      if(cloud.get().phase!=="in"){
+        try{ var v=JSON.parse(ttDb.getRaw(TT_FAQ_VOTES)||"{}")||{}; if(helpful==null) delete v[id]; else v[id]=helpful; ttDb.setRaw(TT_FAQ_VOTES, JSON.stringify(v)); }catch(e){}
+        return Promise.resolve({ ok:true, local:true });
+      }
+      return fb.rpcRaw("faq_vote", { id:id, helpful:helpful });
+    },
+    localVotes:function(){ try{ return JSON.parse(ttDb.getRaw(TT_FAQ_VOTES)||"{}")||{}; }catch(e){ return {}; } },
+    all:function(){ return fb.rpcRaw("faq_all"); },
+    save:function(id, e){ return fb.rpcRaw("faq_save", { id:id||null, e:e }).then(function(r){ if(r.ok) ttFeedback.faq.load(true); return r; }); },
+    remove:function(id){ return fb.rpcRaw("faq_delete", { id:id }).then(function(r){ if(r.ok) ttFeedback.faq.load(true); return r; }); },
+    suggestions:function(){ return fb.rpcRaw("faq_suggestions"); },
+    dismiss:function(id){ return fb.rpcRaw("faq_suggestion_set", { id:id, status:"dismissed" }); }
+  };
+}
+
+// ---- What people see: User Manual > FAQ (layout D) ----
+function FaqModal(props){
+  var demo=props.demo||null;
+  var listS=useState(demo ? demo.list : ttFeedback.faq.cached()); var list=listS[0], setList=listS[1];
+  var stateS=useState(demo ? "ok" : (ttFeedback.faq.cached().length ? "ok" : "loading")); var state=stateS[0], setState=stateS[1];
+  var openS=useState(props.openId || (demo && demo.open) || null); var open=openS[0], setOpen=openS[1];
+  var qS=useState(""); var q=qS[0], setQ=qS[1];
+  var votesS=useState(function(){ var v={}; (list||[]).forEach(function(f){ if(f.my!=null) v[f.id]=f.my; }); return Object.assign(v, demo ? (demo.votes||{}) : ttFeedback.faq.localVotes()); });
+  var votes=votesS[0], setVotes=votesS[1];
+  var pageS=useState(null); var page=pageS[0], setPage=pageS[1];
+  var askS=useState(""); var ask=askS[0], setAsk=askS[1];
+  var box=useRef(null);
+  useEffect(function(){
+    if(demo) return;
+    ttFeedback.faq.load(false).then(function(r){
+      setList(r.list||[]); setState(r.list && r.list.length ? "ok" : (r.ok ? "empty" : "offline"));
+      setVotes(function(o){ var v=Object.assign({}, o); (r.list||[]).forEach(function(f){ if(f.my!=null) v[f.id]=f.my; }); return v; });
+    });
+  }, []);
+  useEffect(function(){
+    if(!props.openId) return;
+    var t=setTimeout(function(){ var el=box.current && box.current.querySelector('[data-faqq="'+props.openId+'"]'); if(el && el.scrollIntoView) el.scrollIntoView({ block:"center" }); }, 300);
+    return function(){ clearTimeout(t); };
+  }, []);
+  function vote(f, yes){
+    var cur=votes[f.id], next=cur===yes ? null : yes;
+    haptic(6); setVotes(function(o){ var v=Object.assign({}, o); if(next==null) delete v[f.id]; else v[f.id]=next; return v; });
+    if(!demo) ttFeedback.faq.vote(f.id, next);
+  }
+  var words=String(q||"").toLowerCase().split(/\s+/).filter(Boolean);
+  var shown=(list||[]).filter(function(f){ var h=(f.question+" "+f.answer+" "+f.topic).toLowerCase(); return words.every(function(w){ return h.indexOf(w)>=0; }); });
+  var topics=ttFaqTopics(shown);
+  var here=(props.trail||[]).concat([{ label:"FAQ", back:true, go:function(){ setPage(null); } }]);
+  var row=function(f){
+    var on=open===f.id, v=votes[f.id], gt=f.guide ? ttFaqGuideTitle(f.guide) : "";
+    return React.createElement("div", { key:f.id, "data-faqq":f.id, "data-faqopen":on ? "1" : undefined, style:{ borderBottom:"1px solid "+S.border } },
+      React.createElement("button", { "data-flat":true, "data-faqtoggle":f.id, "aria-expanded":on ? "true" : "false", onClick:function(){ haptic(5); setOpen(on ? null : f.id); },
+          style:{ display:"flex", alignItems:"flex-start", gap:"0.6rem", width:"100%", textAlign:"left", background:"none", border:"none", padding:"0.75rem 0.1rem", cursor:"pointer", fontFamily:S.fontBody } },
+        React.createElement("span", { style:{ flex:1, fontWeight:700, fontSize:"0.93rem", color:S.text, lineHeight:1.35 } }, f.question),
+        React.createElement("span", { style:{ color:S.textDim, fontWeight:700, width:"1rem", textAlign:"center" } }, on ? "–" : "+")),
+      on && React.createElement("div", { "data-faqanswer":f.id, style:{ padding:"0 0.1rem 0.8rem" } },
+        React.createElement("div", { style:{ fontSize:"0.88rem", color:S.text, lineHeight:1.5, whiteSpace:"pre-wrap", overflowWrap:"anywhere" } }, f.answer),
+        gt && React.createElement("button", { "data-flat":true, "data-faqguide":f.guide, onClick:function(){ haptic(6); if(props.onGuide) props.onGuide(f.guide); },
+            style:{ background:"none", border:"none", padding:"0.45rem 0 0", color:S.infoText, fontWeight:700, fontSize:"0.84rem", cursor:"pointer", fontFamily:S.fontBody, textAlign:"left" } }, "Show me how: "+gt+" ›"),
+        React.createElement("div", { "data-faqvote":v===true ? "yes" : v===false ? "no" : "none", style:{ display:"flex", alignItems:"center", gap:"0.45rem", marginTop:"0.55rem", fontSize:"0.8rem", color:S.textDim, minHeight:"2rem" } },
+          React.createElement("span", null, v==null ? "Did this help?" : v ? "Glad it helped." : "Sorry it didn’t."),
+          [[true,"Yes"],[false,"No"]].map(function(x){ var sel=v===x[0];
+            return React.createElement("button", { key:x[1], "data-flat":true, "data-faqvotebtn":x[1].toLowerCase(), "aria-pressed":sel ? "true" : "false", onClick:function(){ vote(f, x[0]); },
+              style:fbBtn(sel, { padding:"0.2rem 0.65rem", fontSize:"0.78rem" }) }, x[1]); }),
+          v===false && React.createElement("button", { "data-flat":true, "data-faqaskmore":f.id, onClick:function(){ haptic(6); setAsk(f.question); setPage("ask"); },
+            style:{ background:"none", border:"none", color:S.infoText, fontWeight:700, fontSize:"0.78rem", cursor:"pointer", fontFamily:S.fontBody, marginLeft:"auto" } }, "Tell us what’s missing ›"))));
+  };
+  var body;
+  if(state==="loading") body=aboutP("Loading…");
+  else if(!list.length) body=aboutP(state==="offline" ? "The questions load when you’re online. Once loaded they stay on this device." : "No questions yet. Ask one with Send feedback, and the answer may end up here.", null, { "data-faqempty":state });
+  else if(!shown.length) body=aboutP("Nothing matches. Try other words, or send the question.");
+  else body=topics.map(function(t){
+    return React.createElement("div", { key:t, "data-faqtopic":t },
+      React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { margin:"0.9rem 0 0.1rem" }) }, t),
+      shown.filter(function(f){ return f.topic===t; }).map(row));
+  });
+  return React.createElement(Modal, { title:"Questions people ask", onClose:props.onClose, cancelLabel:"Close", trail:props.trail, trailHere:"FAQ" },
+    React.createElement("div", { ref:box, "data-faq":list.length },
+      React.createElement("input", { "data-faqsearch":true, "data-anchor":"faq-search", value:q, placeholder:"Search questions", onChange:function(e){ setQ(e.target.value); },
+        style:INPUT_STYLE }),
+      React.createElement("div", { "data-anchor":"faq-list" }, body),
+      React.createElement("button", { "data-flat":true, "data-faqstuck":true, "data-anchor":"faq-stuck", onClick:function(){ haptic(6); setAsk(""); setPage("ask"); },
+        style:fbBtn(true, { width:"100%", marginTop:"1rem", padding:"0.7rem", fontSize:"0.95rem" }) }, "Still stuck? Send feedback")),
+    !demo && page==="ask" && React.createElement(FeedbackSendModal, { cloud:props.cloud||ttCloud.get(), settings:props.settings, trail:here,
+      prefill:{ kind:"question", text:ask }, onClose:function(){ setPage(null); }, onAccount:props.onAccount, onMine:function(){ setPage("mine"); } }),
+    !demo && page==="mine" && React.createElement(MyFeedbackModal, { cloud:props.cloud||ttCloud.get(), trail:here, onClose:function(){ setPage(null); }, onAccount:props.onAccount,
+      onSend:function(){ setPage("ask"); } }));
+}
+
+// F: "This might answer it", on Send feedback, under everything else so
+// nothing below it moves. Problems and questions only.
+function FaqHint(props){
+  var m=props.matches||[];
+  if(!m.length) return null;
+  return React.createElement("div", { "data-faqhint":m.length, style:{ border:"1px solid "+S.successBorder, background:S.successBg, borderRadius:S.radius, padding:"0.6rem 0.7rem", marginTop:"0.6rem" } },
+    React.createElement("div", { style:{ fontWeight:800, color:S.successText, fontSize:"0.85rem", marginBottom:"0.25rem" } }, m.length===1 ? "This might answer it" : "These might answer it"),
+    m.map(function(f){
+      return React.createElement("button", { key:f.id, "data-flat":true, "data-faqhintq":f.id, onClick:function(){ haptic(6); props.onRead(f.id); },
+          style:{ display:"flex", gap:"0.4rem", width:"100%", textAlign:"left", background:"none", border:"none", padding:"0.25rem 0", cursor:"pointer", fontFamily:S.fontBody } },
+        React.createElement("span", { style:{ flex:1, color:S.text, fontSize:"0.86rem" } }, f.question),
+        React.createElement("span", { style:{ color:S.infoText, fontWeight:700, fontSize:"0.82rem", whiteSpace:"nowrap" } }, "Read ›"));
+    }));
+}
+
+// ---- The team's side: the FAQ list, Claude's suggestions, the editor ----
+function StaffFaqModal(props){
+  var demo=props.demo||null;
+  var listS=useState(demo ? demo.list : null); var list=listS[0], setList=listS[1];
+  var sugS=useState(demo ? demo.suggestions : null); var sug=sugS[0], setSug=sugS[1];
+  var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
+  var editS=useState(null); var edit=editS[0], setEdit=editS[1];
+  function load(){
+    if(demo) return;
+    ttFeedback.faq.all().then(function(r){ if(r.ok) setList(r.data||[]); else { setMsg(r.msg); setList([]); } });
+    ttFeedback.faq.suggestions().then(function(r){ if(r.ok) setSug(r.data||[]); else setSug([]); });
+  }
+  useEffect(load, []);
+  var owner=props.role==="owner";
+  var here=(props.trail||[]).concat([{ label:"FAQ", back:true, go:function(){ setEdit(null); load(); } }]);
+  var sugCard=function(s){
+    return React.createElement("div", { key:s.id, "data-faqsug":s.id, style:{ border:"1.5px dashed "+S.actionBdr, borderRadius:S.radius, padding:"0.6rem 0.65rem", marginBottom:"0.55rem" } },
+      React.createElement("div", { style:{ fontWeight:700, color:S.text, fontSize:"0.9rem" } }, s.question),
+      React.createElement("div", { style:{ fontSize:"0.72rem", color:S.textDim, margin:"0.15rem 0 0.35rem" } },
+        "Asked in "+s.asked+(s.asked===1 ? " message" : " messages")+" · "+s.topic+(s.note ? " · "+s.note : "")),
+      React.createElement("div", { style:{ fontSize:"0.84rem", color:S.text, lineHeight:1.45, whiteSpace:"pre-wrap" } }, s.answer),
+      React.createElement("div", { style:{ display:"flex", gap:"0.35rem", marginTop:"0.5rem" } },
+        React.createElement("button", { "data-flat":true, "data-faqsugact":"accept", onClick:function(){ haptic(6); setEdit({ init:{ question:s.question, answer:s.answer, topic:s.topic, guide:s.guide, suggestion:s.id, published:owner } }); },
+          style:fbBtn(true, { flex:1, padding:"0.35rem" }) }, "Accept"),
+        React.createElement("button", { "data-flat":true, "data-faqsugact":"edit", onClick:function(){ haptic(6); setEdit({ init:{ question:s.question, answer:s.answer, topic:s.topic, guide:s.guide, suggestion:s.id, published:false } }); },
+          style:fbBtn(false, { flex:1, padding:"0.35rem" }) }, "Edit"),
+        React.createElement("button", { "data-flat":true, "data-faqsugact":"dismiss", onClick:function(){ if(demo) return; haptic(6); ttFeedback.faq.dismiss(s.id).then(function(r){ if(!r.ok) setMsg(r.msg); load(); }); },
+          style:fbBtn(false, { flex:1, padding:"0.35rem" }) }, "Dismiss")));
+  };
+  var entry=function(f){
+    return React.createElement("button", { key:f.id, "data-flat":true, "data-faqentry":f.id, "data-faqpub":f.published ? "1" : "0", onClick:function(){ haptic(6); setEdit({ id:f.id, init:f }); },
+        style:{ display:"block", width:"100%", textAlign:"left", background:S.bg1, border:"1px solid "+S.border, borderRadius:S.radius, padding:"0.55rem 0.65rem", marginBottom:"0.45rem", cursor:"pointer", fontFamily:S.fontBody } },
+      React.createElement("div", { style:{ display:"flex", gap:"0.45rem", alignItems:"center" } },
+        React.createElement("span", { style:{ flex:1, fontWeight:700, color:S.text, fontSize:"0.88rem" } }, f.question),
+        React.createElement("span", { style:{ fontSize:"0.66rem", fontWeight:800, borderRadius:"99px", padding:"0.1rem 0.45rem", border:"1.5px solid "+(f.published ? S.successText : S.textDim),
+          color:f.published ? S.successText : S.textDim } }, f.published ? "Published" : "Draft")),
+      React.createElement("div", { style:{ fontSize:"0.72rem", color:S.textDim, marginTop:"0.2rem" } },
+        f.topic+" · "+(f.yes||0)+" helped · "+(f.no||0)+" didn’t"));
+  };
+  return React.createElement(Modal, { title:"FAQ", onClose:props.onClose, cancelLabel:"Done", trail:props.trail },
+    React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { display:"flex", alignItems:"center", gap:"0.4rem" }) }, "Suggestions",
+      React.createElement("span", { style:{ fontSize:"0.66rem", fontWeight:800, color:S.infoText, border:"1.5px solid "+S.actionBdr, borderRadius:"99px", padding:"0 0.4rem", textTransform:"none", letterSpacing:0 } }, "✦ Claude")),
+    React.createElement("div", { "data-faqsugs":sug ? sug.length : "loading" },
+      sug===null ? aboutP("Loading…") : sug.length ? sug.map(sugCard) :
+        aboutP("None waiting. Ask Claude, in the Time Tracker project, to read the inbox and suggest questions; they appear here for you to accept or dismiss.", { fontSize:"0.82rem" })),
+    React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { marginTop:"0.9rem" }) }, "Questions"),
+    React.createElement("button", { "data-flat":true, "data-faqnew":true, onClick:function(){ haptic(6); setEdit({ init:{ published:false } }); }, style:fbBtn(true, { width:"100%", marginBottom:"0.6rem" }) }, "＋ New question"),
+    React.createElement("div", { "data-faqentries":list ? list.length : "loading" }, list===null ? aboutP("Loading…") : list.length ? list.map(entry) : aboutP("No questions yet.")),
+    React.createElement(FbNote, { text:msg }),
+    !demo && edit && React.createElement(FaqEditModal, { id:edit.id, init:edit.init, role:props.role, topics:ttFaqTopics(list), trail:here, onClose:function(){ setEdit(null); load(); } }));
+}
+function FaqEditModal(props){
+  var demo=props.demo||null, i0=props.init||{};
+  var owner=props.role==="owner";
+  var qS=useState(i0.question||""); var q=qS[0], setQ=qS[1];
+  var aS=useState(i0.answer||""); var a=aS[0], setA=aS[1];
+  var tS=useState(i0.topic||""); var t=tS[0], setT=tS[1];
+  var gS=useState(i0.guide||""); var g=gS[0], setG=gS[1];
+  var pS=useState(!!i0.published); var pub=pS[0], setPub=pS[1];
+  var nS=useState(i0.notify!==false); var notify=nS[0], setNotify=nS[1];
+  var busyS=useState(false); var busy=busyS[0], setBusy=busyS[1];
+  var msgS=useState(""); var msg=msgS[0], setMsg=msgS[1];
+  var topics=(props.topics && props.topics.length ? props.topics : ttFaqTopics(ttFeedback.faq.cached()));
+  var guides=[]; try{ var G=helpAll().guides; guides=Object.keys(G).map(function(k){ return [k, G[k].title]; }); }catch(e){}
+  function save(){
+    if(busy || demo) return;
+    if(q.trim().length<3 || !a.trim()){ setMsg("Write the question and its answer."); return; }
+    setBusy(true); setMsg("");
+    var e={ question:q, answer:a, topic:t.trim()||"General", guide:g||null };
+    if(owner) e.published=pub;
+    if(i0.source){ e.source=i0.source; e.notify=notify; }
+    if(i0.suggestion) e.suggestion=i0.suggestion;
+    ttFeedback.faq.save(props.id||null, e).then(function(r){ setBusy(false); if(!r.ok){ setMsg(r.msg); return; } haptic([10,40,10]); props.onClose(true); });
+  }
+  var lab=function(x){ return React.createElement("div", { style:Object.assign({}, LABEL_STYLE, { marginTop:"0.6rem" }) }, x); };
+  var sw=function(name, label, on, set, note){
+    return React.createElement("div", { style:{ display:"flex", alignItems:"center", gap:"0.7rem", padding:"0.55rem 0.1rem", borderTop:"1px solid "+S.border } },
+      React.createElement("div", { style:{ flex:1, minWidth:0 } },
+        React.createElement("div", { style:{ fontWeight:700, color:S.text, fontSize:"0.9rem" } }, label),
+        note ? React.createElement("div", { style:{ fontSize:"0.76rem", color:S.textDim, marginTop:"0.1rem" } }, note) : null),
+      React.createElement(OnSwitch, { name:name, on:on, onChange:set }));
+  };
+  return React.createElement(Modal, { title:props.id ? "Edit question" : "New question", onClose:props.onClose, trail:props.trail, trailHere:"Question",
+      onSave:save, saveLabel:busy ? "Saving…" : (owner && pub ? "Publish" : "Save draft"), saveAnchor:"faq-save" },
+    lab("Question"),
+    React.createElement("input", { "data-faqedq":true, value:q, maxLength:200, placeholder:"As someone would ask it", onChange:function(e){ setQ(e.target.value); if(msg) setMsg(""); }, style:INPUT_STYLE }),
+    lab("Answer"),
+    React.createElement("textarea", { "data-faqeda":true, value:a, maxLength:3000, placeholder:"Plain words; name screens the way the app does (Account > Sync Settings)",
+      onChange:function(e){ setA(e.target.value); if(msg) setMsg(""); }, style:Object.assign({}, INPUT_STYLE, { minHeight:"7rem", resize:"vertical", lineHeight:1.45 }) }),
+    lab("Topic"),
+    React.createElement("input", { "data-faqedt":true, value:t, maxLength:30, placeholder:"General", onChange:function(e){ setT(e.target.value); }, style:INPUT_STYLE }),
+    topics.length ? React.createElement("div", { style:{ display:"flex", flexWrap:"wrap", gap:"0.35rem", marginTop:"0.4rem" } },
+      topics.map(function(x){ return React.createElement(FbChip, { key:x, k:"topic-"+x, on:t===x, label:x, onClick:function(){ setT(x); } }); })) : null,
+    lab("Show me how"),
+    React.createElement("select", { "data-faqedg":true, value:g, onChange:function(e){ setG(e.target.value); }, style:INPUT_STYLE },
+      [["", "No guide"]].concat(guides).map(function(o){ return React.createElement("option", { key:o[0], value:o[0] }, o[1]); })),
+    React.createElement("div", { style:{ marginTop:"0.8rem" } },
+      owner ? sw("faqpub", "Published", pub, setPub, pub ? "Everyone can read it in the FAQ." : "A draft: only the team sees it.")
+            : React.createElement("div", { style:{ fontSize:"0.8rem", color:S.textDim, padding:"0.55rem 0.1rem", borderTop:"1px solid "+S.border } }, "Saved as a draft. An owner publishes it."),
+      i0.source ? sw("faqnotify", "Tell the sender it’s in the FAQ", notify, setNotify, "A reply in their thread, once it’s published.") : null),
+    React.createElement(FbNote, { text:msg }),
+    owner && props.id && React.createElement(HoldButton, { attrs:{ "data-holddelete":"faq" }, fill:S.dangerBg,
+        onHold:function(){ if(demo) return; ttFeedback.faq.remove(props.id).then(function(r){ if(r.ok) props.onClose(true); else setMsg(r.msg); }); },
+        style:{ width:"100%", background:"none", border:"1.5px solid "+S.dangerText, borderRadius:S.radius, padding:"0.6rem", color:S.dangerText,
+                fontFamily:S.fontBody, fontWeight:700, fontSize:"0.88rem", marginTop:"0.4rem" } }, "Hold to delete this question"));
 }
 
 // ---- UNPAID BREAKS MODAL ----------------------------------------------------
@@ -12448,7 +13529,65 @@ function TTErrorBoundary(props){ return props.children; }
 // APP_VERSION is the public number. The build stamp stays where it has always
 // been, in the boot div, because that is the thing that proves which deploy
 // landed; this is the thing a person reads.
-var APP_VERSION = "1.5.4";   // the Sync Settings button and how sync is set, on Account; "On app open" (Brent, 11-17: "1.5.4"). 1.5.3 = the sync loop fix.
+var APP_VERSION = "1.6";   // About Time Tracker, feedback, the staff inbox, the FAQ, the sign-in code boxes (Brent, 11-19: "This should be v1.6"). 1.5.4 = the Sync Settings button.
+// What changed, version by version, newest first: About > What's new and
+// Version history. The newest entry MUST be APP_VERSION (tt-tests checks it),
+// so bumping the version means writing its notes here at the same time.
+// Short, plain lines a person reads; the long notes stay in RELEASE-NOTES-*.md.
+var TT_RELEASES = [
+  { v:"1.6", date:"2026-11-19", items:[
+    "About Time Tracker: your version, what’s new and every release before it",
+    "Send feedback to the developer and follow the replies in My feedback",
+    "FAQ: questions people ask, by topic, with “Did this help?”",
+    "Answers from the FAQ appear while you type a question in Send feedback",
+    "The sign-in code shows all eight boxes, with the last two ready if your code has eight" ] },
+  { v:"1.5.4", date:"2026-11-17", items:[
+    "Account has a clear Sync Settings button, with how sync is set shown under it",
+    "When sync is off, Account says so plainly",
+    "The lightest How often choice is now called On app open" ] },
+  { v:"1.5.3", date:"2026-11-17", items:[
+    "Fixed: sync no longer runs over and over, so a device left alone sends nothing" ] },
+  { v:"1.5.2", date:"2026-11-17", items:[
+    "Choose how often sync runs, with roughly what each choice uses in a month",
+    "How often shows what this device has really used",
+    "A new reminder starts with the item’s name",
+    "The code boxes start at eight, matching the email" ] },
+  { v:"1.5.1", date:"2026-11-14", items:[
+    "Sign-in codes of six or eight digits both work, and sign in by themselves" ] },
+  { v:"1.5", date:"2026-11-14", items:[
+    "Sync your board between your own devices, off until you turn it on",
+    "Only you can read your board on the server",
+    "Which board? when both devices already have one, with a Before sync backup",
+    "The cloud in the top bar shows real syncing" ] },
+  { v:"1.4", date:"2026-11-13", items:[
+    "Sign in with an email code, no password",
+    "Reminders on projects, tasks and milestones, before they end or at a time you pick",
+    "Nudges: not clocked in, a job still running at the end of the shift, and more",
+    "While you were away lists reminders that came due with the app closed" ] },
+  { v:"1.3B", date:"2026-10-27", name:"Baker", items:[
+    "The way back: a trail on every sheet",
+    "Break reminders, flexible breaks and the break clock",
+    "Asks before throwing away changes you haven’t saved" ] },
+  { v:"1.3", date:"2026-10-22", items:[
+    "Take a break from the header",
+    "Paid or unpaid breaks, with a daily paid break allowance",
+    "A heads-up when the allowance runs low, and a choice when you go over" ] },
+  { v:"1.2", date:"2026-10-20", items:[
+    "Extensions bring their own pages to the manual",
+    "Edit… lane and project changes save properly",
+    "Groundwork for syncing and sharing" ] },
+  { v:"1.1", date:"2026-10-20", items:[
+    "Tool Tracker’s guide in the manual" ] },
+  { v:"1.0", date:"2026-10-10", items:[
+    "Time Tracker: projects, tasks and lanes; clock in and out; breaks and disruptions; reports; themes" ] }
+];
+var TT_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function ttReleaseDate(s){ var m=/^(\d{4})-(\d{2})-(\d{2})/.exec(String(s||"")); return m ? TT_MONTHS[+m[2]-1]+" "+(+m[3])+", "+m[1] : ""; }
+// The build stamp, read once from the boot line the shell carries ("Time
+// Tracker build 11-17 ...") before React replaces it. Its date part only.
+var TT_BUILD = (function(){
+  try{ var b=typeof document!=="undefined" && document.getElementById("boot"); var m=b && /build\s+(\d\d-\d\d)/.exec(b.textContent||""); return m ? m[1] : ""; }catch(e){ return ""; }
+})();
 var SPLASH_SHOW_MS = 2500;   // fully opaque
 var SPLASH_FADE_MS = 320;    // then fades out over this
 function SplashScreen(props){
@@ -12692,7 +13831,19 @@ function TTBoard(){
   var showExtensionsS=useState(false); var setShowExtensions=showExtensionsS[1]; var showExtensions=showExtensionsS[0];
   // The account (10-28): sign-in state from the one controller, and its sheet.
   var showAccountS=useState(false); var setShowAccount=showAccountS[1]; var showAccount=showAccountS[0];
+  // About Time Tracker (11-17) and the feedback badge: replies waiting show on
+  // About's menu row. Asked for when signed in, on open and coming back - rarely.
+  var showAboutS=useState(false); var setShowAbout=showAboutS[1]; var showAbout=showAboutS[0];
+  var fbStatS=useState(ttFeedback.status()); var fbStat=fbStatS[0];
+  useEffect(function(){
+    var off=ttFeedback.subscribe(fbStatS[1]);
+    var t=setTimeout(function(){ ttFeedback.refresh(false); ttFeedback.faq.load(false, 6*3600000); }, 4000);
+    var vis=function(){ if(!document.hidden) ttFeedback.refresh(false); };
+    document.addEventListener("visibilitychange", vis);
+    return function(){ off(); clearTimeout(t); document.removeEventListener("visibilitychange", vis); };
+  }, []);
   var cloudS=useState(ttCloud.get()); var cloud=cloudS[0], setCloud=cloudS[1];
+  useEffect(function(){ if(cloud.phase==="in") ttFeedback.refresh(false); }, [cloud.phase]);
   useEffect(function(){
     var off=ttCloud.subscribe(setCloud);
     ttCloud.check();
@@ -12783,6 +13934,9 @@ function TTBoard(){
   var distMenuRef=useRef(null);
   var showTestConfirmS=useState(false); var setShowTestConfirm=showTestConfirmS[1]; var showTestConfirm=showTestConfirmS[0];
   var showGuidesS=useState(false); var setShowGuides=showGuidesS[1]; var showGuides=showGuidesS[0];
+  // FAQ (11-18), and a guide opened straight from an answer's "Show me how".
+  var showFaqS=useState(false); var setShowFaq=showFaqS[1]; var showFaq=showFaqS[0];
+  var guideAtS=useState(null); var setGuideAt=guideAtS[1]; var guideAt=guideAtS[0];
   var menuRef=useRef(null);
   var interval=useRef(null);
 
@@ -13009,7 +14163,7 @@ function TTBoard(){
     setNavFrom(null); setShowArchive(false);
     setShowAdd(null); setEditProj(null); setStagesProj(null); setShowDisrupt(false);
     setShowBreak(false); setShowDay(false); setShowNewLane(false);
-    setShowReports(false); setShowBackup(false); setShowExtensions(false); setShowAccount(false); setModScreen(null);
+    setShowReports(false); setShowBackup(false); setShowExtensions(false); setShowAccount(false); setShowAbout(false); setShowFaq(false); setModScreen(null);
     setConfirmDelete(null); setShowTestConfirm(false); setShowGuides(false); setStartAsk(null);
     setMenuOpen(false); setDistMenuOpen(false); setShowEditPresets(false); setShowThemes(false); setShowLayout(false); setShowSchedule(false); setShowTracking(false); setMenuGroup(null); setShowOutline(false); setEditLane(null); setMsProj(null); setMsLane(null); setMsBoard(false); setStagesDone(null);
     try{ window.dispatchEvent(new Event("ttCloseMenus")); }catch(e){}
@@ -14020,6 +15174,8 @@ function TTBoard(){
         onClose:function(){ setMenuGroup(null); }, trail:groupTrail,
         items:[
           { label:"Guides", onSelect:function(){ closeAllPopups(); setShowGuides(true); navOpen("guides","manual"); } },
+          { label:"FAQ", anchor:"faq", onSelect:function(){ closeAllPopups(); setShowFaq(true); navOpen("faq","manual"); } },
+          { label:"About Time Tracker", anchor:"about", pill:fbStat.mine, onSelect:function(){ closeAllPopups(); setShowAbout(true); navOpen("about","manual"); } },
           testMode
             ? { label:"Leave Practice Board", onSelect:function(){ closeAllPopups(); setShowTestConfirm(true); } }
             : { label:"Practice Board", onSelect:function(){ closeAllPopups(); setTestMode(true); } }
@@ -14036,7 +15192,14 @@ function TTBoard(){
           { label:"Themes", onSelect:function(){ closeAllPopups(); setShowThemes(true); navOpen("themes","interface"); } },
           { label:"Layout", onSelect:function(){ closeAllPopups(); setShowLayout(true); navOpen("layout","interface"); } }
         ] }),
-      showGuides && React.createElement(GuidesModal, { trail:trailFor("guides"), onClose:function(){ setShowGuides(false); } }),
+      showAbout && React.createElement(AboutModal, { trail:trailFor("about"), cloud:cloud, settings:settings,
+        onAccount:function(){ closeAllPopups(); setShowAccount(true); navOpen("account","menu"); ttCloud.poke(); },
+        onClose:function(){ setShowAbout(false); } }),
+      showGuides && React.createElement(GuidesModal, { key:guideAt ? "g-"+guideAt.id : "g", initial:guideAt, trail:trailFor("guides"), onClose:function(){ setShowGuides(false); setGuideAt(null); } }),
+      showFaq && React.createElement(FaqModal, { trail:trailFor("faq"), cloud:cloud, settings:settings,
+        onGuide:function(id){ closeAllPopups(); setGuideAt({ kind:"guide", id:id }); setShowGuides(true); navOpen("guides","manual"); },
+        onAccount:function(){ closeAllPopups(); setShowAccount(true); navOpen("account","menu"); ttCloud.poke(); },
+        onClose:function(){ setShowFaq(false); } }),
       showThemes && React.createElement(ThemesModal, { trail:trailFor("themes"), settings:settings, onChange:setSettings, onClose:function(){ setShowThemes(false); } }),
       showLayout && React.createElement(LayoutModal, { trail:trailFor("layout"), settings:settings, onChange:setSettings, onClose:function(){ setShowLayout(false); } }),
       showSchedule && React.createElement(WorkScheduleModal, { trail:trailFor("schedule"), schedule:settings.workSchedule, openBreaks:openBreaksEd,

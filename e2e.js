@@ -1213,7 +1213,7 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
   await p23.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await p23.waitForTimeout(350);
   await p23.locator('[data-menugroup="manual"]').click(); await p23.waitForTimeout(350);
   const items23=await p23.locator('[data-groupitem]').allInnerTexts();
-  t("the User Manual holds Guides and the way out of practice", items23.join("|")==="Guides|Leave Practice Board");
+  t("the User Manual holds Guides, FAQ, About and the way out of practice", items23.join("|")==="Guides|FAQ|About Time Tracker|Leave Practice Board");
   await p23.locator('[data-groupitem]').filter({hasText:/^Guides$/}).click(); await p23.waitForTimeout(500);
   const before23=await store23();
   // The index is by topic (layout B): every topic closed until tapped. A row
@@ -2081,9 +2081,20 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
     await pE.locator('[data-anchor="acct-email"]').fill('brent@example.com');
     await pE.locator('[data-anchor="acct-send"]').click(); await pE.waitForTimeout(500);
     t("account: eight boxes to start (the server sends eight)", (await pE.locator('[data-codebox]').count())===8);
+    t("account: \"Input 6 or 8 digit code below\" above them", (await pE.locator('[data-acctcodelabel]').innerText())==='Input 6 or 8 digit code below');
+    t("account: six solid, the last two dashed, with the hint", (await pE.locator('[data-codebox="spare"]').count())===2 &&
+      (await pE.locator('[data-codebox="spare"]').first().evaluate((e)=>getComputedStyle(e).borderTopStyle))==='dashed' && /if your code has 8/.test(await pE.locator('[data-acctcodehint]').innerText()));
+    t("account: the dashed pair is as bright as the others", await pE.evaluate(()=>{ const b=[...document.querySelectorAll('[data-codebox]')].map((e)=>getComputedStyle(e).borderTopColor); return b[1]===b[6] && b[1]===b[7]; }));
+    t("account: all eight fit on a phone", await pE.evaluate(()=>{ const r=[...document.querySelectorAll('[data-codebox]')].map((e)=>e.getBoundingClientRect()); const p=document.querySelector('[data-modal-panel]').getBoundingClientRect(); return r.every((x)=>x.left>=p.left && x.right<=p.right && Math.abs(x.top-r[0].top)<1); }));
+    const hintBox=await pE.locator('[data-acctcodehint]').boundingBox();
     await pE.locator('[data-acctcode]').click(); await pE.keyboard.type('123456', { delay:60 }); await pE.waitForTimeout(500);
     t("account: six digits typed: it waits a moment in case two more are coming", pE.__sb.verify===0);
-    await pE.keyboard.type('78', { delay:60 }); await pE.waitForTimeout(250);
+    t("account: and the 7th box is lit for the next digit", (await pE.locator('[data-codebox]').nth(6).evaluate((e)=>getComputedStyle(e).boxShadow))!=='none');
+    await pE.keyboard.type('7', { delay:60 }); await pE.waitForTimeout(150);
+    t("account: a 7th digit turns the last two solid and hides the hint", (await pE.locator('[data-codebox="spare"]').count())===0 &&
+      (await pE.locator('[data-acctcodehint]').getAttribute('data-acctcodehint'))==='off');
+    t("account: and nothing below moves", Math.abs((await pE.locator('[data-acctcodehint]').boundingBox()).height-hintBox.height)<1);
+    await pE.keyboard.type('8', { delay:60 }); await pE.waitForTimeout(250);
     t("account: still eight boxes as the code runs on", (await pE.locator('[data-codebox]').count())===8 || (await pE.locator('[data-acct="signout"]').count())===1);
     await pE.waitForTimeout(900);
     t("account: the eighth digit signs in straight away, once", pE.__sb.verify===1 && (await pE.locator('[data-acct="signout"]').count())===1);
@@ -2308,6 +2319,320 @@ const ok=[]; const t=(l,p)=>ok.push([l,p]);
       await pB.evaluate(()=>new Promise((res)=>{ const r=indexedDB.open('tt-saves',1); r.onsuccess=()=>{ const q=r.result.transaction('snaps').objectStore('snaps').getAll(); q.onsuccess=()=>res(q.result.some((x)=>x.why==='before-sync')); }; r.onerror=()=>res(false); })));
     t("sync: no page errors", pA.__errs===0 && pB.__errs===0);
     await pA.context().close(); await pB.context().close();
+    WEB.close();
+  }
+
+  // ---- about & feedback, 11-17: the About sheet, sending, replies ----
+  // The feedback server is a stand-in (fserver.js), written from the rules in
+  // db/06_support.sql. Brent's staff replies are made on it directly.
+  {
+    const FServer=require(require('path').join(__dirname,'fserver.js'));
+    const SV=FServer(); SV.user('TA','u1','brent@example.com'); SV.user('TS','s1','dev@hiatt'); SV.setStaff('s1','owner','Brent');
+    const WEB=require('http').createServer((q,r)=>{ r.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}); r.end(fs.readFileSync('/tmp/e2e.html')); });
+    await new Promise((res)=>WEB.listen(0,'127.0.0.1',res));
+    const APP='http://127.0.0.1:'+WEB.address().port+'/';
+    const calls=[];
+    const dev=async(seed)=>{
+      const ctx=await b.newContext({viewport:{width:390,height:844}});
+      const pg=await ctx.newPage(); pg.__errs=0; pg.on('pageerror',(e)=>{ pg.__errs++; console.log('PE', e.message); });
+      await pg.route('https://giqeknvzfeznxouxegxk.supabase.co/**', async (route)=>{
+        const rq=route.request(), path=rq.url().replace('https://giqeknvzfeznxouxegxk.supabase.co','');
+        if(path.endsWith('/rest/v1/rpc/touch_active')) return route.fulfill({ status:204, body:'' });
+        let body=null; try{ body=rq.postDataJSON(); }catch(e){}
+        calls.push(path.replace('/rest/v1/rpc/',''));
+        const r=SV.handle(SV.toks[String(rq.headers()['authorization']||'').replace('Bearer ','')], path, body||{});
+        return route.fulfill({ status:r.status, contentType:'application/json', body:r.body==null?'':JSON.stringify(r.body) });
+      });
+      await pg.addInitScript((a)=>{ if(sessionStorage.getItem('seeded')) return; sessionStorage.setItem('seeded','1');
+        localStorage.setItem('tt_settings', JSON.stringify({layout:'comfortable',tracking:'timer',theme:'neon-dream',schemes:{},fonts:{},mode:'dark',handedness:'right',headerPos:'top'}));
+        if(a.signed){ localStorage.setItem('ttacct_session', JSON.stringify({ access_token:'TA', refresh_token:'R', expires_at:Date.now()+3600e3, user_id:'u1', email:'brent@example.com' }));
+          localStorage.setItem('ttacct_email','brent@example.com'); } }, seed);
+      await pg.goto(APP,{waitUntil:'load'}); await dropSplash(pg); await pg.waitForTimeout(700);
+      return pg;
+    };
+    const top=(pg)=>pg.locator('[data-modal-panel]').last();
+    const openAbout=async(pg)=>{
+      await pg.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await pg.waitForTimeout(300);
+      await pg.locator('[data-menugroup="manual"]').click(); await pg.waitForTimeout(300);
+      await pg.locator('[data-groupkey="about"]').click(); await pg.waitForTimeout(450);
+    };
+
+    // signed out
+    const pO=await dev({ signed:false });
+    const n0=calls.length;
+    await openAbout(pO);
+    t("about: User Manual offers About Time Tracker, under Guides",
+      (await pO.locator('[data-abouthero]').count())===1 && (await top(pO).locator('[data-trail]').getAttribute('data-trail'))==='Board > Menu > User Manual');
+    t("about: the header shows the version and the studio",
+      /Version \d/.test(await pO.locator('[data-aboutversion]').innerText()) && /Developed at Hiatt Studios/.test(await top(pO).innerText()));
+    t("about: five rows: what's new, history, send, mine, privacy",
+      JSON.stringify(await pO.locator('[data-aboutrow]').evaluateAll((els)=>els.map((e)=>e.getAttribute('data-aboutrow'))))===JSON.stringify(["new","history","send","mine","privacy"]));
+    await pO.locator('[data-aboutrow="history"]').click(); await pO.waitForTimeout(300);
+    t("about: version history lists the releases, newest marked this version",
+      (await pO.locator('[data-release]').count())>=10 && /this version/.test(await pO.locator('[data-release]').first().innerText()));
+    t("about: its trail steps back to About", /About/.test(await top(pO).locator('[data-trail]').getAttribute('data-trail')||''));
+    await top(pO).locator('button').filter({hasText:/^Done$/}).click(); await pO.waitForTimeout(300);
+    t("about: Done comes back to About", (await pO.locator('[data-aboutrow]').count())===5);
+    await pO.locator('[data-aboutrow="send"]').click(); await pO.waitForTimeout(300);
+    t("about: signed out, Send feedback asks to sign in first", (await pO.locator('[data-fbsignin]').count())===1);
+    t("about: and nothing but the public FAQ goes to the server signed out", calls.slice(n0).every((c)=>c==='faq_list'));
+    await pO.locator('[data-fbsigninbtn]').click(); await pO.waitForTimeout(450);
+    t("about: Sign in opens Account", (await pO.locator('[data-anchor="acct-email"]').count())===1 && (await pO.locator('[data-abouthero]').count())===0);
+    t("about: no page errors signed out", pO.__errs===0);
+    await pO.context().close();
+
+    // signed in: send, read a reply, reply back
+    const pA=await dev({ signed:true });
+    await openAbout(pA);
+    await pA.locator('[data-aboutrow="send"]').click(); await pA.waitForTimeout(300);
+    t("feedback: the form opens on Problem with details on", (await pA.locator('[data-fbkind="problem"][aria-pressed="true"]').count())===1 && (await pA.locator('[data-fbdetails="on"]').count())===1);
+    const h0=await top(pA).evaluate((e)=>e.getBoundingClientRect().height);
+    await pA.locator('[data-anchor="fb-send"]').click(); await pA.waitForTimeout(300);
+    t("feedback: an empty note is caught before sending", /Write something first/.test(await pA.locator('[data-fbmsg]').innerText()) && !SV.items.length);
+    t("feedback: and the sheet does not jump", Math.abs((await top(pA).evaluate((e)=>e.getBoundingClientRect().height))-h0)<1);
+    await pA.locator('[data-fbkind="idea"]').click();
+    t("feedback: the box asks the idea question", /better/.test(await pA.locator('[data-fbtext]').getAttribute('placeholder')));
+    await pA.locator('[data-fbtext]').fill('A dark printed report, please.');
+    await top(pA).locator('button').filter({hasText:/^Cancel$/}).click(); await pA.waitForTimeout(300);
+    await pA.locator('[data-aboutrow="send"]').click(); await pA.waitForTimeout(300);
+    t("feedback: a half-written note waits when the sheet is closed",
+      (await pA.locator('[data-fbtext]').inputValue())==='A dark printed report, please.' && (await pA.locator('[data-fbkind="idea"][aria-pressed="true"]').count())===1);
+    await pA.locator('[data-anchor="fb-send"]').click(); await pA.waitForTimeout(600);
+    const it=SV.items[0];
+    t("feedback: Send puts it on the server", !!it && it.kind==='idea' && it.body==='A dark printed report, please.' && it.user_id==='u1');
+    t("feedback: with the app details shown in the form", it && it.app && /^\d/.test(it.app.version) && it.app.mode==='dark' && !('projects' in it.app));
+    t("feedback: then says thanks", (await pA.locator('[data-fbsent]').count())===1);
+    t("feedback: and the draft is gone", (await pA.evaluate(()=>localStorage.getItem('ttfb_draft')))===null);
+    await pA.locator('[data-fbopenmine]').click(); await pA.waitForTimeout(600);
+    t("feedback: My feedback lists it as sent", (await pA.locator('[data-fbitem]').count())===1 && /Sent/.test(await pA.locator('[data-fbitem]').innerText()));
+    await top(pA).locator('button').filter({hasText:/^Close$/}).click(); await pA.waitForTimeout(300);
+    await top(pA).locator('button').filter({hasText:/^Close$/}).click(); await pA.waitForTimeout(300);
+
+    // Brent answers and marks it planned
+    SV.tick(60000); SV.staffReply('s1', it.id, 'Thanks - planned for the next release.'); SV.staffStatus('s1', it.id, 'planned');
+    await pA.evaluate(()=>{ Object.defineProperty(document,'hidden',{value:false,configurable:true}); document.dispatchEvent(new Event('visibilitychange')); });
+    await openAbout(pA); await pA.waitForTimeout(500);
+    t("feedback: a reply shows on About's My feedback row", /1 new reply/.test(await pA.locator('[data-aboutrow="mine"]').innerText()));
+    await pA.locator('[data-aboutrow="mine"]').click(); await pA.waitForTimeout(600);
+    t("feedback: the item is marked new and planned", (await pA.locator('[data-fbunread="1"]').count())===1 && /Planned/.test(await pA.locator('[data-fbitem]').innerText()));
+    await pA.locator('[data-fbitem]').click(); await pA.waitForTimeout(600);
+    const thTxt=await pA.locator('[data-fbthread]').innerText();
+    t("feedback: the thread shows the note, Brent's reply and the change", /dark printed report/.test(thTxt) && /Brent/.test(thTxt) && /planned for the next/.test(thTxt) && /Now: Planned/.test(thTxt));
+    t("feedback: the trail runs About > My feedback", /About > My feedback/.test(await top(pA).locator('[data-trail]').getAttribute('data-trail')||''));
+    await pA.locator('[data-fbreply]').fill('Great, thank you!');
+    await pA.locator('[data-anchor="fb-reply"]').click(); await pA.waitForTimeout(600);
+    t("feedback: a reply goes to the server and shows in the thread", SV.msgs.some((m)=>m.author==='u1' && m.body==='Great, thank you!') && /Great, thank you!/.test(await pA.locator('[data-fbthread]').innerText()));
+    t("feedback: the reply box empties", (await pA.locator('[data-fbreply]').inputValue())==='');
+    await top(pA).locator('button').filter({hasText:/^Close$/}).click(); await pA.waitForTimeout(500);
+    t("feedback: back on the list, nothing new is waiting", (await pA.locator('[data-fbunread="1"]').count())===0);
+    t("feedback: the reporter never called a staff function", !calls.some((c)=>/fb_(inbox|update|delete|team)/.test(c)));
+    t("feedback: no page errors", pA.__errs===0);
+    // light mode draws too
+    await pA.evaluate(()=>{ const s=JSON.parse(localStorage.getItem('tt_settings')); s.mode='light'; localStorage.setItem('tt_settings', JSON.stringify(s)); });
+    await pA.reload(); await dropSplash(pA); await pA.waitForTimeout(600);
+    await openAbout(pA);
+    t("feedback: About draws in light mode", (await pA.locator('[data-abouthero]').count())===1 && pA.__errs===0);
+    await pA.context().close();
+    WEB.close();
+  }
+
+  // ---- feedback inbox & FAQ, 11-18: the team's side, and the FAQ for everyone ----
+  {
+    const FServer=require(require('path').join(__dirname,'fserver.js'));
+    const SV=FServer();
+    SV.user('TA','u1','sam@shop.co'); SV.user('TS','s1','brent@studio.co'); SV.user('TJ','u2','jon@studio.co');
+    SV.setStaff('s1','owner','Brent');
+    // the reporter sends three things
+    const send=(kind, body)=>SV.handle('u1','/rest/v1/rpc/fb_send',{ kind, body, app:{ version:'1.5.4', device:'iPhone', os:'iOS 18.1' } }).body;
+    const iA=send('question','Do paid breaks count toward overtime? I can’t find it.'); SV.tick(60000);
+    const iB=send('problem','Timer stops when I lock my phone'); SV.tick(60000);
+    const iC=send('idea','Export the week to Excel');
+    const WEB=require('http').createServer((q,r)=>{ r.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}); r.end(fs.readFileSync('/tmp/e2e.html')); });
+    await new Promise((res)=>WEB.listen(0,'127.0.0.1',res));
+    const APP='http://127.0.0.1:'+WEB.address().port+'/';
+    const dev=async(tok, uid, email)=>{
+      const ctx=await b.newContext({viewport:{width:390,height:844}});
+      const pg=await ctx.newPage(); pg.__errs=0; pg.on('pageerror',(e)=>{ pg.__errs++; console.log('PE', e.message); });
+      await pg.route('https://giqeknvzfeznxouxegxk.supabase.co/**', async (route)=>{
+        const rq=route.request(), path=rq.url().replace('https://giqeknvzfeznxouxegxk.supabase.co','');
+        if(path.endsWith('/rest/v1/rpc/touch_active')) return route.fulfill({ status:204, body:'' });
+        let body=null; try{ body=rq.postDataJSON(); }catch(e){}
+        const r=SV.handle(SV.toks[String(rq.headers()['authorization']||'').replace('Bearer ','')], path, body||{});
+        return route.fulfill({ status:r.status, contentType:'application/json', body:r.body==null?'':JSON.stringify(r.body) });
+      });
+      await pg.addInitScript((a)=>{ if(sessionStorage.getItem('seeded')) return; sessionStorage.setItem('seeded','1');
+        localStorage.setItem('tt_settings', JSON.stringify({layout:'comfortable',tracking:'timer',theme:'neon-dream',schemes:{},fonts:{},mode:'dark',handedness:'right',headerPos:'top'}));
+        if(a.tok){ localStorage.setItem('ttacct_session', JSON.stringify({ access_token:a.tok, refresh_token:'R', expires_at:Date.now()+3600e3, user_id:a.uid, email:a.email }));
+          localStorage.setItem('ttacct_email', a.email); } }, { tok, uid, email });
+      await pg.goto(APP,{waitUntil:'load'}); await dropSplash(pg); await pg.waitForTimeout(700);
+      return pg;
+    };
+    const top=(pg)=>pg.locator('[data-modal-panel]').last();
+    const group=async(pg)=>{ await pg.locator('button:has(path[d="M4 8H24 M4 14H24 M4 20H24"])').first().click(); await pg.waitForTimeout(300);
+      await pg.locator('[data-menugroup="manual"]').click(); await pg.waitForTimeout(300); };
+    const hold=async(pg, sel)=>{ const el=pg.locator(sel).last(); await el.scrollIntoViewIfNeeded(); await pg.waitForTimeout(300); const bb=await el.boundingBox();
+      await pg.mouse.move(bb.x+bb.width/2,bb.y+bb.height/2); await pg.mouse.down(); await pg.waitForTimeout(1700); await pg.mouse.up(); await pg.waitForTimeout(600); };
+    const closeTop=async(pg)=>{ await top(pg).locator('button').filter({hasText:/^(Close|Done|Cancel)$/}).first().click(); await pg.waitForTimeout(400); };
+
+    // ---- the team (Brent, owner) ----
+    const pS=await dev('TS','s1','brent@studio.co');
+    await group(pS); await pS.locator('[data-groupkey="about"]').click(); await pS.waitForTimeout(600);
+    t("inbox: the team sees a Feedback inbox row on About, with what's new", /3 new/.test(await pS.locator('[data-aboutrow="inbox"]').innerText()));
+    await pS.locator('[data-aboutrow="inbox"]').click(); await pS.waitForTimeout(700);
+    t("inbox: opens in Mail, title kept, the switch beside it",
+      (await pS.locator('[data-fbinbox="mail"]').count())===1 && (await pS.locator('[data-anchor="set-inboxview"]').count())===1 && /Feedback inbox/.test(await top(pS).innerText()));
+    t("inbox: every item, newest activity first", (await pS.locator('[data-fbinboxitem]').count())===3 && (await pS.locator('[data-fbinboxitem]').first().getAttribute('data-fbinboxitem'))===iC);
+    t("inbox: new ones stand out", (await pS.locator('[data-fbinboxitem][data-fbunread="1"]').count())===3);
+    await pS.locator('[data-fbchip="new"]').click(); await pS.waitForTimeout(300);
+    t("inbox: the New chip", (await pS.locator('[data-fbinboxitem]').count())===3);
+    await pS.locator('[data-fbsearch]').fill('excel'); await pS.waitForTimeout(900);
+    t("inbox: search finds words", (await pS.locator('[data-fbinboxitem]').count())===1);
+    await pS.locator('[data-fbsearch]').fill(''); await pS.waitForTimeout(900);
+    await pS.locator('[data-fbchip="all"]').click(); await pS.waitForTimeout(300);
+    // quick action
+    await pS.locator(`[data-fbinboxitem="${iC}"] [data-fbquick="planned"]`).click(); await pS.waitForTimeout(700);
+    t("inbox: Planned in one tap", SV.items.find((x)=>x.id===iC).status==='planned' && SV.msgs.some((m)=>m.feedback_id===iC && m.event==='status:planned'));
+    t("inbox: and the card says so", /Planned/.test(await pS.locator(`[data-fbinboxitem="${iC}"]`).innerText()));
+    // Reply in Mail jumps to that thread in Blog
+    await pS.locator(`[data-fbinboxitem="${iB}"] [data-fbquick="reply"]`).click(); await pS.waitForTimeout(1200);
+    t("inbox: Reply in Mail opens Blog at that thread", (await pS.locator('[data-fbinbox="blog"]').count())===1 && (await pS.locator(`[data-fbpost="${iB}"][data-fbfocus="1"]`).count())===1);
+    t("inbox: with its box ready", (await pS.evaluate(()=>document.activeElement && document.activeElement.getAttribute('data-fbpostreply')))===iB);
+    t("inbox: and a way back to Mail", (await pS.locator('[data-fbbacktomail]').count())===1);
+    await pS.locator(`[data-fbpostreply="${iB}"]`).fill('Thanks Sam - is the app on your home screen?');
+    await pS.locator(`[data-fbpost="${iB}"] [data-fbpostsend="reply"]`).click(); await pS.waitForTimeout(800);
+    t("inbox: a reply from Blog reaches the sender", SV.msgs.some((m)=>m.feedback_id===iB && m.author==='s1' && !m.internal && /home screen/.test(m.body)));
+    t("inbox: and shows in the post", /home screen/.test(await pS.locator(`[data-fbpost="${iB}"]`).innerText()));
+    await pS.locator(`[data-fbpostreply="${iB}"]`).fill('Probably the wake lock.');
+    await pS.locator(`[data-fbpost="${iB}"] [data-fbpostsend="note"]`).click(); await pS.waitForTimeout(800);
+    t("inbox: an internal note from Blog", SV.msgs.some((m)=>m.feedback_id===iB && m.internal && /wake lock/.test(m.body)));
+    await pS.locator('[data-fbbacktomail]').click(); await pS.waitForTimeout(500);
+    t("inbox: Back to Mail", (await pS.locator('[data-fbinbox="mail"]').count())===1);
+    // the switch, and the view remembered
+    await pS.locator('[data-anchor="set-inboxview"] button').filter({hasText:/^Blog$/}).click(); await pS.waitForTimeout(900);
+    t("inbox: the switch flips to Blog", (await pS.locator('[data-fbinbox="blog"]').count())===1 && (await pS.locator('[data-fbpost]').count())===3);
+    await closeTop(pS);
+    await pS.locator('[data-aboutrow="inbox"]').click(); await pS.waitForTimeout(800);
+    t("inbox: reopening keeps the view last used", (await pS.locator('[data-fbinbox="blog"]').count())===1 &&
+      (await pS.evaluate(()=>localStorage.getItem('ttfb_inboxview')))==='blog');
+    await pS.locator('[data-anchor="set-inboxview"] button').filter({hasText:/^Mail$/}).click(); await pS.waitForTimeout(600);
+
+    // the team: add a helper
+    await pS.locator('[data-fbteam]').click(); await pS.waitForTimeout(600);
+    await pS.locator('[data-fbteamemail]').fill('jon@studio.co'); await pS.locator('[data-fbteamname]').fill('Jon');
+    await pS.locator('[data-fbteamaddbtn]').click(); await pS.waitForTimeout(700);
+    t("team: a helper is added by email", SV.staff.u2 && SV.staff.u2.role==='helper' && (await pS.locator('[data-fbteamrow="helper"]').count())===1);
+    await closeTop(pS);
+
+    // one item: controls, note, assign, Add to FAQ
+    await pS.locator(`[data-fbopenitem="${iA}"]`).first().click(); await pS.waitForTimeout(800);
+    t("item: opens with the details and the controls", /Version 1\.5\.4, iPhone/.test(await pS.locator('[data-fbitemapp]').innerText()) && (await pS.locator('[data-fbset]').count())===4);
+    t("item: its trail runs back to the inbox", /Feedback inbox/.test(await top(pS).locator('[data-trail]').getAttribute('data-trail')||''));
+    await pS.locator('[data-fbset="assignee"]').selectOption('u2'); await pS.waitForTimeout(700);
+    t("item: the owner assigns it", SV.items.find((x)=>x.id===iA).assignee==='u2' && /Assigned to Jon/.test(await pS.locator('[data-fbthread]').innerText()));
+    await pS.locator('[data-fbstaffreply]').fill('Yes by default; Pay & Work Week has a switch for it.');
+    await pS.waitForTimeout(450); await pS.locator('[data-anchor="fb-staffsend"]').click(); await pS.waitForTimeout(700);
+    t("item: a reply", SV.msgs.some((m)=>m.feedback_id===iA && m.author==='s1' && /Pay & Work Week/.test(m.body)));
+    await pS.locator('[data-fbchip="mode-note"]').click();
+    t("item: the button says Add note in note mode", /Add note/.test(await pS.locator('[data-anchor="fb-staffsend"]').innerText()));
+    await pS.locator('[data-fbstaffreply]').fill('Good one for the FAQ.');
+    await pS.waitForTimeout(450); await pS.locator('[data-anchor="fb-staffsend"]').click(); await pS.waitForTimeout(700);
+    t("item: an internal note", SV.msgs.some((m)=>m.feedback_id===iA && m.internal && /FAQ/.test(m.body)));
+    await pS.locator('[data-fbset="fixed_in"]').fill('1.5.5'); await pS.locator('[data-fbset="fixed_in"]').press('Enter'); await pS.waitForTimeout(600);
+    await pS.locator('[data-fbset="status"]').selectOption('fixed'); await pS.waitForTimeout(700);
+    t("item: fixed, in which version", SV.items.find((x)=>x.id===iA).status==='fixed' && SV.items.find((x)=>x.id===iA).fixed_in==='1.5.5');
+    await pS.waitForTimeout(450); await pS.locator('[data-fbaddfaq]').click(); await pS.waitForTimeout(600);
+    t("faq: Add to FAQ starts from the sender's words and the reply",
+      /paid breaks count toward overtime/i.test(await pS.locator('[data-faqedq]').inputValue()) && /Pay & Work Week/.test(await pS.locator('[data-faqeda]').inputValue()));
+    await pS.locator('[data-faqedq]').fill('Do paid breaks count toward overtime?');
+    await pS.locator('[data-faqedt]').fill('Breaks');
+    await pS.locator('[data-faqedg]').selectOption('setpay');
+    t("faq: an owner publishes straight away", /Publish/.test(await pS.locator('[data-anchor="faq-save"]').innerText()));
+    await pS.waitForTimeout(450); await pS.locator('[data-anchor="faq-save"]').click(); await pS.waitForTimeout(800);
+    const fA=SV.faq.find((f)=>/paid breaks/.test(f.question));
+    t("faq: it's published, linked to its guide and the item", !!fA && fA.published && fA.guide==='setpay' && fA.topic==='Breaks' && fA.source===iA);
+    t("faq: the sender is told", SV.msgs.some((m)=>m.feedback_id===iA && m.event==='faq:added' && !m.internal));
+    t("faq: and the item shows it", /now in the FAQ/.test(await pS.locator('[data-fbthread]').innerText()));
+    await closeTop(pS);
+
+    // Claude's suggestions (option 1: added on the server, as Claude would)
+    const sg1=SV.suggest('Does sync use a lot of data?', 'Very little on Smart. Account > Sync Settings > How often shows what each choice uses.', 'Sync', 4, 'sync');
+    SV.suggest('How do I move a task?', 'Open Edit…, pick the task, use the arrow pad.', 'The board', 2);
+    await pS.locator('[data-fbfaq]').click(); await pS.waitForTimeout(800);
+    t("faq: the team's FAQ list shows Claude's suggestions, most asked first",
+      (await pS.locator('[data-faqsug]').count())===2 && (await pS.locator('[data-faqsug]').first().getAttribute('data-faqsug'))===sg1 && /Asked in 4 messages/.test(await pS.locator('[data-faqsug]').first().innerText()));
+    t("faq: and the published entries", (await pS.locator('[data-faqentry][data-faqpub="1"]').count())===1);
+    await pS.locator('[data-faqsug]').nth(1).locator('[data-faqsugact="dismiss"]').click(); await pS.waitForTimeout(700);
+    t("faq: Dismiss", (await pS.locator('[data-faqsug]').count())===1 && SV.sugs.filter((x)=>x.status==='dismissed').length===1);
+    await pS.locator('[data-faqsug] [data-faqsugact="accept"]').click(); await pS.waitForTimeout(600);
+    t("faq: Accept opens the editor with Claude's draft", /Does sync use a lot of data/.test(await pS.locator('[data-faqedq]').inputValue()));
+    await pS.waitForTimeout(450); await pS.locator('[data-anchor="faq-save"]').click(); await pS.waitForTimeout(900);
+    t("faq: published, and the suggestion is done", SV.faq.filter((f)=>f.published).length===2 && SV.sugs.find((x)=>x.id===sg1).status==='accepted' && (await pS.locator('[data-faqsug]').count())===0);
+    t("inbox: no page errors on the team's side", pS.__errs===0);
+    await pS.context().close();
+
+    // the helper sees only what is assigned
+    const pJ=await dev('TJ','u2','jon@studio.co');
+    await group(pJ); await pJ.locator('[data-groupkey="about"]').click(); await pJ.waitForTimeout(600);
+    await pJ.locator('[data-aboutrow="inbox"]').click(); await pJ.waitForTimeout(800);
+    t("inbox: a helper sees only what is assigned to them", (await pJ.locator('[data-fbinboxitem]').count())===1 && (await pJ.locator(`[data-fbinboxitem="${iA}"]`).count())===1);
+    await pJ.locator(`[data-fbopenitem="${iA}"]`).first().click(); await pJ.waitForTimeout(800);
+    t("inbox: and can't reassign or delete", (await pJ.locator('[data-fbset="assignee"][disabled]').count())===1 && (await pJ.locator('[data-holddelete="fbitem"]').count())===0);
+    t("inbox: no page errors for the helper", pJ.__errs===0);
+    await pJ.context().close();
+
+    // ---- everyone: the FAQ (signed out) ----
+    const pO=await dev(null, null, null);
+    await group(pO);
+    t("faq: User Manual offers FAQ, between Guides and About",
+      JSON.stringify(await pO.locator('[data-groupitem]').allInnerTexts()).indexOf('"Guides","FAQ","About Time Tracker"')>=0);
+    await pO.locator('[data-groupkey="faq"]').click(); await pO.waitForTimeout(900);
+    t("faq: signed out, anyone reads it, by topic", (await pO.locator('[data-faqq]').count())===2 && (await pO.locator('[data-faqtopic]').count())===2);
+    t("faq: its trail", (await top(pO).locator('[data-trail]').getAttribute('data-trail'))==='Board > Menu > User Manual');
+    await pO.locator('[data-faqtoggle]').first().click(); await pO.waitForTimeout(300);
+    t("faq: tap a question to open its answer", (await pO.locator('[data-faqanswer]').count())===1 && /Pay & Work Week/.test(await pO.locator('[data-faqanswer]').innerText()));
+    await pO.locator('[data-faqanswer] [data-faqvotebtn="yes"]').click(); await pO.waitForTimeout(300);
+    t("faq: Did this help? (signed out: thanks, kept on this device)", /Glad it helped/.test(await pO.locator('[data-faqvote]').innerText()) && Object.keys(SV.votes).length===0 &&
+      /true/.test(await pO.evaluate(()=>localStorage.getItem('ttfaq_votes'))));
+    await pO.locator('[data-faqsearch]').fill('megabytes'); await pO.waitForTimeout(300);
+    t("faq: search", (await pO.locator('[data-faqq]').count())===0);
+    await pO.locator('[data-faqsearch]').fill('smart'); await pO.waitForTimeout(300);
+    t("faq: search finds answers too", (await pO.locator('[data-faqq]').count())===1);
+    await pO.locator('[data-faqsearch]').fill(''); await pO.waitForTimeout(300);
+    await pO.locator('[data-faqtoggle]').first().click(); await pO.waitForTimeout(300);
+    await pO.locator('[data-faqtoggle]').first().click(); await pO.waitForTimeout(300);
+    await pO.locator('[data-faqanswer] [data-faqguide]').click(); await pO.waitForTimeout(800);
+    t("faq: Show me how opens that guide", (await pO.locator('[data-helpstep]').count())>=1 && /pay and overtime/i.test(await top(pO).innerText()));
+    await pO.reload(); await dropSplash(pO); await pO.waitForTimeout(700);
+    // the manual's search finds FAQ answers
+    await group(pO); await pO.locator('[data-groupitem]').filter({hasText:/^Guides$/}).click(); await pO.waitForTimeout(600);
+    await top(pO).locator('input').first().fill('sync data'); await pO.waitForTimeout(500);
+    t("faq: the manual's search finds FAQ answers", (await pO.locator('[data-helphit^="faq:"]').count())>=1);
+    await pO.locator('[data-helphit^="faq:"]').first().click(); await pO.waitForTimeout(800);
+    t("faq: a hit opens the FAQ at that question", (await pO.locator('[data-faqopen="1"]').count())===1);
+    t("faq: no page errors signed out", pO.__errs===0);
+    await pO.context().close();
+
+    // ---- the reporter: answers before sending, and the FAQ line in their thread ----
+    const pA=await dev('TA','u1','sam@shop.co');
+    await group(pA); await pA.locator('[data-groupkey="about"]').click(); await pA.waitForTimeout(500);
+    await pA.locator('[data-aboutrow="send"]').click(); await pA.waitForTimeout(600);
+    await pA.locator('[data-fbkind="question"]').click();
+    await pA.locator('[data-fbtext]').fill('does sync use much data on my phone');
+    await pA.waitForTimeout(300);
+    t("send: a matching FAQ answer shows as you type", (await pA.locator('[data-faqhint]').count())===1 && /sync use a lot of data/i.test(await pA.locator('[data-faqhint]').innerText()));
+    t("send: Send becomes Send anyway", /Send anyway/.test(await pA.locator('[data-anchor="fb-send"]').innerText()));
+    await pA.locator('[data-faqhintq]').first().click(); await pA.waitForTimeout(800);
+    t("send: Read opens that answer", (await pA.locator('[data-faqopen="1"]').count())===1);
+    await pA.locator('[data-faqanswer] [data-faqvotebtn="no"]').click(); await pA.waitForTimeout(600);
+    t("faq: signed in, a vote reaches the server", Object.values(SV.votes).some((v)=>v===false));
+    await closeTop(pA); await pA.waitForTimeout(300);
+    t("send: the typed words are still there", (await pA.locator('[data-fbtext]').inputValue())==='does sync use much data on my phone');
+    await top(pA).locator('button').filter({hasText:/^Cancel$/}).click(); await pA.waitForTimeout(400);
+    await pA.locator('[data-aboutrow="mine"]').click(); await pA.waitForTimeout(700);
+    await pA.locator(`[data-fbitem="${iA}"]`).click(); await pA.waitForTimeout(800);
+    t("faq: the sender's thread says it's in the FAQ", /now in the FAQ/.test(await pA.locator('[data-fbthread]').innerText()) && !/wake lock|Good one for the FAQ/.test(await pA.locator('[data-fbthread]').innerText()));
+    t("send: no page errors for the reporter", pA.__errs===0);
+    await pA.context().close();
     WEB.close();
   }
 

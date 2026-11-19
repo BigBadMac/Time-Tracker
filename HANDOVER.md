@@ -1,6 +1,6 @@
 # Time Tracker — session handover
 
-Current build: **`11-17 v1.5.4`** (public version **1.5.4**, `APP_VERSION`; Brent names versions when he pushes - 1.3B "Baker" 10-27, 1.4 11-13, 1.5 and 1.5.1 11-14, 1.5.2, 1.5.3 and 1.5.4 11-17)
+Current build: **`11-19 v1.6`** (public version **1.6**, `APP_VERSION`; Brent names versions when he pushes - 1.6 11-19, 1.3B "Baker" 10-27, 1.4 11-13, 1.5 and 1.5.1 11-14, 1.5.2, 1.5.3 and 1.5.4 11-17)
 
 At "11-17 v1.5.2": tt-tests 1901, boot 440, shift 46, lifecycle 646, account 67, reminders 85, sync 81, e2e 903, db/run.sh 124. The block below is the 1.3B baseline, kept for history.
 
@@ -29,6 +29,168 @@ site it would be an old app sharing the real one's storage.
 (Working Copy -> GitHub Pages). `10-20 v1.2 ids and tracking` was the build
 before (pushed). First paint is identical to 1.2 apart from the splash's
 version number.
+
+## START HERE - 1.6 (11-19, stamp "11-19 v1.6"; Brent: "This should be v1.6"). = About + feedback + staff inbox + FAQ + new sign-in code boxes. NEXT: project sharing.
+
+CODE BOXES (Brent 11-19, design/codebox.html option C3 = "C2 with the tiny
+hint"): ALL EIGHT boxes always show; above them "Input 6 or 8 digit code
+below" (data-acctcodelabel); first six solid, boxes 7-8 DASHED in the same
+bright colour (S.textDim; data-codebox="spare" vs "main"), with "if your code
+has 8" under them (data-acctcodehint on/off, min-height keeps its space).
+From the 7th digit: solid, hint gone. The next box is lit blue. Auto sign-in
+unchanged (paste / From Mail / 8th digit -> at once; six typed -> 1.5 s
+pause unless 6 is remembered). Sign-in guide step 3 mentions the dashed
+pair. account.js 71, e2e account block 48.
+FAQ STARTER SET (11-19, Brent "Add them all"): five suggestions added live via
+support.suggest from questions Brent hit in testing (8-digit code, where are
+sync settings, sync data use, other device not showing a change, updated but
+no new features - last one flagged "check the wording").
+1.6 release entry added to TT_RELEASES. Zip time-tracker-v1.6.zip.
+
+## (was START HERE) STAFF INBOX + FAQ (11-18, stamp "11-18 inbox faq"). Built on top of About + feedback (section below).
+
+Brent 11-18: inbox option 3 (title kept + small Mail | Blog switch beside it,
+design/inbox2.html) with all four extras; FAQ layout D + F (design/faq.html);
+Claude FAQ suggestions = OPTION 1 for now (option 2 saved in the Project doc
+claude/FAQ-CLAUDE-OPTION2.md).
+
+SERVER (LIVE as migration `faq`; db/08_faq.sql, tests db/09_faq_tests.sql;
+db/run.sh 234/234; 13/14 mutants caught - the 14th is the publish guard backed
+by the explicit "only an owner publishes" refusal):
+- support.faq (question<=200, answer<=3000, topic<=30, guide = a manual guide
+  id for "Show me how", published, sort, source = the inbox item), faq_votes
+  (one per person per entry), faq_suggestions (status suggested|accepted|
+  dismissed, asked count, sources, created_by).
+- faq_list() - ANYONE incl. signed out (granted to anon). faq_vote(id, true|
+  false|null) signed in, published only. Staff: faq_all (drafts + yes/no
+  counts), faq_save(id|null, e) (helpers draft; ONLY OWNERS publish; e.source
+  must be an item the caller can reach; e.notify posts ONE "faq:added" staff
+  message in the sender's thread; e.suggestion marks it accepted), faq_delete
+  (owner), faq_suggestions, faq_suggestion_set(id, suggested|dismissed).
+- support.suggest(question, answer, topic, guide, asked, sources, note, by) is
+  NOT callable from the app - it's how Claude adds suggestions (option 1)
+  through execute_sql. Skips exact duplicates of an entry or open suggestion.
+- BUG FOUND by the tests: a helper could hang an entry on an item not
+  assigned to them (support.access() returned null and `null not in (...)` is
+  null, not true). Fixed with coalesce. LESSON: wrap access() in coalesce
+  wherever it is compared with NOT IN.
+
+HOW TO DO OPTION 1 (when Brent asks "check the inbox for FAQ ideas"):
+  select f.kind, f.body, f.status, f.fixed_in, (select string_agg(m.body, ' | ')
+    from support.messages m where m.feedback_id=f.id and m.by_staff and not m.internal
+    and m.event is null) as replies from support.feedback f where f.created_at > now()-interval '30 days';
+  -> group repeats (no names/emails in what you write), draft plain answers in
+  the app's own screen names, then for each:
+  select support.suggest('Question?', 'Answer.', 'Topic', 'guide-id-or-null', <asked>, array[<ids>]::uuid[], null, 'claude');
+  Check guide ids against helpAll().guides keys (sync, setpay, signin, ...).
+  Brent then Accepts / Edits / Dismisses in Inbox > FAQ.
+
+APP:
+- About gets a "Feedback inbox" row for staff only (fb.staff), "N new".
+- StaffInboxModal: Modal gained `titleAside` (control beside the title); the
+  switch is the app's own Toggle (name inboxview -> data-anchor
+  set-inboxview), width 9.6rem. Search (server, 400 ms debounce), status chips
+  with counts (local filter, ttFbFilter/ttFbCounts), Everyone's / Assigned to
+  me / Unassigned (owner only), FAQ and Team buttons. Mail = cards with Reply /
+  Planned / Fixed / Close (the current status's button is off); tap a card =
+  item screen. Blog = FbBlogPost with the whole thread (threads fetched for the
+  first 15 shown, "Show more"; opening Blog reads them, so they count as read),
+  inline Reply / Internal note. Reply in Mail -> Blog focused on that post with
+  its box focused + "Back to Mail" (restores scroll). View remembered in
+  ttfb_inboxview (not tt_).
+- StaffItemModal (T1): details line, Status / Fixed in / Priority / Assigned
+  to (helpers: assign disabled), thread with notes (yellow) and event lines
+  (assign names the teammate), Reply | Internal note chips + box (Save button
+  = Reply / Add note), Add to FAQ (FaqEditModal prefilled: question = first
+  line, answer = last staff reply, source, notify on), owner hold-to-delete.
+- StaffTeamModal (T2): rows, owner adds helper by email (+name), hold to remove.
+- StaffFaqModal: "Suggestions ✦ Claude" (Accept = editor with publish on for
+  owners; Edit = draft; Dismiss) + entries (Published/Draft, N helped / N
+  didn't) + New question. FaqEditModal: question, answer, topic (+chips),
+  Show me how (guide select), Published switch (owner) / "An owner publishes
+  it" (helper), Tell the sender (when from an item), owner hold-to-delete.
+- FaqModal (D): Menu > User Manual > FAQ (between Guides and About; anchor
+  faq). Search, topics, tap to open, Show me how (opens GuidesModal at that
+  guide via new `initial` prop), Did this help? Yes/No (signed out: kept in
+  ttfaq_votes on the device only, nothing sent), No -> "Tell us what's
+  missing" -> Send feedback prefilled; Still stuck at the foot. Works offline
+  from ttfaq_cache (not tt_); refreshed on FAQ/Send open (30 min) and 4 s after
+  app open (at most every 6 h). ttCloud.publicRequest() = anon request.
+- Manual search includes cached FAQ entries (kind "faq" -> FaqModal at it).
+- F: FeedbackSendModal matches the FAQ as you type (problem/question only;
+  ttFaqMatch: >=2 shared words incl. one in the question, simple stemming,
+  best two); FaqHint sits LAST so nothing moves; Send becomes "Send anyway";
+  Read opens the FAQ at that answer. FeedbackSendModal takes `prefill`.
+- Reporter's thread shows the faq:added line in green with its words.
+- Manual guide `feedback` -> "About Time Tracker, the FAQ and feedback": two
+  new steps (stage fbsend ask:true with HELP_FB_FAQ(), stage faq).
+- Tests: feedback.js 160 (17/17 new mutants caught); e2e block "feedback inbox
+  & FAQ, 11-18" (57, stand-in fserver.js extended from the SQL); boot 456.
+  FULL RUN at "11-18 inbox faq": e2e 1013/1013 (one earlier run failed only
+  "nothing goes to the server signed out" - now "nothing but the public FAQ",
+  since a signed-out device reads faq_list by design). Unit: tt-tests 1901,
+  boot 456, feedback 160, account 67, sync 85, reminders 85, lifecycle 646,
+  shift 46; db/run.sh 234.
+  e2e GOTCHA again: tap right after filling/selecting in a sheet = dropped
+  (scroll guard) - wait ~450 ms before tapping Save/Publish.
+
+## START HERE - ABOUT + DEVELOPER FEEDBACK (11-17, stamp "11-17 about feedback", APP_VERSION still 1.5.4 - Brent names the version at push). WAITING ON: Brent's pick of the staff inbox layout (design/inbox.html, A-E + T1 item + T2 team). THEN project sharing.
+
+Brent's answers (11-17): layout C (header + rows that open), feedback needs
+sign-in, managed from an in-app staff inbox first.
+
+SERVER (LIVE on the sandbox as migration `developer_feedback`; db/06_support.sql,
+tests db/07_support_tests.sql; db/run.sh 193/193; mutation-checked - the four
+"misses" are guards a second rule also enforces: table checks, the FK on
+assignee, the schema lock):
+- schema `support` (not exposed, no grants, RLS on with no policies): staff
+  (owner|helper, name), feedback (kind problem|idea|question|praise, body
+  <=4000, app jsonb <=2000 chars, status new|open|waiting|planned|fixed|closed,
+  priority, assignee, tags<=8, fixed_in, last_at), messages (by_staff,
+  internal, event "status:x"/"assign:x"), seen (per person per thread).
+- ONLY the public.fb_* security-definer functions reach it: fb_send (5/hour,
+  20/day), fb_mine, fb_thread (marks read), fb_reply (reporter reply on
+  waiting/fixed/closed reopens; 30/hour), fb_unread {mine, staff, inbox},
+  staff: fb_inbox(q {status[],who me|none|all,kind,text}), fb_update(id, ch
+  {status,fixed_in,priority,tags,assignee}), fb_delete (owner), fb_team,
+  fb_team_set(email, role|null, name) (owner; last owner can't leave).
+- Reporter never sees internal notes, staff fields, other items. Helper sees
+  only items assigned to them. Owner sees all. Deleting a user cascades.
+- Brent's account is OWNER (added by hand 11-17). Advisor notes for these
+  functions ("security definer executable by authenticated") are by design,
+  the same as the sharing functions.
+
+APP (built, all suites green):
+- Menu > User Manual > "About Time Tracker" (data-groupkey="about"; pill with
+  replies waiting). AboutModal: AboutHero (version + TT_BUILD read from the
+  boot line + "Developed at Hiatt Studios"), rows data-aboutrow new | history
+  | send | mine | privacy, each a nested sheet with trail "... > About".
+- TT_RELEASES (beside APP_VERSION, newest first): short plain lines per
+  version 1.0 -> 1.5.4. feedback.js FAILS if TT_RELEASES[0].v !== APP_VERSION:
+  when Brent names the next version, add its entry at the same time.
+- ttFeedback (ttFeedbackMake({cloud})): thin client over the fb_* RPCs;
+  badge counts refreshed at most every 5 min (forced on About / thread);
+  cleared on sign-out; draft in ttfb_draft (not tt_: no backups, no sync).
+- FeedbackSendModal (F1): kind chips, words, "Include app details" switch
+  showing the exact words sent (ttFbAppInfo: version, build, device, OS,
+  screen, home-screen, theme, mode, hand, sync rate - never the board).
+  Signed out -> FbSignIn -> Account. MyFeedbackModal (F2) with status pills,
+  "New reply"; FeedbackThreadModal: bubbles, event lines, reply box.
+- The mock's "Reply to me" switch was dropped: replies always show in My feedback.
+- Manual: guide `feedback` under a new topic "About & feedback" (stages
+  about, fbsend, fbmine, fbthread).
+- Tests: feedback.js 85 (mutation-checked), e2e block "about & feedback,
+  11-17" (30; stand-in fserver.js written from the SQL), boot 452.
+- Full e2e 11-17: 952 checks. Run 1: one stale check (User Manual group now
+  Guides|About Time Tracker|Leave Practice Board) - fixed. Run 2: one flake,
+  "reminders: the practice board never reminds" (passed 3/3 alone) - watch it.
+- INBOX: Brent likes D (mail) AND E (blog) together: a Mail | Blog switch in
+  the inbox. Mock design/inbox2.html: 1 slide toggle in place of the title
+  (recommended), 2 two buttons, 3 title + small toggle, 4 toggle in the
+  sticky action box; extras proposed: Reply in Mail opens Blog at that
+  thread, shared filters/search, view remembered per device. Awaiting pick.
+- STILL TO BUILD after Brent's pick: the staff inbox (row on About for staff,
+  list, T1 item controls, internal notes, T2 team with hold-to-remove).
 
 ## START HERE - 1.5.3 (11-17, stamp "11-17 v1.5.3"): FIX for a live sync loop on 1.5.2. NEXT: About + Developer Feedback, THEN project sharing.
 
